@@ -106,7 +106,7 @@ export async function GET(req: Request) {
   const session = issueSessionToken(user.id);
 
   const headers = new Headers();
-  headers.set("Location", parsedState.next || (parsedState.role === "supplier" ? "/vendor" : "/"));
+  headers.set("Location", parsedState.next || (parsedState.role === "supplier" ? "/sources" : "/"));
   headers.append("Set-Cookie", sessionCookieHeader(session));
   headers.append("Set-Cookie", "aup_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
   return new Response(null, { status: 302, headers });

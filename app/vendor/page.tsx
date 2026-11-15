@@ -78,6 +78,12 @@ export default function VendorPage() {
   const router = useRouter();
   const [agreed, setAgreed] = useState(true);
   const [termsOpen, setTermsOpen] = useState(false);
+  const [googleEnabled, setGoogleEnabled] = useState(false);
+  const [sessionUser, setSessionUser] = useState<{
+    email?: string;
+    role?: string;
+    isSupplier?: boolean;
+  } | null>(null);
 
   const [selectedModule, setSelectedModule] = useState<ModuleKind>("gemini");
   const [claudeMode, setClaudeMode] = useState<"oauth_pool" | "api_key">("oauth_pool");
@@ -98,6 +104,22 @@ export default function VendorPage() {
   const [busy, setBusy] = useState(false);
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const initialCountRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => {
+        setGoogleEnabled(Boolean(d.googleEnabled));
+        if (d.user) {
+          setSessionUser(d.user);
+          // 已是節點夥伴 session → 直接進控制台
+          if (d.user.role === "supplier" || d.user.isSupplier) {
+            router.replace("/sources");
+          }
+        }
+      })
+      .catch(() => {});
+  }, [router]);
 
   // 記錄初始節點數；本機監聽器自動完成 Google OAuth 時自動跳轉 /sources
   useEffect(() => {
@@ -294,7 +316,7 @@ export default function VendorPage() {
         </div>
         <div className="row" style={{ gap: 12 }}>
           <Link href="/sources" className="vendor-back">
-            已綁定節點？直接進 /sources 控制台 →
+            控制台 /sources →
           </Link>
           <Link href="/" className="vendor-back">
             ← 雲端工作台（聊天首頁 /）
@@ -312,9 +334,41 @@ export default function VendorPage() {
           </p>
         </section>
 
+        {/* === 回訪夥伴：網站 Google 登入 → /sources === */}
+        <section className="card vendor-card" style={{ borderColor: "var(--accent)", marginBottom: 16 }}>
+          <h2 style={{ marginTop: 0, marginBottom: 6 }}>已是節點夥伴？下次這樣回來</h2>
+          <p className="muted" style={{ marginTop: 0, marginBottom: 12, fontSize: 13, lineHeight: 1.6 }}>
+            用<strong>網站 Google 帳號</strong>登入（與模組 OAuth 分開），系統會標成節點夥伴並<strong>直接進入 /sources</strong>。
+            {sessionUser?.email ? (
+              <>
+                <br />
+                目前已登入：{sessionUser.email}
+              </>
+            ) : null}
+          </p>
+          <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
+            {googleEnabled ? (
+              <a
+                className="primary"
+                href="/api/auth/google/start?role=supplier&next=/sources"
+                style={{ textDecoration: "none", display: "inline-block", padding: "10px 16px" }}
+              >
+                Google 登入 → 直達 /sources 控制台
+              </a>
+            ) : (
+              <span className="muted" style={{ fontSize: 13 }}>
+                尚未設定網站 Google 登入（BUYER_GOOGLE_CLIENT_ID）。可先用下方連結進入控制台。
+              </span>
+            )}
+            <Link href="/sources" className="vendor-back" style={{ alignSelf: "center" }}>
+              略過登入，直接開 /sources →
+            </Link>
+          </div>
+        </section>
+
         {/* === 核心：直接顯示模組選擇卡片 → OAuth 授權完成自動跳 /sources === */}
         <section className="card vendor-card vendor-auth" id="join" style={{ borderColor: "var(--ok)" }}>
-          <h2 style={{ marginTop: 0, marginBottom: 4 }}>選擇算力模組並啟動 OAuth 授權</h2>
+          <h2 style={{ marginTop: 0, marginBottom: 4 }}>第一次加入：選擇算力模組並啟動 OAuth 授權</h2>
           <p className="muted" style={{ marginTop: 0, marginBottom: 14, fontSize: 13 }}>
             免申請網站帳號密碼——點選下方任一模組完成官方授權後，立即跳轉至 <code>/sources</code> 設定分配用量與查看回饋金額換算。
           </p>

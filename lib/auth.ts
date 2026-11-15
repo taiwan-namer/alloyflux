@@ -272,7 +272,8 @@ export function publicUser(u: User) {
 
 export function homePathFor(u: User): string {
   if (u.isAdmin) return "/admin";
-  if (u.role === "supplier") return "/vendor";
+  // 回訪節點夥伴：網站 Google 登入後直達控制台
+  if (u.role === "supplier") return "/sources";
   return "/";
 }
 

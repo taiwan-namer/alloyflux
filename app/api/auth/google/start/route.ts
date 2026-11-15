@@ -3,8 +3,10 @@ import { hmacSign, randomToken } from "@/lib/crypto";
 
 export const dynamic = "force-dynamic";
 
-function sanitizeNextPath(raw: string | null): string {
-  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/";
+function sanitizeNextPath(raw: string | null, role: "buyer" | "supplier"): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) {
+    return role === "supplier" ? "/sources" : "/";
+  }
   return raw;
 }
 
@@ -15,7 +17,7 @@ export async function GET(req: Request) {
 
   const url = new URL(req.url);
   const role = url.searchParams.get("role") === "supplier" ? "supplier" : "buyer";
-  const nextPath = sanitizeNextPath(url.searchParams.get("next"));
+  const nextPath = sanitizeNextPath(url.searchParams.get("next"), role);
 
   const stateObj = JSON.stringify({
     n: randomToken(16),
