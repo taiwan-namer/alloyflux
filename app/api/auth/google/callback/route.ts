@@ -59,6 +59,7 @@ export async function GET(req: Request) {
     return Response.redirect(new URL("/?auth_error=invalid_state", req.url));
   }
 
+  const redirectUri = buyerGoogleRedirectUri(req);
   const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -66,7 +67,7 @@ export async function GET(req: Request) {
       code,
       client_id: process.env.BUYER_GOOGLE_CLIENT_ID!,
       client_secret: process.env.BUYER_GOOGLE_CLIENT_SECRET!,
-      redirect_uri: buyerGoogleRedirectUri(),
+      redirect_uri: redirectUri,
       grant_type: "authorization_code",
     }),
   });

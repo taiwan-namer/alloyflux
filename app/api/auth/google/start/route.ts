@@ -27,9 +27,10 @@ export async function GET(req: Request) {
   });
   const stateToken = `${Buffer.from(stateObj).toString("base64url")}.${hmacSign(stateObj)}`;
 
+  const redirectUri = buyerGoogleRedirectUri(req);
   const params = new URLSearchParams({
     client_id: process.env.BUYER_GOOGLE_CLIENT_ID!,
-    redirect_uri: buyerGoogleRedirectUri(),
+    redirect_uri: redirectUri,
     response_type: "code",
     scope: "openid email profile",
     access_type: "online",
@@ -37,11 +38,12 @@ export async function GET(req: Request) {
     state: stateToken,
   });
 
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
   return new Response(null, {
     status: 302,
     headers: {
       Location: `https://accounts.google.com/o/oauth2/v2/auth?${params}`,
-      "set-cookie": `aup_oauth_state=${stateToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600`,
+      "set-cookie": `aup_oauth_state=${stateToken}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600${secure}`,
     },
   });
 }

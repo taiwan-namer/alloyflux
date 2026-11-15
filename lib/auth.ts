@@ -287,9 +287,47 @@ export function buyerGoogleConfigured(): boolean {
   return Boolean(process.env.BUYER_GOOGLE_CLIENT_ID?.trim() && process.env.BUYER_GOOGLE_CLIENT_SECRET?.trim());
 }
 
-export function buyerGoogleRedirectUri(): string {
-  return (
-    process.env.BUYER_GOOGLE_REDIRECT_URI?.trim() ||
-    "http://127.0.0.1:3000/api/auth/google/callback"
-  );
+/**
+ * 網站 Google 登入回呼。優先跟「使用者當下開啟的網域」一致，
+ * 避免 Vercel 預設網域與自訂網域不一致時卡在 accounts.google.com（redirect_uri_mismatch）。
+ */
+export function buyerGoogleRedirectUri(req?: Request): string {
+  const explicit = process.env.BUYER_GOOGLE_REDIRECT_URI?.trim();
+  const fallback =
+    explicit ||
+    (() => {
+      const app = process.env.NEXT_PUBLIC_APP_URL?.trim()?.replace(/\/$/, "");
+      return app ? `${app}/api/auth/google/callback` : "http://127.0.0.1:3000/api/auth/google/callback";
+    })();
+
+  if (!req) return fallback;
+
+  try {
+    const origin = new URL(req.url).origin;
+    const allowed = new Set<string>();
+    for (const raw of [
+      process.env.NEXT_PUBLIC_APP_URL,
+      process.env.OAUTH_CLOUD_API_BASE,
+      explicit ? new URL(explicit).origin : "",
+      "https://alloyflux.vercel.app",
+    ]) {
+      const v = raw?.trim();
+      if (!v) continue;
+      try {
+        allowed.add(new URL(v).origin);
+      } catch {
+        // ignore
+      }
+    }
+    // 本機開發
+    if (origin.includes("localhost") || origin.includes("127.0.0.1")) {
+      return `${origin}/api/auth/google/callback`;
+    }
+    if (allowed.has(origin)) {
+      return `${origin}/api/auth/google/callback`;
+    }
+  } catch {
+    // ignore
+  }
+  return fallback;
 }
