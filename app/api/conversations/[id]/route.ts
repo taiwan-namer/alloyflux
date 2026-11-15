@@ -1,4 +1,5 @@
 import { getSessionUser, jsonError } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { getOrCreateGuestIdentity } from "@/lib/free-tier";
 import { deleteConversation, getConversation, listMessages } from "@/lib/store";
 
@@ -11,6 +12,8 @@ async function resolveActorId(req: Request): Promise<string> {
 }
 
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const actorId = await resolveActorId(req);
     const { id } = await ctx.params;
@@ -23,6 +26,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
 }
 
 export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const actorId = await resolveActorId(req);
     const { id } = await ctx.params;

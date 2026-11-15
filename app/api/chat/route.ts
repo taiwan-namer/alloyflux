@@ -4,6 +4,7 @@ import { AUTO_MODEL_ID, applyDeepThink, resolveAutoModel, type AutoDecision } fr
 import { isAbortError, ModelNotInCatalogError, type ChatImage, type ChatMessage } from "@/lib/providers";
 import { slideMessagesForUpstream } from "@/lib/context-window";
 import { getSessionUser, jsonError } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { getFreeDailyStatus, getOrCreateGuestIdentity, isFreeTierModel } from "@/lib/free-tier";
 import {
   addUserMessage,
@@ -38,6 +39,8 @@ function normalizeImages(raw: unknown): ChatImage[] {
 }
 
 export async function POST(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const sessionUser = await getSessionUser(req);
     const guest = sessionUser ? null : getOrCreateGuestIdentity(req);

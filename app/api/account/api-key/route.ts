@@ -1,4 +1,5 @@
 import { jsonError, requireUser } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { createUserApiKey, listUserApiKeys } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -8,6 +9,8 @@ export const dynamic = "force-dynamic";
  * 新介面請改用 /api/account/api-keys。
  */
 export async function POST(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const user = await requireUser(req);
     const body = (await req.json().catch(() => ({}))) as { label?: string };

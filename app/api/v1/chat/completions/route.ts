@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { slideMessagesForUpstream } from "@/lib/context-window";
 import { NoSourceError, routeChat } from "@/lib/gateway";
 import { findModel } from "@/lib/models";
@@ -56,6 +57,8 @@ function sse(data: unknown): string {
  * system／developer 會合併為 customSystemPrompt 透傳上游。
  */
 export async function POST(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   const auth = await authenticatePlatformApiKey(req);
   if (!auth) {
     return Response.json(

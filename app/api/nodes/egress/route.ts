@@ -1,9 +1,12 @@
 import { jsonError, requireAdmin } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { listNodes } from "@/lib/node-registry";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     await requireAdmin(req);
     const nodes = await listNodes();

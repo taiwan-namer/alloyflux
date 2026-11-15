@@ -1,4 +1,5 @@
 import { jsonError, requireUser } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { getFreeDailyStatus } from "@/lib/free-tier";
 import { redeemCode } from "@/lib/redeem";
 import { balance, quotaCapFromLedger } from "@/lib/store";
@@ -6,6 +7,8 @@ import { balance, quotaCapFromLedger } from "@/lib/store";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const user = await requireUser(req);
     const body = (await req.json()) as { code?: string };

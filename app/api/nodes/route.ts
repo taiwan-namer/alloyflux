@@ -1,10 +1,13 @@
 import { jsonError, requireAdmin } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { listNodes, revokeNode } from "@/lib/node-registry";
 import { listEarnings } from "@/lib/supplier-settlement";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     await requireAdmin(req);
     const nodes = (await listNodes()).map((n) => ({
@@ -30,6 +33,8 @@ export async function GET(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     await requireAdmin(req);
     const id = new URL(req.url).searchParams.get("id");

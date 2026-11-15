@@ -1,3 +1,4 @@
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { decrypt } from "@/lib/crypto";
 import { db } from "@/lib/db";
 import { CATEGORY_LABEL, MODELS } from "@/lib/models";
@@ -7,7 +8,9 @@ import { listSources } from "@/lib/sources";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   const sources = (await listSources()).filter((s) => s.enabled);
   let antigravityIds = new Set<string>();
   try {

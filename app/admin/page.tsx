@@ -675,9 +675,7 @@ export default function AdminPage() {
           <Link href="/sources" className="adm-btn">
             前往 /sources 綁定授權
           </Link>
-          {ov?._fromCloud ? (
-            <span className="adm-pill adm-pill-ok">資料來源：雲端 {ov._cloudApiBase ?? ""}</span>
-          ) : null}
+          <span className="adm-pill adm-pill-ok">資料來源：雲端 Supabase（本機無 DB 時自動代理）</span>
         </div>
 
         <section className="adm-section">

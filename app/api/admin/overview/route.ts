@@ -1,8 +1,8 @@
 import { jsonError } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { db } from "@/lib/db";
 import { taipeiDayStartMs } from "@/lib/free-tier";
 import { listNodes } from "@/lib/node-registry";
-import { cloudApiBase, hasLocalDatabaseUrl } from "@/lib/oauth-persist";
 import { listSources } from "@/lib/sources";
 import { listEarnings } from "@/lib/supplier-settlement";
 
@@ -16,70 +16,11 @@ async function settled<T>(p: Promise<T>, fallback: T): Promise<T> {
   }
 }
 
-/** 本機無 DB 時改讀雲端總覽（與 /sources 同一份 Supabase 資料） */
-async function fetchCloudOverview(req: Request): Promise<Response | null> {
-  if (req.headers.get("x-admin-no-proxy") === "1") return null;
-  try {
-    const res = await fetch(`${cloudApiBase()}/api/admin/overview`, {
-      cache: "no-store",
-      headers: { "x-admin-no-proxy": "1" },
-    });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return Response.json({ ...data, _fromCloud: true, _cloudApiBase: cloudApiBase() });
-  } catch {
-    return null;
-  }
-}
-
-async function fetchCloudSources(): Promise<Awaited<ReturnType<typeof listSources>>> {
-  try {
-    const res = await fetch(`${cloudApiBase()}/api/sources`, {
-      cache: "no-store",
-      headers: { "x-oauth-no-proxy": "1" },
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
-  } catch {
-    return [];
-  }
-}
-
 export async function GET(req: Request) {
-  try {
-    // 本機開發常無 DATABASE_URL：直接代理雲端，否則後台水庫全 0
-    if (!hasLocalDatabaseUrl()) {
-      const cloud = await fetchCloudOverview(req);
-      if (cloud) return cloud;
-      const sources = await fetchCloudSources();
-      return Response.json({
-        stats: {
-          totalUsers: 0,
-          totalPartners: 0,
-          oauthSupplierSources: sources.filter((s) => s.kind === "supplier").length,
-          partnerNodes: sources.filter((s) => s.kind === "supplier").length,
-          todayMessages: 0,
-          todayFreeMessages: 0,
-          weekTopupPoints: 0,
-          weekSourceCostPoints: 0,
-          enabledSources: sources.filter((s) => s.enabled).length,
-          totalSources: sources.length,
-          onlineNodes: 0,
-          totalNodes: 0,
-        },
-        sources,
-        nodes: [],
-        earnings: [],
-        jobStats: [],
-        recentUsers: [],
-        recentLedger: [],
-        _fromCloud: true,
-        _cloudApiBase: cloudApiBase(),
-        _partial: true,
-      });
-    }
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
 
+  try {
     const dayStart = taipeiDayStartMs();
     const weekStart = Date.now() - 7 * 86_400_000;
 
@@ -205,6 +146,7 @@ export async function GET(req: Request) {
         note: l.note ? String(l.note) : null,
         createdAt: Number(l.createdAt ?? 0),
       })),
+      _fromCloud: false,
     });
   } catch (e) {
     return jsonError(e);

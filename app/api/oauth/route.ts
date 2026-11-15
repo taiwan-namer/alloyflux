@@ -16,7 +16,7 @@ import {
   cloudSourcesUrl,
   persistOAuthViaCloud,
   shouldProxyOAuthPersist,
-} from "@/lib/oauth-persist";
+} from "@/lib/cloud-api";
 import {
   addOAuthSubscriptionSource,
   syncAllSubscriptionQuotas,

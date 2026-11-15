@@ -1,10 +1,13 @@
 import { jsonError, requireUser } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { getFreeDailyStatus } from "@/lib/free-tier";
 import { balance, quotaCapFromLedger, usageSummary } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const user = await requireUser(req);
     const bal = await balance(user.id);

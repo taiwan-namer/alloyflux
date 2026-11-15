@@ -1,9 +1,12 @@
-import { jsonError, requireSupplier } from "@/lib/auth";
+import { jsonError } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { deleteSource, updateSource } from "@/lib/sources";
 
 export const dynamic = "force-dynamic";
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const { id } = await params;
     const patch = (await req.json()) as {
@@ -19,7 +22,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
 }
 
-export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const { id } = await params;
     await deleteSource(id);

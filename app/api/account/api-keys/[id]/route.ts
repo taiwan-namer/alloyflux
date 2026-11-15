@@ -1,10 +1,13 @@
 import { jsonError, requireUser } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { deleteUserApiKey, listUserApiKeys } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
 /** 刪除／撤銷指定金鑰（立即失效） */
 export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const user = await requireUser(req);
     const { id } = await ctx.params;

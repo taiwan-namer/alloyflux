@@ -1,9 +1,12 @@
 import { jsonError } from "@/lib/auth";
+import { cloudDbProxy } from "@/lib/cloud-api";
 import { createRedeemCode, listRecentRedeemCodes } from "@/lib/redeem";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     return Response.json({ codes: await listRecentRedeemCodes(30) });
   } catch (e) {
@@ -12,6 +15,8 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
   try {
     const body = (await req.json().catch(() => ({}))) as {
       points?: number;
