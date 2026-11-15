@@ -16,9 +16,17 @@ interface ModelOption {
   categoryLabel?: string;
   quotaPool?: string;
   tier?: "top" | "main" | "light";
+  freeTier?: boolean;
   effort?: Effort | null;
   available: boolean;
   note?: string;
+}
+
+interface FreeQuota {
+  used: number;
+  limit: number;
+  remaining: number;
+  resetAtMs: number;
 }
 
 interface Conversation {
@@ -910,6 +918,14 @@ export default function ChatPage() {
   const [composerHint, setComposerHint] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [hasPaidAccess, setHasPaidAccess] = useState(false);
+  const [freeQuota, setFreeQuota] = useState<FreeQuota>({
+    used: 0,
+    limit: 20,
+    remaining: 20,
+    resetAtMs: 0,
+  });
+  const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [googleEnabled, setGoogleEnabled] = useState(false);
@@ -966,7 +982,7 @@ export default function ChatPage() {
       setWallet(null);
       return;
     }
-    const data = (await res.json()) as Wallet;
+    const data = (await res.json()) as Wallet & { hasPaidAccess?: boolean; freeQuota?: FreeQuota };
     const next: Wallet = {
       ...data,
       balance: data.balance ?? 0,
@@ -974,6 +990,8 @@ export default function ChatPage() {
       usage: data.usage ?? { messages: 0, chargedPoints: 0, officialPoints: 0 },
     };
     setWallet(next);
+    if (typeof data.hasPaidAccess === "boolean") setHasPaidAccess(data.hasPaidAccess);
+    if (data.freeQuota) setFreeQuota(data.freeQuota);
     return next;
   }, []);
   const refreshModels = useCallback(async () => {
@@ -993,23 +1011,20 @@ export default function ChatPage() {
     try {
       const data = await (await fetch("/api/auth/me", { cache: "no-store" })).json();
       setGoogleEnabled(Boolean(data.googleEnabled));
+      if (data.freeQuota) setFreeQuota(data.freeQuota);
       if (data.user) {
-        if (data.redirect && data.redirect !== "/" && typeof window !== "undefined") {
-          const path = window.location.pathname;
-          if (path === "/" && data.user.role === "supplier" && !data.user.isAdmin) {
-            window.location.href = "/sources";
-            return;
-          }
-        }
         setAuthUser(data.user);
+        const bal = data.balance ?? 0;
+        setHasPaidAccess(Boolean(data.hasPaidAccess ?? (data.user.isAdmin || bal > 0)));
         setWallet({
-          balance: data.balance ?? 0,
-          quotaCap: normalizeQuotaCap(data.balance ?? 0, data.quotaCap),
+          balance: bal,
+          quotaCap: normalizeQuotaCap(bal, data.quotaCap),
           usage: data.usage ?? { messages: 0, chargedPoints: 0, officialPoints: 0 },
           apiKey: data.user.apiKey,
         });
       } else {
         setAuthUser(null);
+        setHasPaidAccess(false);
         setWallet(null);
       }
     } finally {
@@ -1019,14 +1034,14 @@ export default function ChatPage() {
 
   useEffect(() => {
     void refreshMe();
-  }, [refreshMe]);
+    void refreshModels();
+  }, [refreshMe, refreshModels]);
 
   useEffect(() => {
-    if (!authUser) return;
-    refreshModels();
-    refreshConversations();
-    refreshWallet();
-  }, [authUser, refreshModels, refreshConversations, refreshWallet]);
+    if (authLoading) return;
+    void refreshConversations();
+    if (authUser) void refreshWallet();
+  }, [authLoading, authUser, refreshConversations, refreshWallet]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -1054,16 +1069,18 @@ export default function ChatPage() {
         provider?: string;
         quotaPool?: string;
         tier?: ModelOption["tier"];
+        freeTier: boolean;
         available: boolean;
         note?: string;
         efforts: Effort[];
         sort: number;
       }
     >();
+    const anyUpstreamReady = models.some((m) => m.category !== "node-agent" && m.available);
     for (const m of models) {
-      // 供給者 Node Agent、目錄未開放的模型：不進買家選單
       if (m.category === "node-agent") continue;
-      if (!m.available) continue;
+      // 若全站已有可用貨源，隱藏目錄未開的模型；若全站尚無貨源，保留顯示讓介面完整可見
+      if (anyUpstreamReady && !m.available) continue;
       const prev = map.get(m.familyId);
       const efforts = new Set(prev?.efforts ?? []);
       if (m.effort) efforts.add(m.effort);
@@ -1111,6 +1128,7 @@ export default function ChatPage() {
         provider: m.provider,
         quotaPool: m.quotaPool,
         tier: prev?.tier ?? m.tier,
+        freeTier: Boolean(prev?.freeTier || (m.freeTier && (!m.effort || m.effort === "low" || m.effort === "medium"))),
         available: (prev?.available ?? false) || m.available,
         note: m.available ? prev?.note : m.note ?? prev?.note,
         efforts: [...efforts].sort((a, b) => EFFORTS.indexOf(a) - EFFORTS.indexOf(b)),
@@ -1121,8 +1139,9 @@ export default function ChatPage() {
   }, [models]);
 
   const isAuto = familyId === AUTO_FAMILY_ID;
-  const anyAvailable = models.some((m) => m.available);
+  const anyAvailable = models.some((m) => m.category !== "node-agent" && m.available);
   const currentFamily = isAuto ? undefined : familyOptions.find((f) => f.familyId === familyId);
+  const currentLocked = Boolean(!isAuto && currentFamily && !hasPaidAccess && !currentFamily.freeTier);
   // 網頁版一律送 low 變體；深度思考由 deepThink 旗標交給後端換 medium
   const baseEffort: Effort | null = currentFamily?.efforts.length
     ? currentFamily.efforts.includes("low")
@@ -1142,7 +1161,7 @@ export default function ChatPage() {
       }
     : (models.find((m) => m.id === modelId) ?? models.find((m) => m.familyId === familyId));
   const brand = brandFromModel(familyId, currentModel?.provider ?? currentFamily?.provider, currentFamily?.category);
-  const showDeepThink = !isAuto && currentFamily?.tier === "top";
+  const showDeepThink = !isAuto && hasPaidAccess && currentFamily?.tier === "top";
 
   useEffect(() => {
     setDeepThink(false);
@@ -1206,28 +1225,36 @@ export default function ChatPage() {
       setAuthError(data.error || "登入失敗");
       return;
     }
-    if (data.redirect && data.redirect !== "/") {
+    if (data.redirect && data.redirect !== "/" && authRole === "supplier") {
       window.location.href = data.redirect;
       return;
     }
+    const bal = data.balance ?? 0;
     setAuthUser(data.user);
+    setHasPaidAccess(Boolean(data.user?.isAdmin || bal > 0));
     setWallet({
-      balance: data.balance ?? 0,
-      quotaCap: normalizeQuotaCap(data.balance ?? 0, data.quotaCap),
+      balance: bal,
+      quotaCap: normalizeQuotaCap(bal, data.quotaCap),
       usage: { messages: 0, chargedPoints: 0, officialPoints: 0 },
       apiKey: data.user.apiKey,
     });
+    setAuthModalOpen(false);
+    void refreshMe();
   }
 
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     setAuthUser(null);
+    setHasPaidAccess(false);
     setWallet(null);
     setConversations([]);
     setMessages([]);
     setActiveId(null);
     setAccountOpen(false);
     setSidebarOpen(false);
+    if (currentLocked) setFamilyId(AUTO_FAMILY_ID);
+    void refreshMe();
+    void refreshConversations();
   }
 
   async function redeem() {
@@ -1245,9 +1272,11 @@ export default function ChatPage() {
     }
     setRedeemMsg(data.message || "兌換成功");
     setRedeemInput("");
-    // 立刻用兌換回傳餘額更新 UI，避免被快取的舊 /api/wallet 卡住
+    if (typeof data.hasPaidAccess === "boolean") setHasPaidAccess(data.hasPaidAccess);
+    if (data.freeQuota) setFreeQuota(data.freeQuota);
     if (typeof data.balance === "number") {
       const bal = data.balance as number;
+      if (bal > 0) setHasPaidAccess(true);
       const cap = normalizeQuotaCap(bal, data.quotaCap);
       setWallet((prev) =>
         prev
@@ -1481,6 +1510,12 @@ export default function ChatPage() {
     forceMain?: boolean;
   }) {
     if (busy || !currentModel?.available) return;
+    if (currentLocked) {
+      flashComposerHint("此為高階模型，請先登入並開通雲端工作台服務費方案，或改選各家免費入門模型");
+      if (authUser) setAccountOpen(true);
+      else setAuthModalOpen(true);
+      return;
+    }
     const imgs = opts?.regenerate ? [] : (opts?.images ?? pendingImages);
     let files = opts?.regenerate ? [] : (opts?.files ?? pendingFiles);
     let boxText = opts?.text ?? input;
@@ -1560,9 +1595,16 @@ export default function ChatPage() {
         signal: controller.signal,
       });
       if (!res.ok) {
-        const { error } = await res.json();
+        const { error, code } = await res.json();
         patch((m) => ({ ...m, error }));
-        if (res.status === 402) await refreshWallet();
+        if (res.status === 402) {
+          if (authUser) await refreshWallet();
+          else void refreshMe();
+          if (code === "MODEL_LOCKED" || code === "FREE_QUOTA_EXHAUSTED") {
+            if (authUser) setAccountOpen(true);
+            else setAuthModalOpen(true);
+          }
+        }
         return;
       }
       const reader = res.body!.getReader();
@@ -1589,7 +1631,9 @@ export default function ChatPage() {
             }));
           if (ev.type === "thinking") thinkingTw.push(ev.text);
           if (ev.type === "text") contentTw.push(ev.text);
-          if (ev.type === "done")
+          if (ev.type === "done") {
+            if (ev.freeQuota) setFreeQuota(ev.freeQuota as FreeQuota);
+            if (typeof ev.hasPaidAccess === "boolean") setHasPaidAccess(ev.hasPaidAccess);
             patch((m) => ({
               ...m,
               model: typeof ev.modelId === "string" ? ev.modelId : m.model,
@@ -1609,6 +1653,7 @@ export default function ChatPage() {
               quotaBeforePct: ev.usage?.quotaRemainingBeforePct,
               quotaAfterPct: ev.usage?.quotaRemainingAfterPct,
             }));
+          }
           if (ev.type === "error") patch((m) => ({ ...m, error: ev.message }));
         }
       }
@@ -1634,7 +1679,8 @@ export default function ChatPage() {
       abortRef.current = null;
       setBusy(false);
       refreshConversations();
-      refreshWallet();
+      if (authUser) refreshWallet();
+      else void refreshMe();
     }
   }
 
@@ -1656,108 +1702,6 @@ export default function ChatPage() {
     return (
       <div className="page" style={{ placeItems: "center", display: "grid", minHeight: "100vh" }}>
         <p className="muted">載入中…</p>
-      </div>
-    );
-  }
-
-  if (!authUser) {
-    return (
-      <div className="landing">
-        <section className="landing-hero">
-          <div>
-            <div className="points-badge badge-brand" style={{ marginBottom: 16 }}>
-              AI 用量水庫
-            </div>
-            <h1>四大頂級 AI 模型，一個水庫無限暢聊</h1>
-            <p className="lead">
-              把 Gemini、Claude、GPT、Grok 的高速算力匯成同一個入口——用多少付多少，也能一鍵接入 Cursor。
-            </p>
-          </div>
-          <div className="feature-grid">
-            <article className="feature-card">
-              <h3>破除 5 小時冷卻鎖</h3>
-              <p>多節點智慧路由，週三不撞牆、台灣夜間尖峰不降智。</p>
-            </article>
-            <article className="feature-card">
-              <h3>199 元輕量入場</h3>
-              <p>無需每月綁約 650 元，內含 1,000 可用額度，並支援直接接入 Cursor 寫程式。</p>
-            </article>
-            <article className="feature-card">
-              <h3>Pro / Max 算力夥伴計畫</h3>
-              <p>將您月底作廢的閒置額度託管為工作流節點，領取高達 80% 創作者分潤與跨模型可用額度。</p>
-            </article>
-          </div>
-        </section>
-
-        <section className="landing-auth">
-          <div className="card">
-            <h2 style={{ marginTop: 0, marginBottom: 6 }}>開始使用</h2>
-            <p className="muted" style={{ marginTop: 0, marginBottom: 16, lineHeight: 1.5 }}>
-              使用者聊天與 API 用量；供給者綁定訂閱釋出額度。
-            </p>
-            <div className="auth-tabs">
-              <button type="button" className={authMode === "login" ? "primary" : ""} onClick={() => setAuthMode("login")}>
-                登入
-              </button>
-              <button
-                type="button"
-                className={authMode === "register" ? "primary" : ""}
-                onClick={() => setAuthMode("register")}
-              >
-                註冊
-              </button>
-            </div>
-            {authMode === "register" && (
-              <div className="role-tabs">
-                <button
-                  type="button"
-                  className={authRole === "buyer" ? "primary" : ""}
-                  onClick={() => setAuthRole("buyer")}
-                >
-                  我是使用者
-                </button>
-                <button
-                  type="button"
-                  className={authRole === "supplier" ? "primary" : ""}
-                  onClick={() => setAuthRole("supplier")}
-                >
-                  我是供給者
-                </button>
-              </div>
-            )}
-            <form onSubmit={submitAuth} className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
-              {authMode === "register" && (
-                <label>
-                  暱稱（選填）
-                  <input value={authName} onChange={(e) => setAuthName(e.target.value)} />
-                </label>
-              )}
-              <label>
-                Email
-                <input type="email" required value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} />
-              </label>
-              <label>
-                密碼
-                <input
-                  type="password"
-                  required
-                  minLength={6}
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                />
-              </label>
-              <button type="submit" className="primary" style={{ padding: "12px 16px", fontWeight: 600 }}>
-                {authMode === "login" ? "登入" : authRole === "supplier" ? "註冊為供給者" : "註冊為使用者"}
-              </button>
-            </form>
-            {googleEnabled && authRole === "buyer" && (
-              <p style={{ marginTop: 14 }}>
-                <a href="/api/auth/google/start">使用 Google 登入（使用者）</a>
-              </p>
-            )}
-            {authError && <p style={{ color: "var(--danger)" }}>{authError}</p>}
-          </div>
-        </section>
       </div>
     );
   }
@@ -1804,57 +1748,130 @@ export default function ChatPage() {
 
         <div className="sidebar-foot">
           <div className="account-chip">
-            <div className="account-chip-top">
-              <div className="account-name-row">
-                <div className="name" title={authUser.email}>
-                  {authUser.name}
-                </div>
-                <button type="button" className="ghost account-logout-btn" title="登出" onClick={() => void logout()}>
-                  登出
-                </button>
-              </div>
-              <button
-                type="button"
-                className="ghost quota-expand-btn"
-                onClick={() => setAccountOpen(true)}
-                title="擴充可用額度"
-              >
-                ＋擴充
-              </button>
-            </div>
-            {wallet && (
-              <div
-                className={`quota-meter quota-${
-                  wallet.balance / Math.max(1, wallet.quotaCap) < 0.2
-                    ? "low"
-                    : wallet.balance / Math.max(1, wallet.quotaCap) < 0.5
-                      ? "mid"
-                      : "high"
-                }`}
-              >
-                <div className="quota-meter-head">
-                  <span className="quota-meter-title">可用額度</span>
-                  <span className="quota-tier-badge">{quotaTierLabel(wallet.quotaCap)}</span>
-                </div>
-                <div className="quota-meter-nums">
-                  {fmt(wallet.balance, 0)} / {fmt(wallet.quotaCap, 0)}
-                  <span className="muted">
-                    （{Math.round((100 * wallet.balance) / Math.max(1, wallet.quotaCap))}%）
-                  </span>
-                </div>
-                <div className="quota-segments" aria-hidden>
-                  {quotaSegmentFills(wallet.balance, wallet.quotaCap).map((fill, i) => (
-                    <div key={i} className="quota-seg">
-                      <div className="quota-seg-fill" style={{ width: `${Math.round(fill * 100)}%` }} />
+            {authUser ? (
+              <>
+                <div className="account-chip-top">
+                  <div className="account-name-row">
+                    <div className="name" title={authUser.email}>
+                      {authUser.name}
                     </div>
-                  ))}
+                    <button type="button" className="ghost account-logout-btn" title="登出" onClick={() => void logout()}>
+                      登出
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost quota-expand-btn"
+                    onClick={() => setAccountOpen(true)}
+                    title={hasPaidAccess ? "擴充雲端工作台額度" : "開通雲端工作台方案"}
+                  >
+                    {hasPaidAccess ? "＋擴充" : "＋開通"}
+                  </button>
                 </div>
-              </div>
-            )}
-            {authUser.isSupplier && (
-              <Link href="/sources" style={{ fontSize: 12 }}>
-                供給者貨源 →
-              </Link>
+                {hasPaidAccess && wallet ? (
+                  <div
+                    className={`quota-meter quota-${
+                      wallet.balance / Math.max(1, wallet.quotaCap) < 0.2
+                        ? "low"
+                        : wallet.balance / Math.max(1, wallet.quotaCap) < 0.5
+                          ? "mid"
+                          : "high"
+                    }`}
+                  >
+                    <div className="quota-meter-head">
+                      <span className="quota-meter-title">可用額度</span>
+                      <span className="quota-tier-badge">{quotaTierLabel(wallet.quotaCap)}</span>
+                    </div>
+                    <div className="quota-meter-nums">
+                      {fmt(wallet.balance, 0)} / {fmt(wallet.quotaCap, 0)}
+                      <span className="muted">
+                        （{Math.round((100 * wallet.balance) / Math.max(1, wallet.quotaCap))}%）
+                      </span>
+                    </div>
+                    <div className="quota-segments" aria-hidden>
+                      {quotaSegmentFills(wallet.balance, wallet.quotaCap).map((fill, i) => (
+                        <div key={i} className="quota-seg">
+                          <div className="quota-seg-fill" style={{ width: `${Math.round(fill * 100)}%` }} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    className={`quota-meter quota-${
+                      freeQuota.remaining / Math.max(1, freeQuota.limit) <= 0.2
+                        ? "low"
+                        : freeQuota.remaining / Math.max(1, freeQuota.limit) <= 0.5
+                          ? "mid"
+                          : "high"
+                    }`}
+                  >
+                    <div className="quota-meter-head">
+                      <span className="quota-meter-title">今日免費額度</span>
+                      <span className="quota-tier-badge">入門模型</span>
+                    </div>
+                    <div className="quota-meter-nums">
+                      剩餘 {freeQuota.remaining} / {freeQuota.limit} 則
+                    </div>
+                    <div className="quota-segments" aria-hidden>
+                      <div className="quota-seg">
+                        <div
+                          className="quota-seg-fill"
+                          style={{ width: `${Math.round((100 * freeQuota.remaining) / Math.max(1, freeQuota.limit))}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <div className="row" style={{ justifyContent: "space-between", fontSize: 12, marginTop: 4 }}>
+                  <Link href="/vendor">算力節點夥伴 →</Link>
+                  {authUser.isAdmin && <Link href="/admin">管理後台 →</Link>}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="account-chip-top">
+                  <div className="account-name-row">
+                    <div className="name">訪客體驗</div>
+                  </div>
+                  <button
+                    type="button"
+                    className="primary"
+                    style={{ padding: "5px 12px", fontSize: 12, fontWeight: 600 }}
+                    onClick={() => setAuthModalOpen(true)}
+                  >
+                    登入
+                  </button>
+                </div>
+                <div
+                  className={`quota-meter quota-${
+                    freeQuota.remaining / Math.max(1, freeQuota.limit) <= 0.2
+                      ? "low"
+                      : freeQuota.remaining / Math.max(1, freeQuota.limit) <= 0.5
+                        ? "mid"
+                        : "high"
+                  }`}
+                >
+                  <div className="quota-meter-head">
+                    <span className="quota-meter-title">今日免費額度</span>
+                    <span className="quota-tier-badge">四大廠入門</span>
+                  </div>
+                  <div className="quota-meter-nums">
+                    剩餘 {freeQuota.remaining} / {freeQuota.limit} 則
+                  </div>
+                  <div className="quota-segments" aria-hidden>
+                    <div className="quota-seg">
+                      <div
+                        className="quota-seg-fill"
+                        style={{ width: `${Math.round((100 * freeQuota.remaining) / Math.max(1, freeQuota.limit))}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+                <div className="row" style={{ justifyContent: "space-between", fontSize: 12, marginTop: 4 }}>
+                  <Link href="/vendor">成為算力節點夥伴 →</Link>
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -1883,16 +1900,20 @@ export default function ChatPage() {
             {messages.length === 0 && (
               <div className="empty">
                 <h2 className={brand === "gemini" ? "brand-gradient-text" : undefined}>
-                  頂級模型不用等，優先消耗供給者訂閱剩餘容量
+                  四大頂級 AI 雲端工作台・多節點智慧路由
                 </h2>
                 {anyAvailable ? (
-                  <p>預設 ⚡ Auto 會依問題自動挑模型；也可以在對話欄左下角手動指定模型。</p>
+                  <p>
+                    {hasPaidAccess
+                      ? "預設 ⚡ Auto 會依問題自動挑最佳模型；也可在對話欄左下角手動指定全系列模型。"
+                      : `免登入即可直接對話：每日免費 ${freeQuota.limit} 則，可自由選擇 Gemini、Claude、GPT、Grok 入門模型；登入並開通雲端工作台方案即可解鎖全系列高階模型。`}
+                  </p>
                 ) : (
-                  <p>目前沒有可用模型。請稍後再試，或聯繫管理員確認水庫狀態。</p>
+                  <p>目前尚無在線算力節點。請稍後再試，或由管理員接入節點貨源。</p>
                 )}
-                {wallet && wallet.balance <= 0 && (
+                {!hasPaidAccess && freeQuota.remaining <= 0 && (
                   <p className="notice">
-                    可用額度為 0。點左側「＋擴充」輸入兌換碼入帳。
+                    今日免費體驗額度已用完。{authUser ? "請點左下「＋開通」輸入雲端工作台服務費序號。" : "請點左下「登入」並開通雲端工作台服務費方案。"}
                   </p>
                 )}
               </div>
@@ -1902,7 +1923,7 @@ export default function ChatPage() {
                 busy && m.role === "assistant" && m.id === messages[messages.length - 1]?.id && !m.error;
               return (
               <div key={m.id} className={`msg ${m.role}${isStreaming ? " is-streaming" : ""}`}>
-                {authUser.isAdmin &&
+                {authUser?.isAdmin &&
                   m.notices?.map((n, i) => (
                     <div key={i} className="notice">
                       ↻ {n}
@@ -1958,7 +1979,11 @@ export default function ChatPage() {
                       {m.autoRouted
                         ? `⚡ Auto（由 ${footerModelLabel(m.model, models, { effort: m.effort, deepThink: m.deepThink, autoRouted: true })} 回答）`
                         : footerModelLabel(m.model, models, { effort: m.effort, deepThink: m.deepThink })}
-                      {m.chargedPoints != null ? ` · 本次消耗 ${fmt(m.chargedPoints, 2)} 額度` : ""}
+                      {m.chargedPoints != null
+                        ? m.chargedPoints > 0
+                          ? ` · 本次消耗 ${fmt(m.chargedPoints, 2)} 額度`
+                          : " · 免費體驗額度"
+                        : ""}
                       {m.groundingSources && m.groundingSources.length > 0 ? " · 已上網查證" : ""}
                     </span>
                   </div>
@@ -1984,7 +2009,7 @@ export default function ChatPage() {
                     )}
                   </details>
                 )}
-                {authUser.isAdmin && m.role === "assistant" && (m.sourceLabel || m.chargedPoints != null) && (
+                {authUser?.isAdmin && m.role === "assistant" && (m.sourceLabel || m.chargedPoints != null) && (
                   <div className="meta">
                     {(m.upstreamModelVersion || m.upstreamModelId) && (
                       <span className="tag">
@@ -2145,12 +2170,24 @@ export default function ChatPage() {
               <select
                 className="composer-model-select"
                 value={familyId}
-                onChange={(e) => setFamilyId(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val !== AUTO_FAMILY_ID && !hasPaidAccess) {
+                    const pickedFam = familyOptions.find((x) => x.familyId === val);
+                    if (pickedFam && !pickedFam.freeTier) {
+                      flashComposerHint("🔒 此為高階模型，開通雲端工作台服務費方案後即可解鎖");
+                      if (authUser) setAccountOpen(true);
+                      else setAuthModalOpen(true);
+                      return;
+                    }
+                  }
+                  setFamilyId(val);
+                }}
                 disabled={busy}
                 title="選擇模型"
               >
-                <option value={AUTO_FAMILY_ID} disabled={!anyAvailable}>
-                  {AUTO_LABEL}
+                <option value={AUTO_FAMILY_ID} disabled={!anyAvailable && familyOptions.length === 0}>
+                  {hasPaidAccess ? AUTO_LABEL : "⚡ Auto（免費智慧入門）"}
                 </option>
                 {Array.from(
                   familyOptions.reduce((map, f) => {
@@ -2161,11 +2198,21 @@ export default function ChatPage() {
                   }, new Map<string, typeof familyOptions>()),
                 ).map(([group, list]) => (
                   <optgroup key={group} label={group}>
-                    {list.map((f) => (
-                      <option key={f.familyId} value={f.familyId} disabled={!f.available}>
-                        {f.available ? f.familyLabel : `${f.familyLabel}（不可用）`}
-                      </option>
-                    ))}
+                    {list.map((f) => {
+                      const locked = !hasPaidAccess && !f.freeTier;
+                      const label = !f.available
+                        ? `${f.familyLabel}（待接入）`
+                        : locked
+                          ? `🔒 ${f.familyLabel}（開通解鎖）`
+                          : !hasPaidAccess && f.freeTier
+                            ? `✓ ${f.familyLabel}`
+                            : f.familyLabel;
+                      return (
+                        <option key={f.familyId} value={f.familyId} disabled={!f.available}>
+                          {label}
+                        </option>
+                      );
+                    })}
                   </optgroup>
                 ))}
               </select>
@@ -2218,7 +2265,7 @@ export default function ChatPage() {
         </div>
       </main>
 
-      {accountOpen && (
+      {accountOpen && authUser && (
         <div
           className="modal-backdrop"
           onClick={(e) => {
@@ -2228,7 +2275,7 @@ export default function ChatPage() {
           <div className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="account-modal-title">
             <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
               <div>
-                <h2 id="account-modal-title">帳戶與儲值</h2>
+                <h2 id="account-modal-title">雲端工作台帳戶與方案</h2>
                 <p className="muted" style={{ margin: 0, fontSize: 13 }}>
                   {authUser.email}
                 </p>
@@ -2275,23 +2322,23 @@ export default function ChatPage() {
             )}
 
             <div className="modal-section" id="redeem-section">
-              <h3>1. 兌換碼儲值</h3>
+              <h3>1. 雲端工作台軟體服務費（SaaS 平台技術服務費）</h3>
               <div className="plan-tiers">
                 <div className="plan-tier">
-                  <strong>NT$ 199 輕量包</strong>
-                  <span>1,000 額度 · 1 格標準容量</span>
+                  <strong>NT$ 199 輕量方案</strong>
+                  <span>1,000 工作台額度 · 解鎖全系列模型</span>
                 </div>
                 <div className="plan-tier plan-tier-hot">
-                  <strong>NT$ 299 進階包</strong>
-                  <span>1,800 額度（+20%）· 雙格水庫</span>
+                  <strong>NT$ 299 進階方案</strong>
+                  <span>1,800 工作台額度（+20%）· 雙格容量</span>
                 </div>
                 <div className="plan-tier plan-tier-pro">
-                  <strong>NT$ 399 旗艦包</strong>
-                  <span>2,800 額度（+40%）· 三格巨量</span>
+                  <strong>NT$ 399 旗艦方案</strong>
+                  <span>2,800 工作台額度（+40%）· 三格容量</span>
                 </div>
               </div>
               <p className="muted" style={{ fontSize: 13, marginTop: 10 }}>
-                輸入兌換碼立即入帳可用額度（與下方方案對應）。
+                輸入服務費開通序號立即啟用並解鎖高階推理模型與外部工具連線。
               </p>
               <div className="row" style={{ flexWrap: "wrap" }}>
                 <input
@@ -2301,7 +2348,7 @@ export default function ChatPage() {
                   style={{ flex: 1, minWidth: 160 }}
                 />
                 <button type="button" className="primary" onClick={() => void redeem()}>
-                  兌換入帳
+                  兌換開通
                 </button>
               </div>
               {redeemMsg && <p className="muted" style={{ fontSize: 12 }}>{redeemMsg}</p>}
@@ -2396,7 +2443,7 @@ export default function ChatPage() {
               <div className="modal-section">
                 <h3>3. 管理員專區</h3>
                 <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-                  快捷產碼（對應 199／299／399 額度階梯）：
+                  快捷產生服務費序號（對應 199／299／399 方案）：
                 </p>
                 <div className="row" style={{ flexWrap: "wrap", marginBottom: 10, gap: 8 }}>
                   <button type="button" className="primary" onClick={() => void mintCode(1000, "199 輕量")}>
@@ -2409,20 +2456,112 @@ export default function ChatPage() {
                     2,800 額度
                   </button>
                   <Link href="/admin">管理後台</Link>
-                  <Link href="/sources">供給者貨源</Link>
-                  <Link href="/nodes">Node Agent</Link>
+                  <Link href="/vendor">節點夥伴頁</Link>
                 </div>
                 {mintedCode && (
                   <div className="row" style={{ flexWrap: "wrap" }}>
                     <code>{mintedCode}</code>
                     <button type="button" onClick={() => void copyText(mintedCode)}>
-                      複製兌換碼
+                      複製序號
                     </button>
                   </div>
                 )}
                 {mintMsg && <p className="muted" style={{ fontSize: 12 }}>{mintMsg}</p>}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {authModalOpen && !authUser && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setAuthModalOpen(false);
+          }}
+        >
+          <div className="modal-panel" style={{ maxWidth: 440 }} role="dialog" aria-modal="true" aria-labelledby="login-modal-title">
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+              <div>
+                <h2 id="login-modal-title" style={{ margin: 0 }}>登入雲端工作台</h2>
+                <p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
+                  登入後可永久保存對話紀錄，並開通方案解鎖全系列高階模型
+                </p>
+              </div>
+              <button type="button" className="ghost" onClick={() => setAuthModalOpen(false)}>
+                關閉
+              </button>
+            </div>
+
+            {googleEnabled && (
+              <div style={{ margin: "14px 0" }}>
+                <a
+                  href="/api/auth/google/start?role=buyer&next=/"
+                  className="primary"
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 8,
+                    padding: "11px 16px",
+                    borderRadius: 10,
+                    fontWeight: 600,
+                    textDecoration: "none",
+                    background: "var(--accent)",
+                    color: "#fff",
+                  }}
+                >
+                  使用 Google 帳號一鍵登入
+                </a>
+              </div>
+            )}
+
+            <div className="auth-tabs" style={{ marginTop: 12 }}>
+              <button type="button" className={authMode === "login" ? "primary" : ""} onClick={() => setAuthMode("login")}>
+                Email 登入
+              </button>
+              <button
+                type="button"
+                className={authMode === "register" ? "primary" : ""}
+                onClick={() => {
+                  setAuthMode("register");
+                  setAuthRole("buyer");
+                }}
+              >
+                註冊帳號
+              </button>
+            </div>
+
+            <form onSubmit={submitAuth} className="form-grid" style={{ gridTemplateColumns: "1fr", marginTop: 10 }}>
+              {authMode === "register" && (
+                <label>
+                  顯示名稱（選填）
+                  <input value={authName} onChange={(e) => setAuthName(e.target.value)} />
+                </label>
+              )}
+              <label>
+                Email
+                <input type="email" required value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} />
+              </label>
+              <label>
+                密碼
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                />
+              </label>
+              <button type="submit" className="primary" style={{ padding: "11px 16px", fontWeight: 600 }}>
+                {authMode === "login" ? "登入" : "建立工作台帳號"}
+              </button>
+            </form>
+            {authError && <p style={{ color: "var(--danger)", fontSize: 13 }}>{authError}</p>}
+
+            <p className="muted" style={{ fontSize: 12, marginTop: 14, marginBottom: 0 }}>
+              想加入算力節點託管與開源評測計畫？請前往 <Link href="/vendor">算力節點夥伴專頁（/vendor）→</Link>
+            </p>
           </div>
         </div>
       )}

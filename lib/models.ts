@@ -22,6 +22,8 @@ export interface ModelInfo {
   category: ModelCategory;
   quotaPool: QuotaPool;
   tier: "top" | "main" | "light";
+  /** 未登入／未購買方案時可選用的各家低階入門模型 */
+  freeTier?: boolean;
   /** USD per 1M tokens (used for equivalent value calculation & points) */
   price: { input: number; cachedInput: number; output: number };
   /** Upstream model ID on Gemini Antigravity Cloud Code */
@@ -70,11 +72,12 @@ export const MODELS: ModelInfo[] = [
   {
     id: "gemini-3.5-flash-lite",
     label: "Gemini 3.5 Flash-Lite",
-    blurb: "最輕量日常",
+    blurb: "免費日常",
     provider: "gemini",
     category: "gemini",
     quotaPool: "shared",
     tier: "light",
+    freeTier: true,
     price: { input: 0.15, cachedInput: 0.02, output: 0.6 },
     antigravityId: "gemini-3.5-flash-lite",
     geminiApiId: "gemini-3.5-flash-lite",
@@ -182,11 +185,12 @@ export const MODELS: ModelInfo[] = [
   {
     id: "agy-claude-sonnet-5-5-low",
     label: "Claude Sonnet 5.5 · Low",
-    blurb: "均衡寫程式",
+    blurb: "免費入門",
     provider: "anthropic",
     category: "antigravity-claude",
     quotaPool: "third_party",
     tier: "main",
+    freeTier: true,
     effort: "low",
     price: { input: 2.0, cachedInput: 0.2, output: 10.0 },
     antigravityId: "claude-sonnet-5-5-low",
@@ -262,11 +266,12 @@ export const MODELS: ModelInfo[] = [
   {
     id: "agy-gpt-oss-120b-medium",
     label: "GPT-OSS 120B · Medium",
-    blurb: "開源長文",
+    blurb: "免費開源",
     provider: "openai",
     category: "antigravity-gpt",
     quotaPool: "third_party",
     tier: "main",
+    freeTier: true,
     effort: "medium",
     price: { input: 0.3, cachedInput: 0.03, output: 1.2 },
     antigravityId: "gpt-oss-120b-medium",
@@ -326,11 +331,12 @@ export const MODELS: ModelInfo[] = [
   {
     id: "gpt-6-luna",
     label: "GPT-6 Luna",
-    blurb: "輕量高量",
+    blurb: "免費輕量",
     provider: "openai",
     category: "chatgpt",
     quotaPool: "chatgpt",
     tier: "light",
+    freeTier: true,
     price: { input: 0.15, cachedInput: 0.02, output: 0.6 },
     codexId: "gpt-6-luna",
     openrouterId: "openai/gpt-5.4-mini",
@@ -362,11 +368,12 @@ export const MODELS: ModelInfo[] = [
   {
     id: "gpt-5.6-luna",
     label: "GPT-5.6 Luna",
-    blurb: "上代輕量",
+    blurb: "免費輕量",
     provider: "openai",
     category: "chatgpt",
     quotaPool: "chatgpt",
     tier: "light",
+    freeTier: true,
     price: { input: 0.15, cachedInput: 0.02, output: 0.6 },
     codexId: "gpt-5.6-luna",
     openrouterId: "openai/gpt-5.4-mini",
@@ -412,11 +419,12 @@ export const MODELS: ModelInfo[] = [
   {
     id: "grok-4.5",
     label: "Grok 4.5",
-    blurb: "穩定耐用",
+    blurb: "免費入門",
     provider: "xai",
     category: "grok",
     quotaPool: "grok",
     tier: "main",
+    freeTier: true,
     price: { input: 2.0, cachedInput: 0.2, output: 10.0 },
     grokId: "grok-4.5",
     openrouterId: "x-ai/grok-4",

@@ -87,9 +87,13 @@ export async function settleAssistantMessage(input: {
   upstreamModelVersion?: string;
   /** Node Agent job：買家扣點以 settlement_key 冪等 */
   jobId?: string;
+  /** 免費層對話：不扣買家額度，但記錄上游水庫等值消耗與訪客 IP 防刷桶 */
+  freeMode?: boolean;
+  ipBucketId?: string;
 }): Promise<void> {
   const now = Date.now();
   const messageId = newId();
+  const effectiveCharged = input.freeMode ? 0 : input.chargedPoints;
   await db().transaction(async (d) => {
     await d
       .prepare(
@@ -108,7 +112,7 @@ export async function settleAssistantMessage(input: {
         input.cachedInputTokens,
         input.outputTokens,
         input.officialCostPoints,
-        input.chargedPoints,
+        effectiveCharged,
         input.quotaLabel ?? null,
         input.quotaUsedPct ?? null,
         input.quotaBeforePct ?? null,
@@ -117,13 +121,19 @@ export async function settleAssistantMessage(input: {
         input.jobId ?? null,
         now,
       );
-    if (input.jobId) {
+    if (input.freeMode) {
+      await d
+        .prepare(
+          "INSERT INTO ledger (id, user_id, type, amount_points, ref_id, note, created_at) VALUES (?, ?, 'source_usage', ?, ?, ?, ?)",
+        )
+        .run(newId(), input.ipBucketId || input.userId, input.officialCostPoints, input.sourceId, `free:${messageId}`, now);
+    } else if (input.jobId) {
       // 冪等扣點（UNIQUE settlement_key）；沿用同一交易連線，避免開第二條連線
       await chargeBuyerForJobIdempotent(
         {
           userId: input.userId,
           jobId: input.jobId,
-          chargedPoints: input.chargedPoints,
+          chargedPoints: effectiveCharged,
           messageId,
         },
         d,
@@ -133,7 +143,7 @@ export async function settleAssistantMessage(input: {
         .prepare(
           "INSERT INTO ledger (id, user_id, type, amount_points, ref_id, created_at) VALUES (?, ?, 'usage', ?, ?, ?)",
         )
-        .run(newId(), input.userId, -input.chargedPoints, messageId, now);
+        .run(newId(), input.userId, -effectiveCharged, messageId, now);
       await d
         .prepare(
           "INSERT INTO ledger (id, user_id, type, amount_points, ref_id, note, created_at) VALUES (?, ?, 'source_usage', ?, ?, ?, ?)",

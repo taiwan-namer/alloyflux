@@ -1,4 +1,5 @@
 import { jsonError, requireUser } from "@/lib/auth";
+import { getFreeDailyStatus } from "@/lib/free-tier";
 import { redeemCode } from "@/lib/redeem";
 import { balance, quotaCapFromLedger } from "@/lib/store";
 
@@ -9,13 +10,16 @@ export async function POST(req: Request) {
     const user = await requireUser(req);
     const body = (await req.json()) as { code?: string };
     const result = await redeemCode(user.id, body.code || "");
+    const bal = await balance(user.id);
     return Response.json(
       {
         ok: true,
         points: result.points,
         message: result.balanceNote,
-        balance: await balance(user.id),
+        balance: bal,
         quotaCap: await quotaCapFromLedger(user.id),
+        hasPaidAccess: user.isAdmin || bal > 0,
+        freeQuota: await getFreeDailyStatus({ userId: user.id, isGuest: false }),
       },
       {
         headers: {

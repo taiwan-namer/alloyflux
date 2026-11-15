@@ -103,20 +103,33 @@ function classifyLane(text: string, hasImages: boolean): { lane: AutoLane; reaso
  * 2) 程式／分析／長文／圖片＋分析 → L3（依水庫剩餘量挑）
  * 3) 其餘 → L2 Flash
  */
+export function resolveAutoModelIds(freeOnly: boolean): { light: string[]; main: string[] } {
+  if (freeOnly) {
+    // 免費層跨家族入門模型：Gemini Flash-Lite、Claude Sonnet Low、GPT Luna / GPT-OSS、Grok 4.5
+    const light = ["gemini-3.5-flash-lite", "gpt-6-luna", "gpt-5.6-luna", "agy-gpt-oss-120b-medium"];
+    const main = ["agy-claude-sonnet-5-5-low", "grok-4.5", "agy-gpt-oss-120b-medium", "gemini-3.5-flash-lite"];
+    return { light, main };
+  }
+  return { light: AUTO_LIGHT_MODEL_IDS, main: AUTO_MAIN_MODEL_IDS };
+}
+
 export async function resolveAutoModel(input: {
   text: string;
   hasImages: boolean;
   lastAssistant?: { content: string; model: string | null };
   forceMain?: boolean;
+  /** 未登入／未購買方案：僅在免費入門模型內自動路由 */
+  freeOnly?: boolean;
   /** 本輪已嘗試失敗（如帳號目錄沒有）的模型，重新派發時略過 */
   excludeModelIds?: ReadonlySet<string>;
 }): Promise<AutoDecision | null> {
   const text = input.text.trim();
   const exclude = input.excludeModelIds ?? new Set<string>();
+  const pools = resolveAutoModelIds(Boolean(input.freeOnly));
 
   if (input.forceMain) {
-    const m = await pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude) ?? await pickFromPool(AUTO_LIGHT_MODEL_IDS, false, exclude);
-    return m ? { model: m, lane: AUTO_MAIN_MODEL_IDS.includes(m.id) ? "main" : "light", reason: "使用者要求主力重答" } : null;
+    const m = await pickFromPool(pools.main, true, exclude) ?? await pickFromPool(pools.light, false, exclude);
+    return m ? { model: m, lane: pools.main.includes(m.id) ? "main" : "light", reason: "使用者要求主力重答" } : null;
   }
 
   const prev = input.lastAssistant;
@@ -126,28 +139,28 @@ export async function resolveAutoModel(input: {
     text.length <= STICKY_FOLLOWUP_MAX_CHARS &&
     (prev.content.includes("```") || prev.content.length > STICKY_PREV_CHARS)
   ) {
-    const inLight = AUTO_LIGHT_MODEL_IDS.includes(prev.model);
-    const inMain = AUTO_MAIN_MODEL_IDS.includes(prev.model);
+    const inLight = pools.light.includes(prev.model);
+    const inMain = pools.main.includes(prev.model);
     const prevModel = findModel(prev.model);
     if ((inLight || inMain) && prevModel && !exclude.has(prevModel.id) && (await hasAvailableUpstream(prevModel))) {
       return { model: prevModel, lane: inMain ? "main" : "light", reason: "黏性路由（延續上一輪任務）" };
     }
     if (!inLight) {
-      const m = await pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude);
+      const m = await pickFromPool(pools.main, true, exclude);
       if (m) return { model: m, lane: "main", reason: "黏性路由（上一輪模型不可用，改派主力）" };
     }
   }
 
   const { lane, reason } = classifyLane(text, input.hasImages);
   if (lane === "main") {
-    const m = await pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude);
+    const m = await pickFromPool(pools.main, true, exclude);
     if (m) return { model: m, lane: "main", reason };
-    const fallback = await pickFromPool(AUTO_LIGHT_MODEL_IDS, false, exclude);
+    const fallback = await pickFromPool(pools.light, false, exclude);
     return fallback ? { model: fallback, lane: "light", reason: `${reason}（主力不可用，改派輕量）` } : null;
   }
-  const m = await pickFromPool(AUTO_LIGHT_MODEL_IDS, false, exclude);
+  const m = await pickFromPool(pools.light, false, exclude);
   if (m) return { model: m, lane: "light", reason };
-  const fallback = await pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude);
+  const fallback = await pickFromPool(pools.main, true, exclude);
   return fallback ? { model: fallback, lane: "main", reason: `${reason}（輕量不可用，改派主力）` } : null;
 }
 

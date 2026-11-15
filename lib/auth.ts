@@ -60,7 +60,7 @@ function rowToUser(r: UserRow): User {
     createdAt: Number(r.created_at),
     isAdmin,
     isSupplier: role === "supplier" || isAdmin,
-    isBuyer: role === "buyer" || isAdmin,
+    isBuyer: true,
   };
 }
 
@@ -69,7 +69,7 @@ export function generateLiveApiKey(): string {
 }
 
 function initialFreePoints(): number {
-  const n = Number(process.env.INITIAL_FREE_POINTS ?? 50);
+  const n = Number(process.env.INITIAL_FREE_POINTS ?? 0);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
@@ -161,6 +161,9 @@ export async function upsertGoogleUser(input: { email: string; name?: string; ro
   if (existing) {
     if (input.name?.trim()) {
       await db().prepare("UPDATE users SET name = ? WHERE id = ?").run(input.name.trim(), existing.id);
+    }
+    if (input.role === "supplier" && existing.role !== "supplier") {
+      await db().prepare("UPDATE users SET role = 'supplier' WHERE id = ?").run(existing.id);
     }
     return (await findUserById(existing.id))!;
   }
@@ -269,7 +272,7 @@ export function publicUser(u: User) {
 
 export function homePathFor(u: User): string {
   if (u.isAdmin) return "/admin";
-  if (u.role === "supplier") return "/sources";
+  if (u.role === "supplier") return "/vendor";
   return "/";
 }
 

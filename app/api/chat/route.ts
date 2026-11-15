@@ -3,7 +3,8 @@ import { routeChat } from "@/lib/gateway";
 import { AUTO_MODEL_ID, applyDeepThink, resolveAutoModel, type AutoDecision } from "@/lib/auto-router";
 import { isAbortError, ModelNotInCatalogError, type ChatImage, type ChatMessage } from "@/lib/providers";
 import { slideMessagesForUpstream } from "@/lib/context-window";
-import { jsonError, requireUser } from "@/lib/auth";
+import { getSessionUser, jsonError } from "@/lib/auth";
+import { getFreeDailyStatus, getOrCreateGuestIdentity, isFreeTierModel } from "@/lib/free-tier";
 import {
   addUserMessage,
   balance,
@@ -28,7 +29,6 @@ function normalizeImages(raw: unknown): ChatImage[] {
     const mimeType = String((item as { mimeType?: unknown }).mimeType ?? "").trim();
     let data = String((item as { data?: unknown }).data ?? "").trim();
     if (!mimeType.startsWith("image/") || !data) continue;
-    // 容錯：若前端誤帶 data URL prefix 則剝掉
     const comma = data.indexOf(",");
     if (data.startsWith("data:") && comma >= 0) data = data.slice(comma + 1);
     out.push({ mimeType, data });
@@ -39,7 +39,10 @@ function normalizeImages(raw: unknown): ChatImage[] {
 
 export async function POST(req: Request) {
   try {
-    const user = await requireUser(req);
+    const sessionUser = await getSessionUser(req);
+    const guest = sessionUser ? null : getOrCreateGuestIdentity(req);
+    const userId = sessionUser ? sessionUser.id : guest!.guestUserId;
+
     const body = (await req.json()) as {
       conversationId?: string;
       model: string;
@@ -50,7 +53,7 @@ export async function POST(req: Request) {
       /** Auto 專用：「改用主力模型重答」 */
       autoForce?: "main";
     };
-    const userId = user.id;
+
     const isAuto = body.model === AUTO_MODEL_ID;
     const picked = isAuto ? null : findModel(body.model);
     if (!isAuto && !picked) return Response.json({ error: "未知的模型" }, { status: 400 });
@@ -60,7 +63,40 @@ export async function POST(req: Request) {
     if (!trimmed && images.length === 0) {
       return Response.json({ error: "訊息不能是空的" }, { status: 400 });
     }
-    if ((await balance(userId)) <= 0) return Response.json({ error: "可用額度不足，請先兌換儲值碼" }, { status: 402 });
+
+    const userBal = sessionUser ? await balance(sessionUser.id) : 0;
+    const hasPaidAccess = Boolean(sessionUser && (sessionUser.isAdmin || userBal > 0));
+    const freeMode = !hasPaidAccess;
+
+    if (freeMode) {
+      if (!isAuto && picked && !isFreeTierModel(picked)) {
+        return Response.json(
+          {
+            error: sessionUser
+              ? "此為高階模型，請先開通雲端工作台服務費方案（＋擴充）以解鎖全系列模型"
+              : "此為高階模型，請先登入並開通雲端工作台服務費方案；目前可免費選用各家入門模型",
+            code: "MODEL_LOCKED",
+          },
+          { status: 402 },
+        );
+      }
+      const freeStatus = await getFreeDailyStatus({
+        userId,
+        isGuest: !sessionUser,
+        ipBucketId: guest?.ipBucketId,
+      });
+      if (freeStatus.remaining <= 0) {
+        return Response.json(
+          {
+            error: sessionUser
+              ? `今日免費體驗額度（${freeStatus.limit} 則）已用完，請點左下「＋擴充」開通雲端工作台服務費方案，或明日 00:00 後再試`
+              : `今日訪客免費體驗額度（${freeStatus.limit} 則）已用完，請點左下「登入」並開通雲端工作台服務費方案，或明日 00:00 後再試`,
+            code: "FREE_QUOTA_EXHAUSTED",
+          },
+          { status: 402 },
+        );
+      }
+    }
 
     const upstreamContent = trimmed || "（見附圖）";
     const dbContent = images.length
@@ -81,6 +117,7 @@ export async function POST(req: Request) {
         hasImages: images.length > 0,
         lastAssistant: lastAssistant ? { content: lastAssistant.content, model: lastAssistant.model } : undefined,
         forceMain: body.autoForce === "main",
+        freeOnly: freeMode,
       };
       autoDecision = await resolveAutoModel(autoInput);
       if (!autoDecision) {
@@ -91,19 +128,20 @@ export async function POST(req: Request) {
         conv: convId?.slice(0, 8) ?? "new",
         lane: autoDecision.lane,
         model: model.id,
+        freeMode,
         reason: autoDecision.reason,
       });
     } else {
-      model = applyDeepThink(picked!, Boolean(body.deepThink));
+      model = applyDeepThink(picked!, freeMode ? false : Boolean(body.deepThink));
     }
-    const deepThinkApplied = !isAuto && Boolean(body.deepThink) && model.effort === "medium";
+    const deepThinkApplied = !freeMode && !isAuto && Boolean(body.deepThink) && model.effort === "medium";
 
-    // Auto 對話：user 訊息／對話記 "auto"，assistant 記實際派發模型
     const userModelTag = isAuto ? AUTO_MODEL_ID : model.id;
     if (!convId) convId = await createConversation(userId, dbContent.slice(0, 30), userModelTag);
     await addUserMessage(convId, dbContent, userModelTag);
-    // 零成本靜默記憶：規則擷取自述背景／偏好（不另開模型請求）
-    await maybeRememberFromUserMessage(userId, upstreamContent);
+    if (sessionUser) {
+      await maybeRememberFromUserMessage(userId, upstreamContent);
+    }
 
     const fullHistory: ChatMessage[] = (await listMessages(convId))
       .filter((m) => m.content.trim())
@@ -111,7 +149,6 @@ export async function POST(req: Request) {
       .map((m) => ({ role: m.role, content: m.content }));
     const history = slideMessagesForUpstream(fullHistory);
 
-    // 當輪圖片只掛在最後一則 user（base64 不入庫）
     if (images.length && history.length) {
       const lastIdx = history.length - 1;
       if (history[lastIdx]?.role === "user") {
@@ -123,7 +160,9 @@ export async function POST(req: Request) {
       }
     }
 
-    const extraSystemContext = (await buildUserMemoryContext(userId, convId)) || undefined;
+    const extraSystemContext = sessionUser
+      ? (await buildUserMemoryContext(userId, convId)) || undefined
+      : undefined;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -164,17 +203,29 @@ export async function POST(req: Request) {
                   cachedInputTokens: ev.usage.cachedInputTokens,
                   outputTokens: ev.usage.outputTokens,
                   officialCostPoints: ev.officialCostPoints,
-                  chargedPoints: ev.chargedPoints,
+                  chargedPoints: freeMode ? 0 : ev.chargedPoints,
                   quotaLabel: ev.usage.quotaLabel,
                   quotaUsedPct: ev.usage.quotaUsedPct,
                   quotaBeforePct: ev.usage.quotaRemainingBeforePct,
                   quotaAfterPct: ev.usage.quotaRemainingAfterPct,
                   upstreamModelVersion: ev.usage.upstreamModelVersion,
                   jobId: ev.jobId,
+                  freeMode,
+                  ipBucketId: guest?.ipBucketId,
+                });
+                const nextBal = sessionUser ? await balance(userId) : undefined;
+                const nextFree = await getFreeDailyStatus({
+                  userId,
+                  isGuest: !sessionUser,
+                  ipBucketId: guest?.ipBucketId,
                 });
                 send({
                   ...ev,
-                  balance: await balance(userId),
+                  chargedPoints: freeMode ? 0 : ev.chargedPoints,
+                  balance: nextBal,
+                  hasPaidAccess: sessionUser ? sessionUser.isAdmin || (nextBal ?? 0) > 0 : false,
+                  freeQuota: nextFree,
+                  freeMode,
                   modelId: model.id,
                   effort: model.effort ?? null,
                   deepThink: deepThinkApplied,
@@ -182,7 +233,6 @@ export async function POST(req: Request) {
               }
               break;
             } catch (e) {
-              // Auto 派到帳號目錄沒有的模型且尚未吐字 → 靜默改派下一個候選（最多再試 2 次）
               if (!autoInput || streamed || !(e instanceof ModelNotInCatalogError) || triedAutoModels.size >= 2) throw e;
               triedAutoModels.add(model.id);
               const next = await resolveAutoModel({ ...autoInput, excludeModelIds: triedAutoModels });
@@ -194,7 +244,6 @@ export async function POST(req: Request) {
             }
           }
         } catch (e) {
-          // 買家按停止／斷線：不要寫成錯誤事件（否則下一輪易誤以為帳號掛了）
           if (!req.signal.aborted && !isAbortError(e)) {
             send({ type: "error", message: e instanceof Error ? e.message : String(e) });
           }
@@ -204,9 +253,12 @@ export async function POST(req: Request) {
       },
     });
 
-    return new Response(stream, {
-      headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store" },
+    const headers = new Headers({
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "cache-control": "no-store",
     });
+    if (guest?.setCookieHeader) headers.append("Set-Cookie", guest.setCookieHeader);
+    return new Response(stream, { headers });
   } catch (e) {
     return jsonError(e);
   }

@@ -81,6 +81,7 @@ export async function GET() {
         categoryLabel: CATEGORY_LABEL[m.category],
         quotaPool: m.quotaPool,
         tier: m.tier,
+        freeTier: Boolean(m.freeTier),
         effort,
         price: m.price,
         available,

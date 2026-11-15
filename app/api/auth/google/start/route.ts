@@ -3,13 +3,27 @@ import { hmacSign, randomToken } from "@/lib/crypto";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+function sanitizeNextPath(raw: string | null): string {
+  if (!raw || !raw.startsWith("/") || raw.startsWith("//")) return "/";
+  return raw;
+}
+
+export async function GET(req: Request) {
   if (!buyerGoogleConfigured()) {
     return Response.json({ error: "未設定 BUYER_GOOGLE_CLIENT_ID" }, { status: 503 });
   }
 
-  const statePayload = `${randomToken(16)}.${Date.now() + 600_000}`;
-  const stateToken = `${Buffer.from(statePayload).toString("base64url")}.${hmacSign(statePayload)}`;
+  const url = new URL(req.url);
+  const role = url.searchParams.get("role") === "supplier" ? "supplier" : "buyer";
+  const nextPath = sanitizeNextPath(url.searchParams.get("next"));
+
+  const stateObj = JSON.stringify({
+    n: randomToken(16),
+    exp: Date.now() + 600_000,
+    role,
+    next: nextPath,
+  });
+  const stateToken = `${Buffer.from(stateObj).toString("base64url")}.${hmacSign(stateObj)}`;
 
   const params = new URLSearchParams({
     client_id: process.env.BUYER_GOOGLE_CLIENT_ID!,

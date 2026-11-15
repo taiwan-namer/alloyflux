@@ -1,4 +1,5 @@
 import { jsonError, requireUser } from "@/lib/auth";
+import { getFreeDailyStatus } from "@/lib/free-tier";
 import { balance, quotaCapFromLedger, usageSummary } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -6,11 +7,14 @@ export const dynamic = "force-dynamic";
 export async function GET(req: Request) {
   try {
     const user = await requireUser(req);
+    const bal = await balance(user.id);
     return Response.json(
       {
-        balance: await balance(user.id),
+        balance: bal,
         quotaCap: await quotaCapFromLedger(user.id),
         usage: await usageSummary(user.id),
+        hasPaidAccess: user.isAdmin || bal > 0,
+        freeQuota: await getFreeDailyStatus({ userId: user.id, isGuest: false }),
         apiKey: user.apiKey,
       },
       {

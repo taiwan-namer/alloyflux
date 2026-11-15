@@ -5,25 +5,43 @@ import {
   readCookie,
   sessionCookieHeader,
   upsertGoogleUser,
+  type UserRole,
 } from "@/lib/auth";
 import { hmacVerify } from "@/lib/crypto";
 
 export const dynamic = "force-dynamic";
 
-function verifyState(token: string): boolean {
+interface ParsedState {
+  role: UserRole;
+  next: string;
+}
+
+function parseState(token: string): ParsedState | null {
   const i = token.lastIndexOf(".");
-  if (i <= 0) return false;
+  if (i <= 0) return null;
   const body = token.slice(0, i);
   const sig = token.slice(i + 1);
   let payload: string;
   try {
     payload = Buffer.from(body, "base64url").toString("utf8");
   } catch {
-    return false;
+    return null;
   }
-  if (!hmacVerify(payload, sig)) return false;
-  const exp = Number(payload.split(".")[1]);
-  return Number.isFinite(exp) && Date.now() <= exp;
+  if (!hmacVerify(payload, sig)) return null;
+  try {
+    const parsed = JSON.parse(payload) as { exp?: number; role?: string; next?: string };
+    if (!Number.isFinite(parsed.exp) || Date.now() > Number(parsed.exp)) return null;
+    const role: UserRole = parsed.role === "supplier" ? "supplier" : "buyer";
+    const next =
+      typeof parsed.next === "string" && parsed.next.startsWith("/") && !parsed.next.startsWith("//")
+        ? parsed.next
+        : "/";
+    return { role, next };
+  } catch {
+    const exp = Number(payload.split(".")[1]);
+    if (!Number.isFinite(exp) || Date.now() > exp) return null;
+    return { role: "buyer", next: "/" };
+  }
 }
 
 export async function GET(req: Request) {
@@ -35,8 +53,9 @@ export async function GET(req: Request) {
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   const cookieState = readCookie(req, "aup_oauth_state");
+  const parsedState = state ? parseState(state) : null;
 
-  if (!code || !state || !cookieState || state !== cookieState || !verifyState(state)) {
+  if (!code || !state || !cookieState || state !== cookieState || !parsedState) {
     return Response.redirect(new URL("/?auth_error=invalid_state", req.url));
   }
 
@@ -79,11 +98,15 @@ export async function GET(req: Request) {
     profile.name?.trim() ||
     [profile.given_name, profile.family_name].filter(Boolean).join(" ").trim() ||
     undefined;
-  const user = await upsertGoogleUser({ email: profile.email, name: googleName });
+  const user = await upsertGoogleUser({
+    email: profile.email,
+    name: googleName,
+    role: parsedState.role,
+  });
   const session = issueSessionToken(user.id);
 
   const headers = new Headers();
-  headers.set("Location", "/");
+  headers.set("Location", parsedState.next || (parsedState.role === "supplier" ? "/vendor" : "/"));
   headers.append("Set-Cookie", sessionCookieHeader(session));
   headers.append("Set-Cookie", "aup_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
   return new Response(null, { status: 302, headers });
