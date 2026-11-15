@@ -1,0 +1,2431 @@
+"use client";
+
+import Link from "next/link";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+
+type Effort = "low" | "medium" | "high";
+type Brand = "gpt" | "claude" | "gemini" | "grok";
+
+interface ModelOption {
+  id: string;
+  label: string;
+  familyId: string;
+  familyLabel: string;
+  provider: string;
+  category?: string;
+  categoryLabel?: string;
+  quotaPool?: string;
+  tier?: "top" | "main" | "light";
+  effort?: Effort | null;
+  available: boolean;
+  note?: string;
+}
+
+interface Conversation {
+  id: string;
+  title: string;
+  model: string;
+}
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  /** 模型內部思考過程（可摺疊顯示） */
+  thinking?: string;
+  model?: string | null;
+  sourceLabel?: string;
+  sourceKind?: "supplier" | "platform";
+  upstreamModelId?: string;
+  upstreamModelVersion?: string;
+  viaDailyBypass?: boolean;
+  groundingSources?: { title: string; uri: string }[];
+  webSearchQueries?: string[];
+  quotaLabel?: string;
+  quotaUsedPct?: number;
+  quotaBeforePct?: number;
+  quotaAfterPct?: number;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  officialCostPoints?: number | null;
+  chargedPoints?: number | null;
+  notices?: string[];
+  error?: string;
+  /** 由 ⚡ Auto 派發 */
+  autoRouted?: boolean;
+  autoLane?: "light" | "main";
+  /** 實際思考檔（深度思考後可能是 medium） */
+  effort?: Effort | null;
+  deepThink?: boolean;
+}
+
+interface Wallet {
+  balance: number;
+  /** 高水位分母（最後一次儲值後峰值，保底 1000） */
+  quotaCap: number;
+  usage: { messages: number; chargedPoints: number; officialPoints: number };
+  apiKey?: string;
+}
+
+interface AuthUser {
+  id: string;
+  email: string;
+  name: string;
+  apiKey: string;
+  role: "buyer" | "supplier";
+  isAdmin: boolean;
+  isSupplier: boolean;
+  isBuyer: boolean;
+}
+
+interface ApiKeyRow {
+  id: string;
+  label: string;
+  keyHint: string;
+  createdAt: number;
+}
+
+const fmt = (n: number | null | undefined, digits = 2) =>
+  (n ?? 0).toLocaleString("zh-TW", { maximumFractionDigits: digits });
+
+const QUOTA_FLOOR = 1000;
+
+function normalizeQuotaCap(balance: number, quotaCap?: number | null): number {
+  return Math.max(QUOTA_FLOOR, quotaCap ?? QUOTA_FLOOR, balance);
+}
+
+function quotaSegmentCount(cap: number): 1 | 2 | 3 {
+  if (cap <= 1000) return 1;
+  if (cap <= 2000) return 2;
+  return 3;
+}
+
+function quotaTierLabel(cap: number): string {
+  if (cap <= 1000) return "標準容量";
+  if (cap <= 2000) return "進階雙倍池";
+  return "PRO 旗艦池";
+}
+
+/** 各格容量：前幾格滿 1000，最後一格吃剩餘 */
+function quotaSegmentSizes(cap: number): number[] {
+  const n = quotaSegmentCount(cap);
+  const sizes: number[] = [];
+  let left = cap;
+  for (let i = 0; i < n; i++) {
+    if (i === n - 1) sizes.push(left);
+    else {
+      const take = Math.min(1000, left);
+      sizes.push(take);
+      left -= take;
+    }
+  }
+  return sizes;
+}
+
+function quotaSegmentFills(balance: number, cap: number): number[] {
+  const sizes = quotaSegmentSizes(cap);
+  let left = Math.max(0, balance);
+  return sizes.map((size) => {
+    if (size <= 0) return 0;
+    const fill = Math.min(1, left / size);
+    left = Math.max(0, left - size);
+    return fill;
+  });
+}
+
+const EFFORTS: Effort[] = ["low", "medium", "high"];
+
+const AUTO_FAMILY_ID = "auto";
+const AUTO_LABEL = "⚡ Auto（智慧最佳模型）";
+/** 與 lib/auto-router.ts AUTO_LIGHT_MODEL_IDS 一致 */
+const AUTO_LIGHT_MODEL_IDS = ["gemini-3.8-flash-low", "gemini-3.5-flash-lite"];
+
+/** 載入歷史時：標記 Auto 派發，並從 model id 還原 effort／深度思考顯示 */
+function markAutoRouted(list: Message[]): Message[] {
+  return list.map((m, i) => {
+    if (m.role !== "assistant") return m;
+    const fromId = m.model ? splitModelId(m.model).effort : null;
+    const effort = m.effort ?? fromId;
+    const deepThink = m.deepThink || effort === "medium" || effort === "high";
+    const prevUser = list[i - 1];
+    const autoRouted =
+      m.autoRouted || (prevUser?.role === "user" && prevUser.model === AUTO_FAMILY_ID);
+    return {
+      ...m,
+      effort,
+      deepThink: Boolean(deepThink),
+      autoRouted: Boolean(autoRouted),
+      autoLane:
+        m.autoLane ??
+        (autoRouted && m.model && AUTO_LIGHT_MODEL_IDS.includes(m.model) ? "light" : autoRouted ? "main" : undefined),
+    };
+  });
+}
+
+function splitModelId(id: string): { familyId: string; effort: Effort | null } {
+  const m = id.match(/^(.*)-(low|medium|high)$/);
+  if (m) return { familyId: m[1], effort: m[2] as Effort };
+  return { familyId: id, effort: null };
+}
+
+/** 頁腳模型名：medium／深度思考時顯示「深度思考」，勿卡在占位的 Low */
+function footerModelLabel(
+  modelId: string | null | undefined,
+  catalog: ModelOption[],
+  opts?: { effort?: Effort | null; deepThink?: boolean; autoRouted?: boolean },
+): string {
+  const raw = catalog.find((x) => x.id === modelId)?.label ?? modelId ?? "助理";
+  const fromId = modelId ? splitModelId(modelId).effort : null;
+  const effort = opts?.effort ?? fromId;
+  const deep = opts?.deepThink || effort === "medium" || effort === "high";
+  if (!deep) return raw;
+  const base = raw
+    .replace(/\s*·\s*(Low|Medium|High)\s*/gi, "")
+    .replace(/\s*\((?:low|medium|high)\)\s*/gi, "")
+    .trim();
+  if (opts?.autoRouted) return base;
+  return `${base} · 深度思考`;
+}
+
+function brandFromModel(familyId: string, provider?: string, category?: string): Brand {
+  const s = `${familyId} ${provider ?? ""} ${category ?? ""}`.toLowerCase();
+  if (s.includes("claude") || s.includes("anthropic")) return "claude";
+  if (s.includes("grok") || s.includes("xai")) return "grok";
+  if (
+    s.includes("gpt") ||
+    s.includes("openai") ||
+    s.includes("chatgpt") ||
+    /\bsol\b/.test(s) ||
+    s.includes("luna") ||
+    s.includes("terra") ||
+    s.includes("astra")
+  ) {
+    return "gpt";
+  }
+  if (s.includes("gemini") || s.includes("argon") || s.includes("google") || s.includes("antigravity")) {
+    return "gemini";
+  }
+  return "gemini";
+}
+
+const STREAM_STATUS: Record<Brand, { think: string; write: string }> = {
+  claude: { think: "Extended thinking", write: "撰寫中" },
+  gpt: { think: "Thinking...", write: "生成中" },
+  gemini: { think: "推理中", write: "回應中" },
+  grok: { think: "THINKING", write: "GENERATING" },
+};
+
+type BrandTypewriter = {
+  push: (text: string) => void;
+  drain: () => Promise<void>;
+  flush: () => void;
+  stop: () => void;
+};
+
+/**
+ * 全品牌統一：零人為延遲 + 單幀合併 setState。
+ */
+function createBrandTypewriter(_brand: Brand, onChunk: (chunk: string) => void): BrandTypewriter {
+  let pending = "";
+  let raf = 0;
+  let stopped = false;
+  let waiting: Promise<void> | null = null;
+  let resolveWait: (() => void) | null = null;
+
+  function armWait() {
+    if (!waiting) {
+      waiting = new Promise((r) => {
+        resolveWait = r;
+      });
+    }
+  }
+  function clearWait() {
+    resolveWait?.();
+    resolveWait = null;
+    waiting = null;
+  }
+
+  function flushFrame() {
+    raf = 0;
+    if (stopped) {
+      clearWait();
+      return;
+    }
+    if (!pending) {
+      clearWait();
+      return;
+    }
+    const slice = pending;
+    pending = "";
+    onChunk(slice);
+    if (pending) schedule();
+    else clearWait();
+  }
+
+  function schedule() {
+    if (stopped || raf) return;
+    armWait();
+    raf = requestAnimationFrame(flushFrame);
+  }
+
+  return {
+    push(text) {
+      if (stopped || !text) return;
+      pending += text;
+      schedule();
+    },
+    async drain() {
+      if (stopped || (!pending && !raf)) return;
+      armWait();
+      await waiting;
+    },
+    flush() {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      if (pending) {
+        const rest = pending;
+        pending = "";
+        onChunk(rest);
+      }
+      clearWait();
+    },
+    stop() {
+      stopped = true;
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      pending = "";
+      clearWait();
+    },
+  };
+}
+
+function hostnameOfUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    return u.hostname.replace(/^www\./i, "");
+  } catch {
+    return raw.replace(/^https?:\/\//i, "").split(/[/?#]/)[0] || raw;
+  }
+}
+
+function cleanHref(raw: string): string {
+  // 去掉句尾誤吃的標點
+  return raw.replace(/[),.;:!?，。；：！？]+$/g, "");
+}
+
+/** 內文來源：顯示短標籤／網域 chip，完整網址放 title，避免 UTM 長串刷版 */
+function SourceChip({ href, label }: { href: string; label?: string }) {
+  const url = cleanHref(href);
+  const host = hostnameOfUrl(url);
+  const text = (label?.trim() || host).replace(/^https?:\/\//i, "");
+  const display = text.length > 42 ? `${host}` : text;
+  return (
+    <a className="md-link-chip" href={url} target="_blank" rel="noreferrer" title={url}>
+      <span className="md-link-icon" aria-hidden>
+        ↗
+      </span>
+      <span className="md-link-label">{display}</span>
+    </a>
+  );
+}
+
+function renderInline(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  // 順序：粗體 → 行內碼 → Markdown 連結 → 裸 URL
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>\[\]（）]+)/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let key = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) nodes.push(text.slice(last, m.index));
+    const token = m[0];
+    if (token.startsWith("**")) {
+      nodes.push(<strong key={`b${key++}`}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith("`")) {
+      nodes.push(
+        <code key={`c${key++}`} className="inline">
+          {token.slice(1, -1)}
+        </code>,
+      );
+    } else if (token.startsWith("[")) {
+      const lm = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(token);
+      if (lm) {
+        nodes.push(<SourceChip key={`l${key++}`} label={lm[1]} href={lm[2]} />);
+      } else {
+        nodes.push(token);
+      }
+    } else if (/^https?:\/\//i.test(token)) {
+      nodes.push(<SourceChip key={`u${key++}`} href={token} />);
+    } else {
+      nodes.push(token);
+    }
+    last = m.index + token.length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
+function isTableSeparator(line: string) {
+  return /^\s*\|?[\s:-]+\|[\s|:-]+\|?\s*$/.test(line);
+}
+
+function parseTableRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((c) => c.trim());
+}
+
+function ThinkingIndicator() {
+  return (
+    <div className="thinking" aria-live="polite" aria-label="AI 回應中">
+      <span className="thinking-label">回應中</span>
+      <span className="thinking-dots" aria-hidden>
+        <i />
+        <i />
+        <i />
+      </span>
+    </div>
+  );
+}
+
+type MdBlock =
+  | { type: "code"; lang: string; body: string; open?: boolean }
+  | { type: "math"; body: string; open?: boolean }
+  | { type: "text"; body: string };
+
+/** 串流穩定切塊：未閉合的 ``` / $$ 先淡色預覽，完整才高亮，避免版面跳動 */
+function splitMarkdownBlocks(content: string, streaming: boolean): MdBlock[] {
+  const parts: MdBlock[] = [];
+  let i = 0;
+  while (i < content.length) {
+    const fence = content.indexOf("```", i);
+    const math = content.indexOf("$$", i);
+    let next = -1;
+    let kind: "code" | "math" | null = null;
+    if (fence >= 0 && (math < 0 || fence <= math)) {
+      next = fence;
+      kind = "code";
+    } else if (math >= 0) {
+      next = math;
+      kind = "math";
+    }
+    if (next < 0 || !kind) {
+      parts.push({ type: "text", body: content.slice(i) });
+      break;
+    }
+    if (next > i) parts.push({ type: "text", body: content.slice(i, next) });
+
+    if (kind === "code") {
+      const after = next + 3;
+      const nl = content.indexOf("\n", after);
+      const lang = content.slice(after, nl < 0 ? content.length : nl).trim();
+      const bodyStart = nl < 0 ? content.length : nl + 1;
+      const close = content.indexOf("```", bodyStart);
+      if (close < 0) {
+        parts.push({ type: "code", lang, body: content.slice(bodyStart), open: streaming || undefined });
+        break;
+      }
+      parts.push({ type: "code", lang, body: content.slice(bodyStart, close).replace(/\n$/, "") });
+      i = close + 3;
+      if (content[i] === "\n") i += 1;
+      continue;
+    }
+
+    const bodyStart = next + 2;
+    const close = content.indexOf("$$", bodyStart);
+    if (close < 0) {
+      parts.push({ type: "math", body: content.slice(bodyStart), open: streaming || undefined });
+      break;
+    }
+    parts.push({ type: "math", body: content.slice(bodyStart, close).replace(/^\n|\n$/g, "") });
+    i = close + 2;
+    if (content[i] === "\n") i += 1;
+  }
+  if (parts.length === 0) parts.push({ type: "text", body: content });
+  return parts;
+}
+
+/**
+ * 串流時：只對「已換行的完整行」做標題／清單／表格格式化；
+ * 最後一行未完成前以純文字浮現，避免版面劇烈閃爍。
+ */
+function splitStableText(body: string, streaming: boolean): { stable: string; tail: string } {
+  if (!streaming) return { stable: body, tail: "" };
+  const lastNl = body.lastIndexOf("\n");
+  if (lastNl < 0) return { stable: "", tail: body };
+  let stable = body.slice(0, lastNl + 1);
+  let tail = body.slice(lastNl + 1);
+
+  const core = stable.length ? stable.slice(0, -1).split("\n") : [];
+  if (!core.length) return { stable: "", tail };
+
+  // 尾端連續 | 行若還沒出現 separator，整段先當純文字，等語法完整再表格化
+  let from = core.length;
+  while (from > 0 && core[from - 1].includes("|")) from -= 1;
+  if (from < core.length) {
+    const tableChunk = core.slice(from);
+    if (!tableChunk.some(isTableSeparator)) {
+      stable = core.slice(0, from).join("\n");
+      if (stable) stable += "\n";
+      tail = `${tableChunk.join("\n")}\n${tail}`;
+    }
+  }
+
+  return { stable, tail };
+}
+
+function LightMarkdown({
+  content,
+  thinking,
+  streaming,
+}: {
+  content: string;
+  thinking?: boolean;
+  streaming?: boolean;
+}) {
+  const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
+  /** undefined = 串流結束後預設預覽；false = 使用者切回原始碼 */
+  const [previewOn, setPreviewOn] = useState<Record<number, boolean | undefined>>({});
+  const [previewTall, setPreviewTall] = useState<Record<number, boolean>>({});
+
+  const blocks = useMemo(() => splitMarkdownBlocks(content, Boolean(streaming)), [content, streaming]);
+
+  async function copyCode(idx: number, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedIdx(idx);
+      setTimeout(() => setCopiedIdx(null), 1500);
+    } catch {
+      // ignore
+    }
+  }
+
+  function renderTextBlock(body: string, keyBase: number) {
+    const { stable, tail } = splitStableText(body, Boolean(streaming));
+    const lines = stable.length ? stable.split("\n") : [];
+    // split 會在結尾 \n 產生空字串；保留邏輯與先前一致
+    const out: ReactNode[] = [];
+    let listItems: { ordered: boolean; text: string }[] = [];
+    let listOrdered = false;
+    let para: string[] = [];
+
+    const flushPara = () => {
+      if (!para.length) return;
+      out.push(<p key={`p${keyBase}-${out.length}`}>{renderInline(para.join("\n"))}</p>);
+      para = [];
+    };
+    const flushList = () => {
+      if (!listItems.length) return;
+      const Tag = listOrdered ? "ol" : "ul";
+      out.push(
+        <Tag key={`l${keyBase}-${out.length}`}>
+          {listItems.map((item, i) => (
+            <li key={i}>{renderInline(item.text)}</li>
+          ))}
+        </Tag>,
+      );
+      listItems = [];
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      // 因 stable 以 \n 結尾，最後一個空行代表段落結束，交給 trim === "" 處理
+      const heading = /^(#{1,3})\s+(.+)$/.exec(line);
+      const bullet = /^[-*]\s+(.+)$/.exec(line);
+      const numbered = /^(\d+)\.\s+(.+)$/.exec(line);
+      const hr = /^(-{3,}|\*{3,}|_{3,})\s*$/.test(line);
+      const tableStart =
+        line.includes("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1]);
+
+      if (tableStart) {
+        flushList();
+        flushPara();
+        const header = parseTableRow(line);
+        i += 1; // skip separator
+        const rows: string[][] = [];
+        while (i + 1 < lines.length && lines[i + 1].includes("|") && !isTableSeparator(lines[i + 1])) {
+          i += 1;
+          rows.push(parseTableRow(lines[i]));
+        }
+        // 串流中：若表格列可能還在繼續，且下一 peek 在 tail，先輸出已有列；新列進 tail 即可
+        out.push(
+          <div className="md-table-wrap" key={`t${keyBase}-${out.length}`}>
+            <table>
+              <thead>
+                <tr>
+                  {header.map((h, hi) => (
+                    <th key={hi}>{renderInline(h)}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, ri) => (
+                  <tr key={ri}>
+                    {header.map((_, ci) => (
+                      <td key={ci}>{renderInline(row[ci] ?? "")}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>,
+        );
+      } else if (heading) {
+        flushList();
+        flushPara();
+        const level = heading[1].length;
+        const Tag = `h${level}` as "h1" | "h2" | "h3";
+        out.push(<Tag key={`h${keyBase}-${out.length}`}>{renderInline(heading[2])}</Tag>);
+      } else if (hr) {
+        flushList();
+        flushPara();
+        out.push(<hr key={`hr${keyBase}-${out.length}`} />);
+      } else if (bullet) {
+        flushPara();
+        if (listItems.length && listOrdered) flushList();
+        listOrdered = false;
+        listItems.push({ ordered: false, text: bullet[1] });
+      } else if (numbered) {
+        flushPara();
+        if (listItems.length && !listOrdered) flushList();
+        listOrdered = true;
+        listItems.push({ ordered: true, text: numbered[2] });
+      } else if (line.trim() === "") {
+        flushList();
+        flushPara();
+      } else {
+        flushList();
+        para.push(line);
+      }
+    }
+    flushList();
+    flushPara();
+    if (tail) {
+      out.push(
+        <p key={`tail${keyBase}`} className="md-stream-tail">
+          {tail}
+        </p>,
+      );
+    }
+    return out;
+  }
+
+  if (!content) {
+    return thinking ? <ThinkingIndicator /> : null;
+  }
+
+  return (
+    <div className={`md${streaming ? " is-streaming-md" : ""}`}>
+      {blocks.map((b, i) => {
+        if (b.type === "code") {
+          const meta = parseCodeFenceMeta(b.lang || "");
+          const previewable = isHtmlPreviewable(meta);
+          const inPreview = previewable && !b.open && previewOn[i] !== false;
+          const tall = Boolean(previewTall[i]);
+          return (
+            <div
+              className={`md-code${meta.downloadable ? " is-file" : ""}${previewable ? " is-previewable" : ""}${b.open ? " is-open" : ""}${inPreview ? " is-previewing" : ""}`}
+              key={i}
+            >
+              <div className="md-code-head">
+                <span>
+                  {previewable
+                    ? `🌐 ${meta.label || "preview.html"}`
+                    : meta.downloadable
+                      ? `📦 ${meta.label}`
+                      : meta.label || (b.open ? "code…" : "code")}
+                </span>
+                {!b.open && (
+                  <div className="md-code-actions">
+                    {previewable && (
+                      <>
+                        <button
+                          type="button"
+                          className={inPreview ? "is-active" : ""}
+                          onClick={() => setPreviewOn((prev) => ({ ...prev, [i]: true }))}
+                        >
+                          ▶️ 預覽互動
+                        </button>
+                        <button
+                          type="button"
+                          className={!inPreview ? "is-active" : ""}
+                          onClick={() => setPreviewOn((prev) => ({ ...prev, [i]: false }))}
+                        >
+                          💻 原始碼
+                        </button>
+                        {inPreview && (
+                          <button
+                            type="button"
+                            onClick={() => setPreviewTall((prev) => ({ ...prev, [i]: !prev[i] }))}
+                          >
+                            {tall ? "⤓ 標準高度" : "⤢ 加高預覽"}
+                          </button>
+                        )}
+                      </>
+                    )}
+                    <button type="button" onClick={() => void copyCode(i, b.body)}>
+                      {copiedIdx === i ? "已複製 ✓" : "📋 複製內容"}
+                    </button>
+                    {meta.downloadable && meta.filename && (
+                      <button type="button" onClick={() => downloadTextFile(meta.filename!, b.body)}>
+                        ⬇️ 下載檔案
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {inPreview ? (
+                <div className={`md-preview-frame${tall ? " is-tall" : ""}`}>
+                  <iframe
+                    title={`preview-${meta.label || i}`}
+                    srcDoc={b.body}
+                    sandbox="allow-scripts allow-modals"
+                    className="md-preview-iframe"
+                  />
+                </div>
+              ) : (
+                <pre>
+                  <code>{b.body}</code>
+                </pre>
+              )}
+            </div>
+          );
+        }
+        if (b.type === "math") {
+          return (
+            <pre key={i} className={`md-math${b.open ? " is-open" : ""}`}>
+              <code>{b.open ? `$$${b.body}` : b.body}</code>
+            </pre>
+          );
+        }
+        return <Fragment key={i}>{renderTextBlock(b.body, i)}</Fragment>;
+      })}
+    </div>
+  );
+}
+
+function CopyReplyButton({ text }: { text: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        } catch {
+          // ignore
+        }
+      }}
+    >
+      {done ? "已複製 ✓" : "📋 複製回覆"}
+    </button>
+  );
+}
+
+const DOWNLOADABLE_EXTS = new Set([
+  "csv",
+  "html",
+  "htm",
+  "json",
+  "md",
+  "txt",
+  "py",
+  "ts",
+  "tsx",
+  "js",
+  "jsx",
+  "xml",
+  "css",
+  "sql",
+  "log",
+  "yaml",
+  "yml",
+]);
+
+function parseCodeFenceMeta(langRaw: string): {
+  label: string;
+  filename: string | null;
+  language: string;
+  downloadable: boolean;
+} {
+  const raw = langRaw.trim();
+  const colon = raw.indexOf(":");
+  if (colon > 0) {
+    const language = raw.slice(0, colon).trim() || "txt";
+    const filename = raw.slice(colon + 1).trim();
+    return {
+      label: filename || language,
+      filename: filename || `download.${language}`,
+      language,
+      downloadable: true,
+    };
+  }
+  const lower = raw.toLowerCase();
+  if (DOWNLOADABLE_EXTS.has(lower)) {
+    return { label: raw || "code", filename: `download.${lower}`, language: raw, downloadable: true };
+  }
+  return { label: raw || "code", filename: null, language: raw, downloadable: false };
+}
+
+function isHtmlPreviewable(meta: { language: string; filename: string | null }): boolean {
+  const lang = meta.language.toLowerCase();
+  const name = (meta.filename || "").toLowerCase();
+  return (
+    lang === "html" ||
+    lang === "htm" ||
+    lang === "svg" ||
+    name.endsWith(".html") ||
+    name.endsWith(".htm") ||
+    name.endsWith(".svg")
+  );
+}
+
+function downloadTextFile(filename: string, body: string) {
+  const isCsv = /\.csv$/i.test(filename);
+  const text = isCsv ? `\uFEFF${body}` : body;
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+type PendingImage = { id: string; mimeType: string; data: string; previewUrl: string };
+type PendingFile = { id: string; name: string; size: number; text: string };
+
+const MAX_PENDING_IMAGES = 3;
+const MAX_PENDING_FILES = 3;
+const MAX_FILE_BYTES = 100 * 1024;
+/** 單個文字附件淨化後上限 */
+const MAX_FILE_CHARS = 15_000;
+/** 貼上／輸入超過此字數 → 自動收成 TXT 附件（避免對話欄變文字牆） */
+const LONG_PASTE_TO_FILE_CHARS = 8_000;
+const TEXT_FILE_RE = /\.(txt|csv|md|json|js|ts|tsx|jsx|py|html|htm|xml|log|css|sql|yaml|yml)$/i;
+
+function formatCharCount(n: number): string {
+  return n.toLocaleString("zh-TW");
+}
+
+function pendingFileFromLongText(raw: string): PendingFile {
+  let text = raw;
+  if (text.length > MAX_FILE_CHARS) {
+    text = `${text.slice(0, MAX_FILE_CHARS)}\n...[檔案過長已截斷]`;
+  }
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const name = `貼上文字_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
+  return {
+    id: crypto.randomUUID(),
+    name,
+    size: new Blob([text], { type: "text/plain;charset=utf-8" }).size,
+    text,
+  };
+}
+
+function longTextAttachHint(fileName: string, originalLen: number): string {
+  if (originalLen > MAX_FILE_CHARS) {
+    return `長文已轉成附件「${fileName}」（${formatCharCount(originalLen)} 字 → 保留前 ${formatCharCount(MAX_FILE_CHARS)} 字）`;
+  }
+  return `長文已轉成附件「${fileName}」（${formatCharCount(originalLen)} 字）`;
+}
+
+function formatBytes(n: number) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function compressImageFile(file: File): Promise<PendingImage> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("讀取圖片失敗"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("圖片損壞"));
+      img.onload = () => {
+        const max = 1280;
+        let { width, height } = img;
+        if (width > max || height > max) {
+          const scale = Math.min(max / width, max / height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("無法壓縮圖片"));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
+        const comma = dataUrl.indexOf(",");
+        const data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+        resolve({
+          id: crypto.randomUUID(),
+          mimeType: "image/jpeg",
+          data,
+          previewUrl: dataUrl,
+        });
+      };
+      img.src = String(reader.result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+async function readTextAttachment(file: File): Promise<PendingFile> {
+  if (file.size > MAX_FILE_BYTES) {
+    throw new Error(`「${file.name}」超過 100KB 上限`);
+  }
+  let text = await file.text();
+  if (text.length > MAX_FILE_CHARS) {
+    text = `${text.slice(0, MAX_FILE_CHARS)}\n...[檔案過長已截斷]`;
+  }
+  return { id: crypto.randomUUID(), name: file.name, size: file.size, text };
+}
+
+export default function ChatPage() {
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [familyId, setFamilyId] = useState(AUTO_FAMILY_ID);
+  /** 僅手動選 top 模型時可開；預設關閉 */
+  const [deepThink, setDeepThink] = useState(false);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [listening, setListening] = useState(false);
+  const [composerHint, setComposerHint] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [googleEnabled, setGoogleEnabled] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authRole, setAuthRole] = useState<"buyer" | "supplier">("buyer");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authName, setAuthName] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [redeemInput, setRedeemInput] = useState("");
+  const [redeemMsg, setRedeemMsg] = useState<string | null>(null);
+  const [apiKeys, setApiKeys] = useState<ApiKeyRow[]>([]);
+  const [apiKeyLabel, setApiKeyLabel] = useState("");
+  const [freshApiKey, setFreshApiKey] = useState<string | null>(null);
+  const [apiKeysBusy, setApiKeysBusy] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [mintedCode, setMintedCode] = useState<string | null>(null);
+  const [mintMsg, setMintMsg] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<{ stop: () => void } | null>(null);
+  /** 僅在使用者本來就在底部附近時，才跟隨 AI 串流往下捲；往上閱讀時不強迫跟隨 */
+  const stickToBottomRef = useRef(true);
+  const [showJumpLatest, setShowJumpLatest] = useState(false);
+
+  function scrollToBottom(behavior: ScrollBehavior = "auto") {
+    bottomRef.current?.scrollIntoView({ behavior, block: "end" });
+  }
+
+  function updateStickFromScroll() {
+    const el = messagesRef.current;
+    if (!el) return;
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const nearBottom = dist < 96;
+    stickToBottomRef.current = nearBottom;
+    setShowJumpLatest(!nearBottom && messages.length > 0);
+  }
+
+  const refreshConversations = useCallback(async () => {
+    const res = await fetch("/api/conversations");
+    if (!res.ok) {
+      setConversations([]);
+      return;
+    }
+    setConversations(await res.json());
+  }, []);
+  const refreshWallet = useCallback(async () => {
+    const res = await fetch("/api/wallet", { cache: "no-store" });
+    if (!res.ok) {
+      setWallet(null);
+      return;
+    }
+    const data = (await res.json()) as Wallet;
+    const next: Wallet = {
+      ...data,
+      balance: data.balance ?? 0,
+      quotaCap: normalizeQuotaCap(data.balance ?? 0, data.quotaCap),
+      usage: data.usage ?? { messages: 0, chargedPoints: 0, officialPoints: 0 },
+    };
+    setWallet(next);
+    return next;
+  }, []);
+  const refreshModels = useCallback(async () => {
+    const list = (await (await fetch("/api/models", { cache: "no-store" })).json()) as ModelOption[];
+    setModels(list);
+    setFamilyId((cur) => {
+      if (cur === AUTO_FAMILY_ID) return cur;
+      const families = [...new Set(list.map((m) => m.familyId))];
+      if (families.includes(cur) && list.some((m) => m.familyId === cur && m.available)) return cur;
+      const first = list.find((m) => m.available);
+      return first?.familyId ?? cur;
+    });
+  }, []);
+
+  const refreshMe = useCallback(async () => {
+    setAuthLoading(true);
+    try {
+      const data = await (await fetch("/api/auth/me", { cache: "no-store" })).json();
+      setGoogleEnabled(Boolean(data.googleEnabled));
+      if (data.user) {
+        if (data.redirect && data.redirect !== "/" && typeof window !== "undefined") {
+          const path = window.location.pathname;
+          if (path === "/" && data.user.role === "supplier" && !data.user.isAdmin) {
+            window.location.href = "/sources";
+            return;
+          }
+        }
+        setAuthUser(data.user);
+        setWallet({
+          balance: data.balance ?? 0,
+          quotaCap: normalizeQuotaCap(data.balance ?? 0, data.quotaCap),
+          usage: data.usage ?? { messages: 0, chargedPoints: 0, officialPoints: 0 },
+          apiKey: data.user.apiKey,
+        });
+      } else {
+        setAuthUser(null);
+        setWallet(null);
+      }
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshMe();
+  }, [refreshMe]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    refreshModels();
+    refreshConversations();
+    refreshWallet();
+  }, [authUser, refreshModels, refreshConversations, refreshWallet]);
+
+  useEffect(() => {
+    if (!stickToBottomRef.current) return;
+    // 串流中用 auto，避免每幾個字 smooth 捲動搶視線
+    scrollToBottom(busy ? "auto" : "smooth");
+  }, [messages, busy]);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSidebarOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [sidebarOpen]);
+
+  const familyOptions = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        familyId: string;
+        familyLabel: string;
+        categoryLabel: string;
+        category?: string;
+        provider?: string;
+        quotaPool?: string;
+        tier?: ModelOption["tier"];
+        available: boolean;
+        note?: string;
+        efforts: Effort[];
+        sort: number;
+      }
+    >();
+    for (const m of models) {
+      // 供給者 Node Agent、目錄未開放的模型：不進買家選單
+      if (m.category === "node-agent") continue;
+      if (!m.available) continue;
+      const prev = map.get(m.familyId);
+      const efforts = new Set(prev?.efforts ?? []);
+      if (m.effort) efforts.add(m.effort);
+      const sort =
+        m.familyId.includes("3.5-flash-lite")
+          ? 10
+          : m.familyId.includes("3.8-flash")
+            ? 20
+            : m.familyId.includes("3.1-pro")
+              ? 30
+              : m.familyId.includes("argon")
+                ? 40
+                : m.category === "antigravity-claude"
+                  ? 50
+                  : m.category === "antigravity-gpt"
+                    ? 60
+                    : m.category === "chatgpt"
+                      ? m.familyId.includes("astra")
+                        ? 70
+                        : m.familyId.includes("6.1-sol")
+                          ? 71
+                          : m.familyId.includes("6.1-terra")
+                            ? 72
+                            : m.familyId === "gpt-6-sol"
+                              ? 73
+                              : m.familyId.includes("6-luna")
+                                ? 74
+                                : m.familyId.includes("5.6")
+                                  ? 80
+                                  : 85
+                      : m.category === "grok"
+                        ? m.familyId.includes("4.7") && !m.familyId.includes("fast")
+                          ? 90
+                          : m.familyId.includes("build-fast")
+                            ? 91
+                            : m.familyId.includes("4.6")
+                              ? 92
+                              : 93
+                        : 100;
+      map.set(m.familyId, {
+        familyId: m.familyId,
+        familyLabel: m.familyLabel || m.label,
+        categoryLabel: m.categoryLabel ?? m.category ?? m.provider,
+        category: m.category,
+        provider: m.provider,
+        quotaPool: m.quotaPool,
+        tier: prev?.tier ?? m.tier,
+        available: (prev?.available ?? false) || m.available,
+        note: m.available ? prev?.note : m.note ?? prev?.note,
+        efforts: [...efforts].sort((a, b) => EFFORTS.indexOf(a) - EFFORTS.indexOf(b)),
+        sort: prev?.sort ?? sort,
+      });
+    }
+    return [...map.values()].sort((a, b) => a.sort - b.sort || a.familyLabel.localeCompare(b.familyLabel));
+  }, [models]);
+
+  const isAuto = familyId === AUTO_FAMILY_ID;
+  const anyAvailable = models.some((m) => m.available);
+  const currentFamily = isAuto ? undefined : familyOptions.find((f) => f.familyId === familyId);
+  // 網頁版一律送 low 變體；深度思考由 deepThink 旗標交給後端換 medium
+  const baseEffort: Effort | null = currentFamily?.efforts.length
+    ? currentFamily.efforts.includes("low")
+      ? "low"
+      : currentFamily.efforts[0]
+    : null;
+
+  const modelId = isAuto ? AUTO_FAMILY_ID : baseEffort ? `${familyId}-${baseEffort}` : familyId;
+  const currentModel: ModelOption | undefined = isAuto
+    ? {
+        id: AUTO_FAMILY_ID,
+        label: AUTO_LABEL,
+        familyId: AUTO_FAMILY_ID,
+        familyLabel: AUTO_LABEL,
+        provider: "auto",
+        available: anyAvailable,
+      }
+    : (models.find((m) => m.id === modelId) ?? models.find((m) => m.familyId === familyId));
+  const brand = brandFromModel(familyId, currentModel?.provider ?? currentFamily?.provider, currentFamily?.category);
+  const showDeepThink = !isAuto && currentFamily?.tier === "top";
+
+  useEffect(() => {
+    setDeepThink(false);
+  }, [familyId]);
+
+  // 選到的模型已從選單拿掉（目錄未開／無貨源）→ 退回 Auto
+  useEffect(() => {
+    if (familyId === AUTO_FAMILY_ID) return;
+    if (!familyOptions.some((f) => f.familyId === familyId)) setFamilyId(AUTO_FAMILY_ID);
+  }, [familyId, familyOptions]);
+
+  function applyModelSelection(fullId: string) {
+    setFamilyId(splitModelId(fullId).familyId);
+  }
+
+  async function openConversation(id: string) {
+    setActiveId(id);
+    setSidebarOpen(false);
+    stickToBottomRef.current = true;
+    setShowJumpLatest(false);
+    const res = await fetch(`/api/conversations/${id}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.conversation?.model) applyModelSelection(data.conversation.model);
+    setMessages(markAutoRouted(data.messages as Message[]));
+    requestAnimationFrame(() => scrollToBottom("auto"));
+  }
+
+  function newConversation() {
+    if (busy) return;
+    setActiveId(null);
+    setMessages([]);
+    setFamilyId(AUTO_FAMILY_ID);
+    setSidebarOpen(false);
+    stickToBottomRef.current = true;
+    setShowJumpLatest(false);
+  }
+
+  async function removeConversation(id: string) {
+    await fetch(`/api/conversations/${id}`, { method: "DELETE" });
+    if (id === activeId) newConversation();
+    refreshConversations();
+  }
+
+  async function submitAuth(e: React.FormEvent) {
+    e.preventDefault();
+    setAuthError(null);
+    const path = authMode === "login" ? "/api/auth/login" : "/api/auth/register";
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email: authEmail,
+        password: authPassword,
+        name: authName || undefined,
+        role: authMode === "register" ? authRole : undefined,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setAuthError(data.error || "登入失敗");
+      return;
+    }
+    if (data.redirect && data.redirect !== "/") {
+      window.location.href = data.redirect;
+      return;
+    }
+    setAuthUser(data.user);
+    setWallet({
+      balance: data.balance ?? 0,
+      quotaCap: normalizeQuotaCap(data.balance ?? 0, data.quotaCap),
+      usage: { messages: 0, chargedPoints: 0, officialPoints: 0 },
+      apiKey: data.user.apiKey,
+    });
+  }
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    setAuthUser(null);
+    setWallet(null);
+    setConversations([]);
+    setMessages([]);
+    setActiveId(null);
+    setAccountOpen(false);
+    setSidebarOpen(false);
+  }
+
+  async function redeem() {
+    setRedeemMsg(null);
+    const res = await fetch("/api/wallet/redeem", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      cache: "no-store",
+      body: JSON.stringify({ code: redeemInput }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setRedeemMsg(data.error || "兌換失敗");
+      return;
+    }
+    setRedeemMsg(data.message || "兌換成功");
+    setRedeemInput("");
+    // 立刻用兌換回傳餘額更新 UI，避免被快取的舊 /api/wallet 卡住
+    if (typeof data.balance === "number") {
+      const bal = data.balance as number;
+      const cap = normalizeQuotaCap(bal, data.quotaCap);
+      setWallet((prev) =>
+        prev
+          ? { ...prev, balance: bal, quotaCap: cap }
+          : {
+              balance: bal,
+              quotaCap: cap,
+              usage: { messages: 0, chargedPoints: 0, officialPoints: 0 },
+              apiKey: authUser?.apiKey,
+            },
+      );
+    }
+    await refreshWallet();
+  }
+
+  async function mintCode(points: number, planLabel: string) {
+    setMintMsg(null);
+    setMintedCode(null);
+    const res = await fetch("/api/admin/redeem-codes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        points,
+        maxUses: 1,
+        note: `admin mint · ${planLabel} · ${points} 額度`,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setMintMsg(data.error || "產碼失敗");
+      return;
+    }
+    setMintedCode(data.code);
+    setMintMsg(`已產生 ${planLabel}（${points.toLocaleString("zh-TW")} 額度）兌換碼`);
+  }
+
+  async function copyText(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setRedeemMsg("已複製 API Key");
+    } catch {
+      setRedeemMsg("複製失敗，請手動選取");
+    }
+  }
+
+  async function refreshApiKeys() {
+    try {
+      const res = await fetch("/api/account/api-keys", { cache: "no-store" });
+      const data = await res.json();
+      if (!res.ok) {
+        setRedeemMsg(data.error ?? "無法載入 API Key 列表");
+        return;
+      }
+      setApiKeys(Array.isArray(data.keys) ? data.keys : []);
+    } catch (e) {
+      setRedeemMsg(e instanceof Error ? e.message : "無法載入 API Key 列表");
+    }
+  }
+
+  async function createApiKey() {
+    if (apiKeysBusy) return;
+    setApiKeysBusy(true);
+    try {
+      const res = await fetch("/api/account/api-keys", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ label: apiKeyLabel.trim() || undefined }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setRedeemMsg(data.error ?? "新增金鑰失敗");
+        return;
+      }
+      setApiKeys(Array.isArray(data.keys) ? data.keys : []);
+      setFreshApiKey(String(data.apiKey ?? ""));
+      setApiKeyLabel("");
+      setRedeemMsg("已新增金鑰，請立即複製保存（之後只會顯示末四碼）");
+      if (data.apiKey && authUser) {
+        setAuthUser({ ...authUser, apiKey: String(data.apiKey) });
+      }
+    } catch (e) {
+      setRedeemMsg(e instanceof Error ? e.message : "新增金鑰失敗");
+    } finally {
+      setApiKeysBusy(false);
+    }
+  }
+
+  async function revokeApiKey(id: string, hint: string) {
+    if (apiKeysBusy) return;
+    if (!confirm(`確定刪除金鑰 ${hint}？刪除後立即失效，外部工具需改用其他金鑰。`)) return;
+    setApiKeysBusy(true);
+    try {
+      const res = await fetch(`/api/account/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) {
+        setRedeemMsg(data.error ?? "刪除金鑰失敗");
+        return;
+      }
+      setApiKeys(Array.isArray(data.keys) ? data.keys : []);
+      if (freshApiKey) setFreshApiKey(null);
+      setRedeemMsg(`已刪除金鑰 ${hint}`);
+    } catch (e) {
+      setRedeemMsg(e instanceof Error ? e.message : "刪除金鑰失敗");
+    } finally {
+      setApiKeysBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (accountOpen && authUser) void refreshApiKeys();
+  }, [accountOpen, authUser?.id]);
+
+  function resizeTextarea() {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "48px";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }
+
+  useEffect(() => {
+    resizeTextarea();
+  }, [input]);
+
+  function flashComposerHint(msg: string) {
+    setComposerHint(msg);
+    window.setTimeout(() => setComposerHint((cur) => (cur === msg ? null : cur)), 3200);
+  }
+
+  async function ingestFiles(fileList: FileList | File[]) {
+    const files = Array.from(fileList);
+    const addImgs: PendingImage[] = [];
+    const addFiles: PendingFile[] = [];
+    for (const file of files) {
+      try {
+        if (file.type.startsWith("image/")) {
+          addImgs.push(await compressImageFile(file));
+        } else if (TEXT_FILE_RE.test(file.name) || file.type.startsWith("text/") || file.type === "application/json") {
+          addFiles.push(await readTextAttachment(file));
+        } else {
+          flashComposerHint(`不支援的檔案類型：${file.name}`);
+        }
+      } catch (e) {
+        flashComposerHint(e instanceof Error ? e.message : String(e));
+      }
+    }
+    if (addImgs.length) {
+      setPendingImages((prev) => {
+        const next = [...prev, ...addImgs].slice(0, MAX_PENDING_IMAGES);
+        if (prev.length + addImgs.length > MAX_PENDING_IMAGES) {
+          flashComposerHint(`圖片最多 ${MAX_PENDING_IMAGES} 張`);
+        }
+        return next;
+      });
+    }
+    if (addFiles.length) {
+      setPendingFiles((prev) => {
+        const next = [...prev, ...addFiles].slice(0, MAX_PENDING_FILES);
+        if (prev.length + addFiles.length > MAX_PENDING_FILES) {
+          flashComposerHint(`文字檔最多 ${MAX_PENDING_FILES} 個`);
+        }
+        return next;
+      });
+    }
+  }
+
+  function toggleVoiceInput() {
+    if (listening) {
+      recognitionRef.current?.stop();
+      recognitionRef.current = null;
+      setListening(false);
+      return;
+    }
+    type SpeechRec = {
+      lang: string;
+      continuous: boolean;
+      interimResults: boolean;
+      start: () => void;
+      stop: () => void;
+      onresult: ((ev: { resultIndex: number; results: ArrayLike<{ 0?: { transcript?: string } }> }) => void) | null;
+      onerror: (() => void) | null;
+      onend: (() => void) | null;
+    };
+    const w = window as unknown as {
+      SpeechRecognition?: new () => SpeechRec;
+      webkitSpeechRecognition?: new () => SpeechRec;
+    };
+    const SR = w.SpeechRecognition || w.webkitSpeechRecognition;
+    if (!SR) {
+      flashComposerHint("您的瀏覽器環境不支援原生語音輸入，建議使用 Chrome / Edge 瀏覽器");
+      return;
+    }
+    const rec = new SR();
+    rec.lang = "zh-TW";
+    rec.continuous = true;
+    rec.interimResults = false;
+    rec.onresult = (event) => {
+      let chunk = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        chunk += event.results[i][0]?.transcript ?? "";
+      }
+      if (chunk) setInput((prev) => `${prev}${chunk}`);
+    };
+    rec.onerror = () => {
+      setListening(false);
+      recognitionRef.current = null;
+    };
+    rec.onend = () => {
+      setListening(false);
+      recognitionRef.current = null;
+    };
+    recognitionRef.current = rec;
+    rec.start();
+    setListening(true);
+  }
+
+  function buildOutgoingContent(base: string, files: PendingFile[]) {
+    let content = base.trim();
+    for (const f of files) {
+      content += `\n\n--- [附件檔案：${f.name}] ---\n${f.text}\n--- [附件結束] ---`;
+    }
+    return content.trim();
+  }
+
+  async function send(opts?: {
+    text?: string;
+    images?: PendingImage[];
+    files?: PendingFile[];
+    /** 重新生成：不清 composer，也不帶當前附件 */
+    regenerate?: boolean;
+    /** Auto：強制改派 L3 主力重答 */
+    forceMain?: boolean;
+  }) {
+    if (busy || !currentModel?.available) return;
+    const imgs = opts?.regenerate ? [] : (opts?.images ?? pendingImages);
+    let files = opts?.regenerate ? [] : (opts?.files ?? pendingFiles);
+    let boxText = opts?.text ?? input;
+
+    // 送出前雙保險：對話欄仍有超長本文 → 收成 TXT
+    if (!opts?.regenerate && !opts?.files && boxText.trim().length >= LONG_PASTE_TO_FILE_CHARS) {
+      if (files.length >= MAX_PENDING_FILES) {
+        flashComposerHint(`文字過長且附件已滿（最多 ${MAX_PENDING_FILES} 個），請縮短或移除附件`);
+        return;
+      }
+      const file = pendingFileFromLongText(boxText.trim());
+      files = [...files, file];
+      boxText = `請依附件「${file.name}」內容處理。`;
+      flashComposerHint(longTextAttachHint(file.name, (opts?.text ?? input).trim().length));
+    }
+
+    const content = buildOutgoingContent(boxText, files);
+    if (!content && imgs.length === 0) return;
+
+    if (!opts?.regenerate) {
+      setInput("");
+      setPendingImages([]);
+      setPendingFiles([]);
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          textareaRef.current.style.height = "48px";
+        }
+      });
+    }
+
+    setBusy(true);
+    stickToBottomRef.current = true;
+    setShowJumpLatest(false);
+    const displayContent =
+      imgs.length > 0 ? `[已上傳 ${imgs.length} 張圖片]\n${content || "（見附圖）"}` : content;
+    const assistantId = crypto.randomUUID();
+    setMessages((prev) => [
+      ...prev,
+      { id: crypto.randomUUID(), role: "user", content: displayContent },
+      {
+        id: assistantId,
+        role: "assistant",
+        content: "",
+        model: isAuto ? null : modelId,
+        autoRouted: isAuto,
+        deepThink: showDeepThink && deepThink,
+        effort: showDeepThink && deepThink ? "medium" : baseEffort,
+        notices: [],
+      },
+    ]);
+    requestAnimationFrame(() => scrollToBottom("auto"));
+    const patch = (fn: (m: Message) => Message) =>
+      setMessages((prev) => prev.map((m) => (m.id === assistantId ? fn(m) : m)));
+
+    const contentTw = createBrandTypewriter(brand, (chunk) => {
+      patch((m) => ({ ...m, content: m.content + chunk }));
+    });
+    const thinkingTw = createBrandTypewriter(brand, (chunk) => {
+      patch((m) => ({ ...m, thinking: (m.thinking ?? "") + chunk }));
+    });
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+    let streamOk = false;
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          conversationId: activeId,
+          model: modelId,
+          content: content || "（見附圖）",
+          images: imgs.map((img) => ({ mimeType: img.mimeType, data: img.data })),
+          deepThink: showDeepThink && deepThink,
+          autoForce: isAuto && opts?.forceMain ? "main" : undefined,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const { error } = await res.json();
+        patch((m) => ({ ...m, error }));
+        if (res.status === 402) await refreshWallet();
+        return;
+      }
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (!line.trim()) continue;
+          const ev = JSON.parse(line);
+          if (ev.type === "conversation") setActiveId(ev.conversationId);
+          if (ev.type === "auto_route")
+            patch((m) => ({ ...m, model: ev.modelId, autoRouted: true, autoLane: ev.lane }));
+          if (ev.type === "source") patch((m) => ({ ...m, sourceLabel: ev.label, sourceKind: ev.kind }));
+          if (ev.type === "failover")
+            patch((m) => ({
+              ...m,
+              notices: [...(m.notices ?? []), `${ev.from} 滿載或受限（${ev.reason}），已自動無縫接力下一個帳號`],
+            }));
+          if (ev.type === "thinking") thinkingTw.push(ev.text);
+          if (ev.type === "text") contentTw.push(ev.text);
+          if (ev.type === "done")
+            patch((m) => ({
+              ...m,
+              model: typeof ev.modelId === "string" ? ev.modelId : m.model,
+              effort: (ev.effort as Effort | null | undefined) ?? m.effort ?? splitModelId(ev.modelId ?? m.model ?? "").effort,
+              deepThink: Boolean(ev.deepThink) || m.deepThink,
+              inputTokens: ev.usage.inputTokens,
+              outputTokens: ev.usage.outputTokens,
+              officialCostPoints: ev.officialCostPoints,
+              chargedPoints: ev.chargedPoints,
+              upstreamModelId: ev.upstreamModelId ?? ev.usage?.upstreamModelId,
+              upstreamModelVersion: ev.upstreamModelVersion ?? ev.usage?.upstreamModelVersion,
+              viaDailyBypass: false,
+              groundingSources: ev.groundingSources ?? ev.usage?.groundingSources,
+              webSearchQueries: ev.webSearchQueries ?? ev.usage?.webSearchQueries,
+              quotaLabel: ev.usage?.quotaLabel,
+              quotaUsedPct: ev.usage?.quotaUsedPct,
+              quotaBeforePct: ev.usage?.quotaRemainingBeforePct,
+              quotaAfterPct: ev.usage?.quotaRemainingAfterPct,
+            }));
+          if (ev.type === "error") patch((m) => ({ ...m, error: ev.message }));
+        }
+      }
+      streamOk = !controller.signal.aborted;
+      if (streamOk) {
+        await thinkingTw.drain();
+        await contentTw.drain();
+      } else {
+        thinkingTw.flush();
+        contentTw.flush();
+      }
+    } catch (e) {
+      thinkingTw.flush();
+      contentTw.flush();
+      if (!controller.signal.aborted) patch((m) => ({ ...m, error: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      if (!streamOk) {
+        thinkingTw.flush();
+        contentTw.flush();
+      }
+      thinkingTw.stop();
+      contentTw.stop();
+      abortRef.current = null;
+      setBusy(false);
+      refreshConversations();
+      refreshWallet();
+    }
+  }
+
+  function regenerateLast(forceMain = false) {
+    if (busy) return;
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser?.content?.trim()) {
+      flashComposerHint("找不到可重新生成的上一題");
+      return;
+    }
+    const text = lastUser.content.replace(/^\[已上傳 \d+ 張圖片\]\n/, "").trim();
+    void send({ text, regenerate: true, forceMain });
+  }
+
+  const apiBase =
+    typeof window !== "undefined" ? `${window.location.origin}/api/v1` : "https://你的網域/api/v1";
+
+  if (authLoading) {
+    return (
+      <div className="page" style={{ placeItems: "center", display: "grid", minHeight: "100vh" }}>
+        <p className="muted">載入中…</p>
+      </div>
+    );
+  }
+
+  if (!authUser) {
+    return (
+      <div className="landing">
+        <section className="landing-hero">
+          <div>
+            <div className="points-badge badge-brand" style={{ marginBottom: 16 }}>
+              AI 用量水庫
+            </div>
+            <h1>四大頂級 AI 模型，一個水庫無限暢聊</h1>
+            <p className="lead">
+              把 Gemini、Claude、GPT、Grok 的高速算力匯成同一個入口——用多少付多少，也能一鍵接入 Cursor。
+            </p>
+          </div>
+          <div className="feature-grid">
+            <article className="feature-card">
+              <h3>破除 5 小時冷卻鎖</h3>
+              <p>多節點智慧路由，週三不撞牆、台灣夜間尖峰不降智。</p>
+            </article>
+            <article className="feature-card">
+              <h3>199 元輕量入場</h3>
+              <p>無需每月綁約 650 元，內含 1,000 可用額度，並支援直接接入 Cursor 寫程式。</p>
+            </article>
+            <article className="feature-card">
+              <h3>Pro / Max 算力夥伴計畫</h3>
+              <p>將您月底作廢的閒置額度託管為工作流節點，領取高達 80% 創作者分潤與跨模型可用額度。</p>
+            </article>
+          </div>
+        </section>
+
+        <section className="landing-auth">
+          <div className="card">
+            <h2 style={{ marginTop: 0, marginBottom: 6 }}>開始使用</h2>
+            <p className="muted" style={{ marginTop: 0, marginBottom: 16, lineHeight: 1.5 }}>
+              使用者聊天與 API 用量；供給者綁定訂閱釋出額度。
+            </p>
+            <div className="auth-tabs">
+              <button type="button" className={authMode === "login" ? "primary" : ""} onClick={() => setAuthMode("login")}>
+                登入
+              </button>
+              <button
+                type="button"
+                className={authMode === "register" ? "primary" : ""}
+                onClick={() => setAuthMode("register")}
+              >
+                註冊
+              </button>
+            </div>
+            {authMode === "register" && (
+              <div className="role-tabs">
+                <button
+                  type="button"
+                  className={authRole === "buyer" ? "primary" : ""}
+                  onClick={() => setAuthRole("buyer")}
+                >
+                  我是使用者
+                </button>
+                <button
+                  type="button"
+                  className={authRole === "supplier" ? "primary" : ""}
+                  onClick={() => setAuthRole("supplier")}
+                >
+                  我是供給者
+                </button>
+              </div>
+            )}
+            <form onSubmit={submitAuth} className="form-grid" style={{ gridTemplateColumns: "1fr" }}>
+              {authMode === "register" && (
+                <label>
+                  暱稱（選填）
+                  <input value={authName} onChange={(e) => setAuthName(e.target.value)} />
+                </label>
+              )}
+              <label>
+                Email
+                <input type="email" required value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} />
+              </label>
+              <label>
+                密碼
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                />
+              </label>
+              <button type="submit" className="primary" style={{ padding: "12px 16px", fontWeight: 600 }}>
+                {authMode === "login" ? "登入" : authRole === "supplier" ? "註冊為供給者" : "註冊為使用者"}
+              </button>
+            </form>
+            {googleEnabled && authRole === "buyer" && (
+              <p style={{ marginTop: 14 }}>
+                <a href="/api/auth/google/start">使用 Google 登入（使用者）</a>
+              </p>
+            )}
+            {authError && <p style={{ color: "var(--danger)" }}>{authError}</p>}
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`app${sidebarOpen ? " sidebar-open" : ""}`} data-brand={brand}>
+      {sidebarOpen && (
+        <button type="button" className="sidebar-backdrop" aria-label="關閉選單" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      <aside className="sidebar">
+        <div className="sidebar-head">
+          <button className="primary new-chat-btn" onClick={newConversation} disabled={busy}>
+            ＋ 新對話
+          </button>
+        </div>
+
+        <div className="conv-list">
+          <div className="conv-section-label">對話</div>
+          {conversations.map((c) => (
+            <div
+              key={c.id}
+              className={`conv-item ${c.id === activeId ? "active" : ""}`}
+              onClick={() => openConversation(c.id)}
+            >
+              <span className="title">{c.title}</span>
+              <button
+                className="del"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeConversation(c.id);
+                }}
+              >
+                刪除
+              </button>
+            </div>
+          ))}
+          {conversations.length === 0 && (
+            <div className="muted" style={{ padding: "8px 12px", fontSize: 13 }}>
+              還沒有對話
+            </div>
+          )}
+        </div>
+
+        <div className="sidebar-foot">
+          <div className="account-chip">
+            <div className="account-chip-top">
+              <div className="account-name-row">
+                <div className="name" title={authUser.email}>
+                  {authUser.name}
+                </div>
+                <button type="button" className="ghost account-logout-btn" title="登出" onClick={() => void logout()}>
+                  登出
+                </button>
+              </div>
+              <button
+                type="button"
+                className="ghost quota-expand-btn"
+                onClick={() => setAccountOpen(true)}
+                title="擴充可用額度"
+              >
+                ＋擴充
+              </button>
+            </div>
+            {wallet && (
+              <div
+                className={`quota-meter quota-${
+                  wallet.balance / Math.max(1, wallet.quotaCap) < 0.2
+                    ? "low"
+                    : wallet.balance / Math.max(1, wallet.quotaCap) < 0.5
+                      ? "mid"
+                      : "high"
+                }`}
+              >
+                <div className="quota-meter-head">
+                  <span className="quota-meter-title">可用額度</span>
+                  <span className="quota-tier-badge">{quotaTierLabel(wallet.quotaCap)}</span>
+                </div>
+                <div className="quota-meter-nums">
+                  {fmt(wallet.balance, 0)} / {fmt(wallet.quotaCap, 0)}
+                  <span className="muted">
+                    （{Math.round((100 * wallet.balance) / Math.max(1, wallet.quotaCap))}%）
+                  </span>
+                </div>
+                <div className="quota-segments" aria-hidden>
+                  {quotaSegmentFills(wallet.balance, wallet.quotaCap).map((fill, i) => (
+                    <div key={i} className="quota-seg">
+                      <div className="quota-seg-fill" style={{ width: `${Math.round(fill * 100)}%` }} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {authUser.isSupplier && (
+              <Link href="/sources" style={{ fontSize: 12 }}>
+                供給者貨源 →
+              </Link>
+            )}
+          </div>
+        </div>
+      </aside>
+
+      <main className="main">
+        <div className="topbar">
+          <button type="button" className="menu-btn" onClick={() => setSidebarOpen(true)}>
+            ☰ 對話紀錄
+          </button>
+          <span className="muted" style={{ fontSize: 12 }}>
+            {isAuto
+              ? "依問題自動派發：日常→Flash，程式／分析→主力模型，照實際模型扣額度"
+              : brand === "gpt"
+                ? "OpenAI 氛圍"
+                : brand === "claude"
+                  ? "Anthropic 書卷氛圍"
+                  : brand === "grok"
+                    ? "xAI 極客氛圍"
+                    : "Gemini 星光氛圍"}
+          </span>
+        </div>
+
+        <div className="messages-wrap">
+          <div className="messages" ref={messagesRef} onScroll={updateStickFromScroll}>
+            {messages.length === 0 && (
+              <div className="empty">
+                <h2 className={brand === "gemini" ? "brand-gradient-text" : undefined}>
+                  頂級模型不用等，優先消耗供給者訂閱剩餘容量
+                </h2>
+                {anyAvailable ? (
+                  <p>預設 ⚡ Auto 會依問題自動挑模型；也可以在對話欄左下角手動指定模型。</p>
+                ) : (
+                  <p>目前沒有可用模型。請稍後再試，或聯繫管理員確認水庫狀態。</p>
+                )}
+                {wallet && wallet.balance <= 0 && (
+                  <p className="notice">
+                    可用額度為 0。點左側「＋擴充」輸入兌換碼入帳。
+                  </p>
+                )}
+              </div>
+            )}
+            {messages.map((m, i) => {
+              const isStreaming =
+                busy && m.role === "assistant" && m.id === messages[messages.length - 1]?.id && !m.error;
+              return (
+              <div key={m.id} className={`msg ${m.role}${isStreaming ? " is-streaming" : ""}`}>
+                {authUser.isAdmin &&
+                  m.notices?.map((n, i) => (
+                    <div key={i} className="notice">
+                      ↻ {n}
+                    </div>
+                  ))}
+                {m.role === "assistant" && isStreaming && m.content && (
+                  <div className="stream-status" aria-hidden>
+                    <span className="stream-pulse" />
+                    <span className="stream-status-label">{STREAM_STATUS[brand].write}</span>
+                  </div>
+                )}
+                <div className={`bubble${isStreaming ? " is-streaming" : ""}`}>
+                  {m.role === "assistant" ? (
+                    <>
+                      <LightMarkdown
+                        content={m.content}
+                        thinking={!m.content && !m.error && isStreaming}
+                        streaming={isStreaming}
+                      />
+                      {isStreaming && m.content && brand !== "grok" ? (
+                        <span className="stream-caret" aria-hidden />
+                      ) : null}
+                    </>
+                  ) : (
+                    m.content
+                  )}
+                </div>
+                {m.error && <div className="meta error">⚠ {m.error}</div>}
+                {m.role === "assistant" && m.content && !m.error && (
+                  <div className="msg-toolbar">
+                    <CopyReplyButton text={m.content} />
+                    {i === messages.length - 1 && (
+                      <button
+                        type="button"
+                        title="重新生成僅針對文字內容（圖片不會重送）"
+                        disabled={busy}
+                        onClick={() => regenerateLast()}
+                      >
+                        🔄 重新生成
+                      </button>
+                    )}
+                    {i === messages.length - 1 && isAuto && m.autoRouted && m.autoLane === "light" && (
+                      <button
+                        type="button"
+                        title="改派主力模型（Sonnet／Gemini Pro／Terra）重新回答這一題"
+                        disabled={busy}
+                        onClick={() => regenerateLast(true)}
+                      >
+                        🚀 改用主力模型重答
+                      </button>
+                    )}
+                    <span className="muted">
+                      {m.autoRouted
+                        ? `⚡ Auto（由 ${footerModelLabel(m.model, models, { effort: m.effort, deepThink: m.deepThink, autoRouted: true })} 回答）`
+                        : footerModelLabel(m.model, models, { effort: m.effort, deepThink: m.deepThink })}
+                      {m.chargedPoints != null ? ` · 本次消耗 ${fmt(m.chargedPoints, 2)} 額度` : ""}
+                      {m.groundingSources && m.groundingSources.length > 0 ? " · 已上網查證" : ""}
+                    </span>
+                  </div>
+                )}
+                {m.role === "assistant" && m.groundingSources && m.groundingSources.length > 0 && (
+                  <details className="grounding-box">
+                    <summary className="grounding-title">
+                      參考來源（{Math.min(m.groundingSources.length, 8)}）
+                    </summary>
+                    <div className="grounding-chips">
+                      {m.groundingSources.slice(0, 8).map((s) => (
+                        <SourceChip
+                          key={s.uri}
+                          href={s.uri}
+                          label={s.title && !/^https?:\/\//i.test(s.title) ? s.title : hostnameOfUrl(s.uri)}
+                        />
+                      ))}
+                    </div>
+                    {m.webSearchQueries && m.webSearchQueries.length > 0 && (
+                      <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+                        搜尋詞：{m.webSearchQueries.join(" · ")}
+                      </div>
+                    )}
+                  </details>
+                )}
+                {authUser.isAdmin && m.role === "assistant" && (m.sourceLabel || m.chargedPoints != null) && (
+                  <div className="meta">
+                    {(m.upstreamModelVersion || m.upstreamModelId) && (
+                      <span className="tag">
+                        上游確認：{m.upstreamModelVersion ?? m.upstreamModelId}
+                      </span>
+                    )}
+                    {m.quotaUsedPct != null && (
+                      <span className="tag" style={{ color: "var(--warn)" }}>
+                        扣「{m.quotaLabel}」{m.quotaUsedPct.toFixed(3)}%（{m.quotaBeforePct?.toFixed(2)}% →{" "}
+                        {m.quotaAfterPct?.toFixed(2)}%）
+                      </span>
+                    )}
+                    {m.sourceLabel && (
+                      <span className={`tag ${m.sourceKind ?? ""}`}>
+                        {m.sourceKind === "supplier" ? "供給者訂閱" : "平台直連"}：{m.sourceLabel}
+                      </span>
+                    )}
+                    {m.chargedPoints != null && (
+                      <span>
+                        官方等值 {fmt(m.officialCostPoints, 4)} · token {m.inputTokens}/{m.outputTokens}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+              );
+            })}
+            <div ref={bottomRef} />
+          </div>
+          {showJumpLatest && (
+            <button
+              type="button"
+              className="jump-latest"
+              onClick={() => {
+                stickToBottomRef.current = true;
+                setShowJumpLatest(false);
+                scrollToBottom("smooth");
+              }}
+            >
+              ↓ 回到最新
+            </button>
+          )}
+        </div>
+
+        <div className="composer">
+          <div className="composer-shell">
+            {(pendingImages.length > 0 || pendingFiles.length > 0) && (
+              <div className="composer-attachments">
+                {pendingImages.map((img) => (
+                  <div className="composer-thumb" key={img.id}>
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={img.previewUrl} alt="待傳送圖片" />
+                    <button
+                      type="button"
+                      aria-label="移除圖片"
+                      onClick={() => setPendingImages((prev) => prev.filter((x) => x.id !== img.id))}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+                {pendingFiles.map((f) => (
+                  <div className="composer-file-chip" key={f.id}>
+                    <span>
+                      📄 {f.name} ({formatBytes(f.size)})
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="移除檔案"
+                      onClick={() => setPendingFiles((prev) => prev.filter((x) => x.id !== f.id))}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {composerHint && <div className="composer-hint">{composerHint}</div>}
+            <div
+              className="composer-inner"
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (e.dataTransfer.files?.length) void ingestFiles(e.dataTransfer.files);
+              }}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,.txt,.csv,.md,.json,.js,.ts,.tsx,.jsx,.py,.html,.htm,.xml,.log,.css,.sql,.yaml,.yml"
+                multiple
+                hidden
+                onChange={(e) => {
+                  if (e.target.files?.length) void ingestFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <textarea
+                ref={textareaRef}
+                value={input}
+                placeholder="輸入訊息（Enter 送出，Shift+Enter 換行；可貼上截圖）"
+                onChange={(e) => setInput(e.target.value)}
+                onPaste={(e) => {
+                  const items = e.clipboardData?.items;
+                  const imageFiles: File[] = [];
+                  if (items) {
+                    for (const item of items) {
+                      if (item.type.startsWith("image/")) {
+                        const f = item.getAsFile();
+                        if (f) imageFiles.push(f);
+                      }
+                    }
+                  }
+                  const pastedText = e.clipboardData?.getData("text/plain") ?? "";
+                  if (pastedText.length >= LONG_PASTE_TO_FILE_CHARS) {
+                    e.preventDefault();
+                    if (imageFiles.length) void ingestFiles(imageFiles);
+                    if (pendingFiles.length >= MAX_PENDING_FILES) {
+                      flashComposerHint(`文字過長且附件已滿（最多 ${MAX_PENDING_FILES} 個），請先移除再貼上`);
+                      return;
+                    }
+                    const file = pendingFileFromLongText(pastedText);
+                    setPendingFiles((prev) =>
+                      prev.length >= MAX_PENDING_FILES ? prev : [...prev, file],
+                    );
+                    flashComposerHint(longTextAttachHint(file.name, pastedText.length));
+                    return;
+                  }
+                  if (imageFiles.length) {
+                    e.preventDefault();
+                    void ingestFiles(imageFiles);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    void send();
+                  }
+                }}
+              />
+              <div className="composer-bar">
+              <button
+                type="button"
+                className="composer-icon-btn"
+                title="上傳圖片或文字檔"
+                disabled={busy}
+                aria-label="上傳圖片或文字檔"
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </button>
+              <select
+                className="composer-model-select"
+                value={familyId}
+                onChange={(e) => setFamilyId(e.target.value)}
+                disabled={busy}
+                title="選擇模型"
+              >
+                <option value={AUTO_FAMILY_ID} disabled={!anyAvailable}>
+                  {AUTO_LABEL}
+                </option>
+                {Array.from(
+                  familyOptions.reduce((map, f) => {
+                    const key = f.categoryLabel;
+                    if (!map.has(key)) map.set(key, []);
+                    map.get(key)!.push(f);
+                    return map;
+                  }, new Map<string, typeof familyOptions>()),
+                ).map(([group, list]) => (
+                  <optgroup key={group} label={group}>
+                    {list.map((f) => (
+                      <option key={f.familyId} value={f.familyId} disabled={!f.available}>
+                        {f.available ? f.familyLabel : `${f.familyLabel}（不可用）`}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              {showDeepThink && (
+                <label
+                  className="deep-think-toggle"
+                  title="適合複雜推理與除錯，回應較慢，單次上限 45 額度"
+                >
+                  <input
+                    type="checkbox"
+                    checked={deepThink}
+                    disabled={busy}
+                    onChange={(e) => setDeepThink(e.target.checked)}
+                  />
+                  <span>🧠 深度思考</span>
+                  <span className="deep-think-warn">高 token</span>
+                </label>
+              )}
+              <span className="composer-bar-spacer" />
+              <button
+                type="button"
+                className={`composer-icon-btn${listening ? " is-listening" : ""}`}
+                title="語音輸入（zh-TW）"
+                disabled={busy}
+                aria-label="語音輸入"
+                onClick={() => toggleVoiceInput()}
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="9" y="3" width="6" height="11" rx="3" />
+                  <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+                </svg>
+              </button>
+              {busy ? (
+                <button type="button" onClick={() => abortRef.current?.abort()}>
+                  停止
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => void send()}
+                  disabled={(!input.trim() && pendingImages.length === 0 && pendingFiles.length === 0) || !currentModel?.available}
+                >
+                  送出
+                </button>
+              )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {accountOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setAccountOpen(false);
+          }}
+        >
+          <div className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="account-modal-title">
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+              <div>
+                <h2 id="account-modal-title">帳戶與儲值</h2>
+                <p className="muted" style={{ margin: 0, fontSize: 13 }}>
+                  {authUser.email}
+                </p>
+              </div>
+              <button type="button" className="ghost" onClick={() => setAccountOpen(false)}>
+                關閉
+              </button>
+            </div>
+
+            {wallet && (
+              <div
+                className={`quota-meter quota-meter-lg quota-${
+                  wallet.balance / Math.max(1, wallet.quotaCap) < 0.2
+                    ? "low"
+                    : wallet.balance / Math.max(1, wallet.quotaCap) < 0.5
+                      ? "mid"
+                      : "high"
+                }`}
+                style={{ marginBottom: 12 }}
+              >
+                <div className="quota-meter-head">
+                  <span className="quota-meter-title">可用額度</span>
+                  <span className="quota-tier-badge">{quotaTierLabel(wallet.quotaCap)}</span>
+                </div>
+                <div className="quota-meter-nums">
+                  {fmt(wallet.balance, 0)} / {fmt(wallet.quotaCap, 0)} 額度
+                  <span className="muted">
+                    （{Math.round((100 * wallet.balance) / Math.max(1, wallet.quotaCap))}%）
+                  </span>
+                </div>
+                <div className="quota-segments" aria-hidden>
+                  {quotaSegmentFills(wallet.balance, wallet.quotaCap).map((fill, i) => (
+                    <div key={i} className="quota-seg">
+                      <div className="quota-seg-fill" style={{ width: `${Math.round(fill * 100)}%` }} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            {wallet && wallet.usage.messages > 0 && (
+              <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                已回答 {wallet.usage.messages} 則，共扣 {fmt(wallet.usage.chargedPoints)} 額度
+              </p>
+            )}
+
+            <div className="modal-section" id="redeem-section">
+              <h3>1. 兌換碼儲值</h3>
+              <div className="plan-tiers">
+                <div className="plan-tier">
+                  <strong>NT$ 199 輕量包</strong>
+                  <span>1,000 額度 · 1 格標準容量</span>
+                </div>
+                <div className="plan-tier plan-tier-hot">
+                  <strong>NT$ 299 進階包</strong>
+                  <span>1,800 額度（+20%）· 雙格水庫</span>
+                </div>
+                <div className="plan-tier plan-tier-pro">
+                  <strong>NT$ 399 旗艦包</strong>
+                  <span>2,800 額度（+40%）· 三格巨量</span>
+                </div>
+              </div>
+              <p className="muted" style={{ fontSize: 13, marginTop: 10 }}>
+                輸入兌換碼立即入帳可用額度（與下方方案對應）。
+              </p>
+              <div className="row" style={{ flexWrap: "wrap" }}>
+                <input
+                  value={redeemInput}
+                  onChange={(e) => setRedeemInput(e.target.value)}
+                  placeholder="VIP199-XXXX"
+                  style={{ flex: 1, minWidth: 160 }}
+                />
+                <button type="button" className="primary" onClick={() => void redeem()}>
+                  兌換入帳
+                </button>
+              </div>
+              {redeemMsg && <p className="muted" style={{ fontSize: 12 }}>{redeemMsg}</p>}
+            </div>
+
+            <div className="modal-section">
+              <h3>2. Cursor / 第三方工具 API Key</h3>
+              <p className="muted" style={{ fontSize: 12, lineHeight: 1.55, marginTop: 0 }}>
+                Base URL：<code>{apiBase}</code>
+                <br />
+                可新增多把金鑰、個別刪除（被盜即可立刻撤銷）。完整密鑰只在「新增當下」顯示一次。
+              </p>
+
+              {freshApiKey && (
+                <div
+                  style={{
+                    marginBottom: 10,
+                    padding: 10,
+                    borderRadius: 8,
+                    border: "1px solid var(--border)",
+                    background: "var(--panel-2)",
+                  }}
+                >
+                  <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+                    新金鑰（請立刻複製）：
+                  </div>
+                  <code style={{ display: "block", fontSize: 12, wordBreak: "break-all", marginBottom: 8 }}>
+                    {freshApiKey}
+                  </code>
+                  <button type="button" className="primary" onClick={() => void copyText(freshApiKey)}>
+                    一鍵複製新金鑰
+                  </button>
+                </div>
+              )}
+
+              <div className="row" style={{ flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+                <input
+                  value={apiKeyLabel}
+                  onChange={(e) => setApiKeyLabel(e.target.value)}
+                  placeholder="金鑰名稱（選填，如 Cursor 筆電）"
+                  style={{ flex: 1, minWidth: 160 }}
+                  disabled={apiKeysBusy}
+                />
+                <button type="button" className="primary" disabled={apiKeysBusy} onClick={() => void createApiKey()}>
+                  ＋ 新增金鑰
+                </button>
+              </div>
+
+              {apiKeys.length === 0 ? (
+                <p className="muted" style={{ fontSize: 12 }}>尚無金鑰，請先新增一把。</p>
+              ) : (
+                <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 8 }}>
+                  {apiKeys.map((k) => (
+                    <li
+                      key={k.id}
+                      className="row"
+                      style={{
+                        justifyContent: "space-between",
+                        gap: 8,
+                        padding: "8px 10px",
+                        border: "1px solid var(--border)",
+                        borderRadius: 8,
+                        background: "var(--panel-2)",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>{k.label || "未命名"}</div>
+                        <div className="muted" style={{ fontSize: 12 }}>
+                          {k.keyHint} · {new Date(k.createdAt).toLocaleString("zh-TW")}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={apiKeysBusy}
+                        onClick={() => void revokeApiKey(k.id, k.keyHint)}
+                        title="刪除後立即失效"
+                      >
+                        🗑 刪除
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              <p className="muted" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.55 }}>
+                💡 可填入支援 OpenAI 相容接口之工具。注意：外部寫程式工具每次請求會夾帶大量專案上下文，額度消耗速度將高於網頁版聊天。
+              </p>
+            </div>
+
+            {authUser.isAdmin && (
+              <div className="modal-section">
+                <h3>3. 管理員專區</h3>
+                <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                  快捷產碼（對應 199／299／399 額度階梯）：
+                </p>
+                <div className="row" style={{ flexWrap: "wrap", marginBottom: 10, gap: 8 }}>
+                  <button type="button" className="primary" onClick={() => void mintCode(1000, "199 輕量")}>
+                    1,000 額度
+                  </button>
+                  <button type="button" onClick={() => void mintCode(1800, "299 進階")}>
+                    1,800 額度
+                  </button>
+                  <button type="button" onClick={() => void mintCode(2800, "399 旗艦")}>
+                    2,800 額度
+                  </button>
+                  <Link href="/admin">管理後台</Link>
+                  <Link href="/sources">供給者貨源</Link>
+                  <Link href="/nodes">Node Agent</Link>
+                </div>
+                {mintedCode && (
+                  <div className="row" style={{ flexWrap: "wrap" }}>
+                    <code>{mintedCode}</code>
+                    <button type="button" onClick={() => void copyText(mintedCode)}>
+                      複製兌換碼
+                    </button>
+                  </div>
+                )}
+                {mintMsg && <p className="muted" style={{ fontSize: 12 }}>{mintMsg}</p>}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

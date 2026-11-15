@@ -1,0 +1,450 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { db, newId } from "./db";
+import { decrypt, encrypt, hintOf } from "./crypto";
+import type { ModelInfo } from "./models";
+import {
+  fetchSubscriptionQuota,
+  quotaWindowForModel,
+  refreshOAuthCredentials,
+  type OAuthCredentials,
+  type SubscriptionQuota,
+} from "./oauth";
+
+export type SourceKind = "supplier" | "platform";
+export type SourceProvider = "gemini" | "openai" | "anthropic" | "xai" | "openrouter";
+export type SourceAuthType = "oauth_sub" | "api_key";
+
+export interface Source {
+  id: string;
+  label: string;
+  kind: SourceKind;
+  provider: SourceProvider;
+  authType: SourceAuthType;
+  keyHint: string;
+  priority: number;
+  monthlyCapPoints: number | null;
+  shareLimitPct: number;
+  quota: SubscriptionQuota | null;
+  quotaUpdatedAt: number | null;
+  enabled: boolean;
+  fromEnv: boolean;
+  /** OAuth Token 已遷到供給者節點本機 */
+  delegatedToNode?: boolean;
+}
+
+export interface SourceStatus extends Source {
+  usedThisMonthPoints: number;
+  cooldownUntil: number | null;
+  lastError: string | null;
+}
+
+interface Health {
+  cooldownUntil: number;
+  lastError: string;
+}
+
+const globalForHealth = globalThis as unknown as { __health?: Map<string, Health> };
+const health = (globalForHealth.__health ??= new Map<string, Health>());
+
+const ENV_SOURCES: { provider: SourceProvider; env: string; label: string; priority: number }[] = [
+  { provider: "gemini", env: "GEMINI_API_KEY", label: "平台直連 Gemini", priority: 1000 },
+  { provider: "openai", env: "OPENAI_API_KEY", label: "平台直連 OpenAI", priority: 1000 },
+  { provider: "anthropic", env: "ANTHROPIC_API_KEY", label: "平台直連 Anthropic", priority: 1000 },
+  { provider: "xai", env: "XAI_API_KEY", label: "平台直連 xAI Grok", priority: 1000 },
+  { provider: "openrouter", env: "OPENROUTER_API_KEY", label: "平台備援 OpenRouter", priority: 2000 },
+];
+
+interface SourceRow {
+  id: string;
+  label: string;
+  kind: SourceKind;
+  provider: SourceProvider;
+  auth_type: SourceAuthType;
+  encrypted_key: string;
+  key_hint: string;
+  priority: number;
+  monthly_cap_points: number | null;
+  share_limit_pct: number;
+  quota_json: string | null;
+  quota_updated_at: number | null;
+  enabled: number;
+}
+
+function rowToSource(r: SourceRow): Source {
+  let quota: SubscriptionQuota | null = null;
+  if (r.quota_json) {
+    try {
+      quota = JSON.parse(r.quota_json) as SubscriptionQuota;
+    } catch {
+      quota = null;
+    }
+  }
+  let delegatedToNode = false;
+  if (r.auth_type === "oauth_sub") {
+    try {
+      const creds = JSON.parse(decrypt(r.encrypted_key)) as OAuthCredentials;
+      delegatedToNode = Boolean(creds.delegatedToNode);
+    } catch {
+      delegatedToNode = false;
+    }
+  }
+  return {
+    id: r.id,
+    label: r.label,
+    kind: r.kind,
+    provider: r.provider,
+    authType: r.auth_type ?? "api_key",
+    keyHint: r.key_hint,
+    priority: r.priority,
+    monthlyCapPoints: r.monthly_cap_points,
+    shareLimitPct: r.share_limit_pct ?? 80,
+    quota,
+    quotaUpdatedAt: r.quota_updated_at,
+    enabled: r.enabled === 1,
+    fromEnv: false,
+    delegatedToNode,
+  };
+}
+
+function envSources(): (Source & { secret: string })[] {
+  return ENV_SOURCES.flatMap((s) => {
+    const apiKey = process.env[s.env]?.trim();
+    if (!apiKey) return [];
+    return [
+      {
+        id: `env-${s.provider}`,
+        label: s.label,
+        kind: "platform" as const,
+        provider: s.provider,
+        authType: "api_key" as const,
+        keyHint: hintOf(apiKey),
+        priority: s.priority,
+        monthlyCapPoints: null,
+        shareLimitPct: 100,
+        quota: null,
+        quotaUpdatedAt: null,
+        enabled: true,
+        fromEnv: true,
+        secret: apiKey,
+      },
+    ];
+  });
+}
+
+function dbSources(): (Source & { resolveSecret: () => string })[] {
+  const rows = db().prepare("SELECT * FROM sources ORDER BY priority, created_at").all() as unknown as SourceRow[];
+  return rows.map((r) => ({ ...rowToSource(r), resolveSecret: () => decrypt(r.encrypted_key) }));
+}
+
+function monthStart(): number {
+  const d = new Date();
+  return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+}
+
+function usedThisMonth(sourceId: string): number {
+  const row = db()
+    .prepare(
+      "SELECT COALESCE(SUM(amount_points), 0) AS used FROM ledger WHERE type = 'source_usage' AND ref_id = ? AND created_at >= ?",
+    )
+    .get(sourceId, monthStart()) as { used: number };
+  return row.used;
+}
+
+export function listSources(): SourceStatus[] {
+  const all: Source[] = [
+    ...dbSources().map(({ resolveSecret: _k, ...s }) => s),
+    ...envSources().map(({ secret: _k, ...s }) => s),
+  ];
+  const now = Date.now();
+  return all.map((s) => {
+    const h = health.get(s.id);
+    return {
+      ...s,
+      usedThisMonthPoints: usedThisMonth(s.id),
+      cooldownUntil: h && h.cooldownUntil > now ? h.cooldownUntil : null,
+      lastError: h?.lastError ?? null,
+    };
+  });
+}
+
+export function addSource(input: {
+  label: string;
+  kind: SourceKind;
+  provider: SourceProvider;
+  apiKey: string;
+  priority?: number;
+  monthlyCapPoints?: number | null;
+}): string {
+  const apiKey = input.apiKey.trim();
+  const id = newId();
+  db()
+    .prepare(
+      `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, enabled, created_at)
+       VALUES (?, ?, ?, ?, 'api_key', ?, ?, ?, ?, 100, 1, ?)`,
+    )
+    .run(
+      id,
+      input.label.trim() || `${input.provider} ${hintOf(apiKey)}`,
+      input.kind,
+      input.provider,
+      encrypt(apiKey),
+      hintOf(apiKey),
+      input.priority ?? (input.kind === "supplier" ? 200 : 1000),
+      input.monthlyCapPoints ?? null,
+      Date.now(),
+    );
+  return id;
+}
+
+export async function addOAuthSubscriptionSource(input: {
+  label?: string;
+  creds: OAuthCredentials;
+  shareLimitPct?: number;
+  priority?: number;
+}): Promise<{ id: string; quota: SubscriptionQuota }> {
+  const quota = await fetchSubscriptionQuota(input.creds);
+  const id = newId();
+  const displayHint = input.creds.email
+    ? `${input.creds.email} (${quota.planType})`
+    : `${input.creds.provider.toUpperCase()} (${quota.planType})`;
+  const defaultLabel =
+    input.label?.trim() ||
+    (input.creds.provider === "gemini"
+      ? `Gemini 訂閱 ${input.creds.email ?? ""}`.trim()
+      : input.creds.provider === "xai"
+        ? `Grok 訂閱 ${input.creds.email ?? ""}`.trim()
+        : `ChatGPT 訂閱 ${input.creds.email ?? ""}`.trim());
+
+  db()
+    .prepare(
+      `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, quota_json, quota_updated_at, enabled, created_at)
+       VALUES (?, ?, 'supplier', ?, 'oauth_sub', ?, ?, ?, NULL, ?, ?, ?, 1, ?)`,
+    )
+    .run(
+      id,
+      defaultLabel,
+      input.creds.provider,
+      encrypt(JSON.stringify(input.creds)),
+      displayHint,
+      input.priority ?? 50,
+      input.shareLimitPct ?? 80,
+      JSON.stringify(quota),
+      Date.now(),
+      Date.now(),
+    );
+  health.delete(id);
+  return { id, quota };
+}
+
+export function saveUpdatedOAuthCreds(sourceId: string, creds: OAuthCredentials): void {
+  // 節點進程：只寫本機憑證檔，絕不把 Token 寫回平台
+  if (process.env.SUPPLIER_NODE_MODE === "1") {
+    const dir = path.join(process.cwd(), "data", "node-creds");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, `${sourceId}.json`), JSON.stringify({ ...creds, delegatedToNode: false }, null, 2));
+    return;
+  }
+  // 平台已委託：禁止把 Token 寫回 DB
+  try {
+    const row = db().prepare("SELECT encrypted_key FROM sources WHERE id = ?").get(sourceId) as
+      | { encrypted_key: string }
+      | undefined;
+    if (row) {
+      const existing = JSON.parse(decrypt(row.encrypted_key)) as OAuthCredentials;
+      if (existing.delegatedToNode) return;
+    }
+  } catch {
+    // continue normal save
+  }
+  db()
+    .prepare("UPDATE sources SET encrypted_key = ? WHERE id = ?")
+    .run(encrypt(JSON.stringify(creds)), sourceId);
+  health.delete(sourceId);
+}
+
+export function readOAuthCreds(sourceId: string): OAuthCredentials | null {
+  const row = db().prepare("SELECT encrypted_key, auth_type FROM sources WHERE id = ?").get(sourceId) as
+    | { encrypted_key: string; auth_type: string }
+    | undefined;
+  if (!row || row.auth_type !== "oauth_sub") return null;
+  try {
+    return JSON.parse(decrypt(row.encrypted_key)) as OAuthCredentials;
+  } catch {
+    return null;
+  }
+}
+
+export function isSourceDelegatedToNode(sourceId: string): boolean {
+  const creds = readOAuthCreds(sourceId);
+  return Boolean(creds?.delegatedToNode);
+}
+
+/** 節點領取憑證後，平台清除 Token，只留 metadata */
+export function claimOAuthCredsForNode(sourceId: string): OAuthCredentials | null {
+  const creds = readOAuthCreds(sourceId);
+  if (!creds || creds.delegatedToNode) return null;
+  if (!creds.accessToken && !creds.refreshToken) return null;
+
+  const stub: OAuthCredentials = {
+    provider: creds.provider,
+    accessToken: "",
+    refreshToken: "",
+    expiresAt: 0,
+    email: creds.email,
+    accountId: creds.accountId,
+    projectId: creds.projectId,
+    planType: creds.planType,
+    delegatedToNode: true,
+  };
+  // 直接寫 stub，避開 saveUpdatedOAuthCreds 的「已委託不寫回」防護
+  db()
+    .prepare("UPDATE sources SET encrypted_key = ?, key_hint = ? WHERE id = ?")
+    .run(
+      encrypt(JSON.stringify(stub)),
+      `${creds.email ?? creds.provider}（憑證在供給者節點）`,
+      sourceId,
+    );
+  return creds;
+}
+
+export function saveSourceQuota(sourceId: string, quota: SubscriptionQuota): void {
+  db()
+    .prepare("UPDATE sources SET quota_json = ?, quota_updated_at = ? WHERE id = ?")
+    .run(JSON.stringify(quota), Date.now(), sourceId);
+}
+
+export async function syncSourceQuotaById(sourceId: string): Promise<SubscriptionQuota | null> {
+  const row = db().prepare("SELECT * FROM sources WHERE id = ?").get(sourceId) as unknown as SourceRow | undefined;
+  if (!row || row.auth_type !== "oauth_sub") return null;
+  let creds = JSON.parse(decrypt(row.encrypted_key)) as OAuthCredentials;
+  if (creds.delegatedToNode) {
+    // Token 在節點；平台無法代查，保留上次 quota_json
+    return row.quota_json ? (JSON.parse(row.quota_json) as SubscriptionQuota) : null;
+  }
+  if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
+    creds = await refreshOAuthCredentials(creds);
+    saveUpdatedOAuthCreds(sourceId, creds);
+  }
+  const quota = await fetchSubscriptionQuota(creds);
+  saveSourceQuota(sourceId, quota);
+  return quota;
+}
+
+export async function syncAllSubscriptionQuotas(): Promise<void> {
+  const rows = db()
+    .prepare("SELECT id FROM sources WHERE auth_type = 'oauth_sub' AND enabled = 1")
+    .all() as { id: string }[];
+  await Promise.allSettled(rows.map((r) => syncSourceQuotaById(r.id)));
+}
+
+export function updateSource(
+  id: string,
+  patch: { enabled?: boolean; priority?: number; monthlyCapPoints?: number | null; shareLimitPct?: number },
+): void {
+  if (patch.enabled !== undefined) db().prepare("UPDATE sources SET enabled = ? WHERE id = ?").run(patch.enabled ? 1 : 0, id);
+  if (patch.priority !== undefined) db().prepare("UPDATE sources SET priority = ? WHERE id = ?").run(patch.priority, id);
+  if (patch.monthlyCapPoints !== undefined)
+    db().prepare("UPDATE sources SET monthly_cap_points = ? WHERE id = ?").run(patch.monthlyCapPoints, id);
+  if (patch.shareLimitPct !== undefined)
+    db().prepare("UPDATE sources SET share_limit_pct = ? WHERE id = ?").run(patch.shareLimitPct, id);
+}
+
+export function deleteSource(id: string): void {
+  db().prepare("DELETE FROM sources WHERE id = ?").run(id);
+  health.delete(id);
+}
+
+export interface Candidate {
+  source: Source;
+  apiKey?: string;
+  oauthCreds?: OAuthCredentials;
+}
+
+/**
+ * 派發順序：
+ * 1. 供給者 OAuth 訂閱帳號（優先使用且檢查已用 % 未超過供給者設定的 shareLimitPct）
+ * 2. 供給者 API Key
+ * 3. 平台直連 API Key
+ * 4. OpenRouter 備援
+ */
+export function candidatesFor(model: ModelInfo): Candidate[] {
+  const now = Date.now();
+  const pool: { source: Source; resolveSecret: () => string }[] = [
+    ...dbSources().map(({ resolveSecret, ...source }) => ({ source, resolveSecret })),
+    ...envSources().map(({ secret, ...source }) => ({ source, resolveSecret: () => secret })),
+  ];
+
+  return pool
+    .filter(({ source: s }) => {
+      if (!s.enabled) return false;
+      if (model.category === "node-agent") return false;
+      if (s.provider === "openrouter") return true;
+      // Antigravity 訂閱貨源可跑目錄內 Gemini／Claude／GPT-OSS（研究／備援；買家主線走 Node Agent）
+      if (model.antigravityId && s.provider === "gemini" && s.authType === "oauth_sub") return true;
+      // Grok 訂閱只走 xAI OAuth／xAI API（OpenRouter 已在上方放行）
+      if (model.category === "grok") return s.provider === "xai";
+      // 純 Antigravity 第三方模型：不要誤打到 Anthropic／OpenAI API Key（除非 OpenRouter）
+      if (model.category === "antigravity-claude" || model.category === "antigravity-gpt") return false;
+      return s.provider === model.provider;
+    })
+    .filter(({ source: s }) => (health.get(s.id)?.cooldownUntil ?? 0) <= now)
+    .filter(({ source: s }) => s.monthlyCapPoints === null || usedThisMonth(s.id) < s.monthlyCapPoints)
+    .filter(({ source: s }) => {
+      if (s.authType === "oauth_sub" && s.quota) {
+        // 依「使用者選的模型」對應配額窗熔斷（Argon／Gemini 總額／Claude·GPT 第三方）
+        const w = quotaWindowForModel(s.quota, model.antigravityId ?? model.id);
+        if (!w) return true;
+        return w.usedPercent < s.shareLimitPct;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      // 1. 供給者優先於平台
+      if (a.source.kind !== b.source.kind) return a.source.kind === "supplier" ? -1 : 1;
+      // 2. OAuth 訂閱帳號優先於 API Key
+      if (a.source.authType !== b.source.authType) return a.source.authType === "oauth_sub" ? -1 : 1;
+      // 3. 優先序數字小的先
+      if (a.source.priority !== b.source.priority) return a.source.priority - b.source.priority;
+      // 4. 該模型剩餘額度較多的訂閱帳號優先
+      const remA =
+        (a.source.quota && quotaWindowForModel(a.source.quota, model.antigravityId ?? model.id)?.remainingPercent) ??
+        a.source.quota?.primaryRemainingPercent ??
+        50;
+      const remB =
+        (b.source.quota && quotaWindowForModel(b.source.quota, model.antigravityId ?? model.id)?.remainingPercent) ??
+        b.source.quota?.primaryRemainingPercent ??
+        50;
+      return remB - remA;
+    })
+    .map(({ source, resolveSecret }) => {
+      const raw = resolveSecret();
+      if (source.authType === "oauth_sub") {
+        const oauthCreds = JSON.parse(raw) as OAuthCredentials;
+        return { source, oauthCreds };
+      }
+      return { source, apiKey: raw };
+    })
+    // 已清空 Token／委託節點後未回填的貨源不可派發，避免搶在有效訂閱前面秒失敗
+    .filter((c) => {
+      if (c.source.authType !== "oauth_sub") return true;
+      if (c.oauthCreds?.delegatedToNode) return false;
+      return Boolean(c.oauthCreds?.accessToken || c.oauthCreds?.refreshToken);
+    });
+}
+
+/** 重新綁定／同步成功後清除冷卻，避免舊 401 把新 Token 鎖 5 分鐘 */
+export function clearSourceCooldown(sourceId: string): void {
+  health.delete(sourceId);
+}
+
+export function markFailure(sourceId: string, status: number, message: string): void {
+  // 客戶端停止／中止不應把貨源打進冷卻（雙保險；gateway 層已應攔截）
+  if (/aborted|abort|client aborted/i.test(message)) return;
+  const cooldownMs = status === 401 || status === 403 ? 5 * 60_000 : status === 429 || status === 402 ? 60_000 : 30_000;
+  health.set(sourceId, { cooldownUntil: Date.now() + cooldownMs, lastError: `${status} ${message}`.slice(0, 300) });
+}
+
+export function markSuccess(sourceId: string): void {
+  health.delete(sourceId);
+}

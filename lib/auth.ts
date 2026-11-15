@@ -1,0 +1,289 @@
+import { db, newId } from "./db";
+import { hashPassword, hintOf, hmacSign, hmacVerify, randomToken, verifyPassword } from "./crypto";
+import { topUp } from "./store";
+
+export const SESSION_COOKIE = "aup_session";
+
+export type UserRole = "buyer" | "supplier";
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  apiKey: string;
+  apiKeyHint: string;
+  role: UserRole;
+  createdAt: number;
+  isAdmin: boolean;
+  isSupplier: boolean;
+  isBuyer: boolean;
+}
+
+type UserRow = {
+  id: string;
+  email: string;
+  name: string;
+  password_hash: string | null;
+  api_key: string;
+  api_key_hint: string;
+  role: string | null;
+  created_at: number;
+};
+
+function adminEmails(): Set<string> {
+  return new Set(
+    (process.env.ADMIN_EMAILS || "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+export function isAdminEmail(email: string): boolean {
+  return adminEmails().has(email.trim().toLowerCase());
+}
+
+function normalizeRole(role: string | null | undefined): UserRole {
+  return role === "supplier" ? "supplier" : "buyer";
+}
+
+function rowToUser(r: UserRow): User {
+  const role = normalizeRole(r.role);
+  const isAdmin = isAdminEmail(r.email);
+  return {
+    id: r.id,
+    email: r.email,
+    name: r.name,
+    apiKey: r.api_key,
+    apiKeyHint: r.api_key_hint,
+    role,
+    createdAt: r.created_at,
+    isAdmin,
+    isSupplier: role === "supplier" || isAdmin,
+    isBuyer: role === "buyer" || isAdmin,
+  };
+}
+
+export function generateLiveApiKey(): string {
+  return `sk_live_${randomToken(24)}`;
+}
+
+function initialFreePoints(): number {
+  const n = Number(process.env.INITIAL_FREE_POINTS ?? 50);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+export function findUserById(id: string): User | null {
+  const row = db().prepare("SELECT * FROM users WHERE id = ?").get(id) as UserRow | undefined;
+  return row ? rowToUser(row) : null;
+}
+
+export function findUserByEmail(email: string): (User & { passwordHash: string | null }) | null {
+  const row = db()
+    .prepare("SELECT * FROM users WHERE lower(email) = lower(?)")
+    .get(email.trim()) as UserRow | undefined;
+  if (!row) return null;
+  return { ...rowToUser(row), passwordHash: row.password_hash };
+}
+
+export function findUserByApiKey(apiKey: string): User | null {
+  if (!apiKey?.startsWith("sk_")) return null;
+  // 優先：可多把管理的 user_api_keys
+  const viaKeys = db()
+    .prepare(
+      `SELECT u.* FROM user_api_keys k
+       JOIN users u ON u.id = k.user_id
+       WHERE k.api_key = ?`,
+    )
+    .get(apiKey) as UserRow | undefined;
+  if (viaKeys) return rowToUser(viaKeys);
+  // 相容：尚未遷移的舊版單一 users.api_key
+  const row = db().prepare("SELECT * FROM users WHERE api_key = ?").get(apiKey) as UserRow | undefined;
+  return row ? rowToUser(row) : null;
+}
+
+export function createUser(input: {
+  email: string;
+  name?: string;
+  password?: string;
+  role?: UserRole;
+}): User {
+  const email = input.email.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw Object.assign(new Error("Email 格式不正確"), { status: 400 });
+  }
+  if (findUserByEmail(email)) {
+    throw Object.assign(new Error("此 Email 已註冊"), { status: 409 });
+  }
+  const role: UserRole = input.role === "supplier" ? "supplier" : "buyer";
+  const id = newId();
+  const apiKey = generateLiveApiKey();
+  const name = input.name?.trim() || email.split("@")[0];
+  const passwordHash = input.password ? hashPassword(input.password) : null;
+  if (input.password && input.password.length < 6) {
+    throw Object.assign(new Error("密碼至少 6 碼"), { status: 400 });
+  }
+
+  const now = Date.now();
+  db()
+    .prepare(
+      `INSERT INTO users (id, email, name, password_hash, api_key, api_key_hint, role, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(id, email, name, passwordHash, apiKey, hintOf(apiKey), role, now);
+
+  // 同步寫入可多把管理的金鑰表（註冊預設一把）
+  try {
+    db()
+      .prepare(
+        `INSERT OR IGNORE INTO user_api_keys (id, user_id, label, api_key, key_hint, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(newId(), id, "預設金鑰", apiKey, hintOf(apiKey), now);
+  } catch {
+    // 表尚未建立時略過；open()/migrate 會補
+  }
+
+  // 試用點只給買家；供給者主線是綁訂閱
+  if (role === "buyer") {
+    const free = initialFreePoints();
+    if (free > 0) topUp(id, free, "新註冊試用點數");
+  }
+
+  return findUserById(id)!;
+}
+
+export function upsertGoogleUser(input: { email: string; name?: string; role?: UserRole }): User {
+  const email = input.email.trim().toLowerCase();
+  const existing = findUserByEmail(email);
+  if (existing) {
+    if (input.name?.trim()) {
+      db().prepare("UPDATE users SET name = ? WHERE id = ?").run(input.name.trim(), existing.id);
+    }
+    return findUserById(existing.id)!;
+  }
+  return createUser({ email, name: input.name, role: input.role ?? "buyer" });
+}
+
+export function authenticateEmailPassword(email: string, password: string): User {
+  const u = findUserByEmail(email);
+  if (!u || !u.passwordHash) {
+    throw Object.assign(new Error("帳號或密碼錯誤"), { status: 401 });
+  }
+  if (!verifyPassword(password, u.passwordHash)) {
+    throw Object.assign(new Error("帳號或密碼錯誤"), { status: 401 });
+  }
+  return findUserById(u.id)!;
+}
+
+function sessionDays(): number {
+  const n = Number(process.env.SESSION_DAYS ?? 30);
+  return Number.isFinite(n) && n > 0 ? n : 30;
+}
+
+export function issueSessionToken(userId: string): string {
+  const exp = Date.now() + sessionDays() * 86_400_000;
+  const payload = `${userId}.${exp}`;
+  return `${Buffer.from(payload).toString("base64url")}.${hmacSign(payload)}`;
+}
+
+export function parseSessionToken(token: string): string | null {
+  const i = token.lastIndexOf(".");
+  if (i <= 0) return null;
+  const body = token.slice(0, i);
+  const sig = token.slice(i + 1);
+  let payload: string;
+  try {
+    payload = Buffer.from(body, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
+  if (!hmacVerify(payload, sig)) return null;
+  const [userId, expStr] = payload.split(".");
+  const exp = Number(expStr);
+  if (!userId || !Number.isFinite(exp) || Date.now() > exp) return null;
+  return userId;
+}
+
+export function sessionCookieHeader(token: string): string {
+  const maxAge = sessionDays() * 86_400;
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure}`;
+}
+
+export function clearSessionCookieHeader(): string {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
+}
+
+export function readCookie(req: Request, name: string): string | null {
+  const raw = req.headers.get("cookie") || "";
+  for (const part of raw.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === name) return decodeURIComponent(rest.join("="));
+  }
+  return null;
+}
+
+export function getSessionUser(req: Request): User | null {
+  const token = readCookie(req, SESSION_COOKIE);
+  if (!token) return null;
+  const userId = parseSessionToken(token);
+  if (!userId) return null;
+  return findUserById(userId);
+}
+
+export function requireUser(req: Request): User {
+  const u = getSessionUser(req);
+  if (!u) throw Object.assign(new Error("請先登入"), { status: 401 });
+  return u;
+}
+
+export function requireAdmin(req: Request): User {
+  const u = requireUser(req);
+  if (!u.isAdmin) throw Object.assign(new Error("需要管理員權限"), { status: 403 });
+  return u;
+}
+
+/** 供給者後台（綁訂閱）：supplier 或 admin */
+export function requireSupplier(req: Request): User {
+  const u = requireUser(req);
+  if (!u.isSupplier) throw Object.assign(new Error("需要供給者權限"), { status: 403 });
+  return u;
+}
+
+export function publicUser(u: User) {
+  return {
+    id: u.id,
+    email: u.email,
+    name: u.name,
+    apiKey: u.apiKey,
+    role: u.role,
+    isAdmin: u.isAdmin,
+    isSupplier: u.isSupplier,
+    isBuyer: u.isBuyer,
+  };
+}
+
+export function homePathFor(u: User): string {
+  if (u.isAdmin) return "/admin";
+  if (u.role === "supplier") return "/sources";
+  return "/";
+}
+
+export function jsonError(e: unknown): Response {
+  const status = typeof e === "object" && e && "status" in e ? Number((e as { status: number }).status) : 500;
+  const message = e instanceof Error ? e.message : String(e);
+  return Response.json({ error: message }, { status: status || 500 });
+}
+
+export function buyerGoogleConfigured(): boolean {
+  return Boolean(process.env.BUYER_GOOGLE_CLIENT_ID?.trim() && process.env.BUYER_GOOGLE_CLIENT_SECRET?.trim());
+}
+
+export function buyerGoogleRedirectUri(): string {
+  return (
+    process.env.BUYER_GOOGLE_REDIRECT_URI?.trim() ||
+    "http://127.0.0.1:3000/api/auth/google/callback"
+  );
+}

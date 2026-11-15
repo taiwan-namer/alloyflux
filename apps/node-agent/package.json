@@ -1,0 +1,14 @@
+{
+  "name": "@ai-usage/node-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "node-agent": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "register": "tsx src/index.ts register",
+    "run": "tsx src/index.ts start"
+  }
+}
