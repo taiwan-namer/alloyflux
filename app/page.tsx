@@ -1008,8 +1008,11 @@ export default function ChatPage() {
 
   const refreshMe = useCallback(async () => {
     setAuthLoading(true);
+    const ac = new AbortController();
+    const kill = setTimeout(() => ac.abort(), 8_000);
     try {
-      const data = await (await fetch("/api/auth/me", { cache: "no-store" })).json();
+      const res = await fetch("/api/auth/me", { cache: "no-store", signal: ac.signal });
+      const data = await res.json().catch(() => ({}));
       setGoogleEnabled(Boolean(data.googleEnabled));
       if (data.freeQuota) setFreeQuota(data.freeQuota);
       if (data.user) {
@@ -1027,7 +1030,13 @@ export default function ChatPage() {
         setHasPaidAccess(false);
         setWallet(null);
       }
+    } catch {
+      // 網路／API 逾時：仍解除載入，讓訪客可進聊天室
+      setAuthUser(null);
+      setHasPaidAccess(false);
+      setWallet(null);
     } finally {
+      clearTimeout(kill);
       setAuthLoading(false);
     }
   }, []);

@@ -44,10 +44,11 @@ function databaseUrl(): string {
 
 function createSql(url: string): SqlClient {
   const usePooler = /pooler\.supabase\.com|:6543|pgbouncer=true/i.test(url);
+  // Vercel serverless：每 isolate 少連線、連線逾時要短，避免 /api/auth/me 拖到 504 整站卡「載入中」
   return postgres(url, {
-    max: usePooler ? 4 : 8,
+    max: 1,
     idle_timeout: 20,
-    connect_timeout: 30,
+    connect_timeout: 8,
     prepare: !usePooler,
     ssl: "require",
     transform: { undefined: null },
