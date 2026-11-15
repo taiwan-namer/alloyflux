@@ -907,17 +907,28 @@ async function fetchGeminiSubscriptionQuota(creds: OAuthCredentials): Promise<Su
       headers,
       body,
     });
+    // 剛換到的 token 偶發 401；勿直接 auth_failed 以免誤停用剛綁好的 Gemini
     if (res.status === 401 || res.status === 403) {
       return {
         planType: creds.planType ?? "Google AI Pro",
         email: creds.email,
-        windows: [],
-        primaryUsedPercent: 100,
-        primaryRemainingPercent: 0,
+        windows: [
+          {
+            label: "Gemini · 額度（暫未能讀取）",
+            usedPercent: 0,
+            remainingPercent: 100,
+            uiRemainingPercent: 100,
+            uiUsedPercent: 0,
+            resetAt: null,
+            modelKey: "shared",
+          },
+        ],
+        primaryUsedPercent: 0,
+        primaryRemainingPercent: 100,
         fetchedAt: Date.now(),
         subscriptionExpiresAt: null,
-        subscriptionActive: false,
-        subscriptionStatus: "auth_failed",
+        subscriptionActive: true,
+        subscriptionStatus: "unknown",
       };
     }
     if (res.ok) {

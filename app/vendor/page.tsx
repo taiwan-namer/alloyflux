@@ -506,16 +506,12 @@ export default function VendorPage() {
               <div style={{ marginBottom: 8, lineHeight: 1.6, fontSize: 13 }}>
                 <strong>Google OAuth 授權確認：</strong>
                 <br />
-                綁定寫入一律走<strong>雲端 Vercel API</strong>（本機不必也不該放 DATABASE_URL）。
+                Google code 在本機兌換（與啟動時同一組 OAuth client），憑證再寫入雲端（本機不必放 DATABASE_URL）。
                 <br />
-                ・本機有開 <code>next dev</code>：按允許後監聽器會自動轉發雲端並跳到線上 <code>/sources</code>。
+                ・請保持 <code>npm run dev</code> 開著，按允許後監聽 <code>51121</code> 會自動完成。
                 <br />
-                ・否則請在{" "}
-                <a href={activeAuthUrl} target="_blank" rel="noreferrer">
-                  Google 授權視窗
-                </a>{" "}
-                按允許後，把網址列 <code>http://localhost:51121/oauth-callback?code=...</code>{" "}
-                <strong>整串貼下方</strong>（同樣寫入雲端）：
+                ・若瀏覽器停在無法連線頁，把網址列{" "}
+                <code>http://localhost:51121/oauth-callback?code=...</code> <strong>整串貼下方</strong>：
               </div>
               <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
                 <input

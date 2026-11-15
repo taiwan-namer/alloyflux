@@ -50,6 +50,9 @@ async function saveOAuthSource(
       refreshToken: input.creds.refreshToken,
       accountId: input.creds.accountId,
       projectId: input.creds.projectId,
+      email: input.creds.email,
+      planType: input.creds.planType,
+      expiresAt: input.creds.expiresAt,
       label: input.label,
       shareLimitPct: input.shareLimitPct,
     });
@@ -66,20 +69,27 @@ async function completeCodeAndSave(
     shareLimitPct?: number;
   },
 ): Promise<Record<string, unknown>> {
-  // 本機無 DB：整段兌換 + 寫庫交給雲端（state 已編碼在 URL，雲端可獨立完成）
-  if (shouldProxyOAuthPersist(req)) {
-    return persistOAuthViaCloud({
-      action: "complete_code",
-      codeOrUrl: input.codeOrUrl,
-      state: input.state,
-      label: input.label,
-      shareLimitPct: input.shareLimitPct,
-    });
-  }
+  // 一律在「啟動授權的同一環境」兌換 code（client_id/secret/PKCE 必須一致）。
+  // 本機無 DB 時：本機換 token，再把憑證寫入雲端——不可把 code 丟給雲端換（常因 Vercel 與本機 OAuth client 不同而失敗）。
   const { creds, label, shareLimitPct } = await completeOAuthByCode({
     codeOrUrl: input.codeOrUrl,
     state: input.state,
   });
+  if (shouldProxyOAuthPersist(req)) {
+    return persistOAuthViaCloud({
+      action: "import_raw_token",
+      provider: creds.provider,
+      accessToken: creds.accessToken,
+      refreshToken: creds.refreshToken,
+      accountId: creds.accountId,
+      projectId: creds.projectId,
+      email: creds.email,
+      planType: creds.planType,
+      expiresAt: creds.expiresAt,
+      label: input.label || label,
+      shareLimitPct: input.shareLimitPct ?? shareLimitPct,
+    });
+  }
   const added = await addOAuthSubscriptionSource({
     creds,
     label: input.label || label,
@@ -173,6 +183,9 @@ export async function POST(req: Request) {
       refreshToken?: string;
       accountId?: string;
       projectId?: string;
+      email?: string;
+      planType?: string;
+      expiresAt?: number;
       sourceId?: string;
     };
 
@@ -258,11 +271,16 @@ export async function POST(req: Request) {
           provider: body.provider,
           accessToken: body.accessToken.trim(),
           refreshToken: body.refreshToken?.trim() ?? "",
-          expiresAt: Date.now() + 3600_000,
+          expiresAt:
+            typeof body.expiresAt === "number" && body.expiresAt > Date.now()
+              ? body.expiresAt
+              : Date.now() + 3600_000,
           accountId: body.accountId?.trim() || undefined,
           projectId: body.projectId?.trim() || undefined,
+          email: body.email?.trim() || undefined,
           planType:
-            body.provider === "gemini" ? "Google AI Pro" : body.provider === "xai" ? "SuperGrok" : "PRO",
+            body.planType?.trim() ||
+            (body.provider === "gemini" ? "Google AI Pro" : body.provider === "xai" ? "SuperGrok" : "PRO"),
         };
         const added = await addOAuthSubscriptionSource({
           creds,
