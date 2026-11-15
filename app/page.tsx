@@ -1723,9 +1723,19 @@ export default function ChatPage() {
 
       <aside className="sidebar">
         <div className="sidebar-head">
-          <button className="primary new-chat-btn" onClick={newConversation} disabled={busy}>
-            ＋ 新對話
-          </button>
+          <div className="sidebar-head-row">
+            <button className="primary new-chat-btn" onClick={newConversation} disabled={busy}>
+              ＋ 新對話
+            </button>
+            <button
+              type="button"
+              className="sidebar-close-btn"
+              aria-label="收合對話欄"
+              onClick={() => setSidebarOpen(false)}
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         <div className="conv-list">
@@ -1888,20 +1898,44 @@ export default function ChatPage() {
 
       <main className="main">
         <div className="topbar">
-          <button type="button" className="menu-btn" onClick={() => setSidebarOpen(true)}>
-            ☰ 對話紀錄
+          <button type="button" className="menu-btn" aria-label="開啟對話紀錄" onClick={() => setSidebarOpen(true)}>
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              <path d="M4 7h16M4 12h16M4 17h16" strokeLinecap="round" />
+            </svg>
+            <span className="menu-btn-label">對話</span>
           </button>
-          <span className="muted" style={{ fontSize: 12 }}>
-            {isAuto
-              ? "依問題自動派發：日常→Flash，程式／分析→主力模型，照實際模型扣額度"
-              : brand === "gpt"
-                ? "OpenAI 氛圍"
-                : brand === "claude"
-                  ? "Anthropic 書卷氛圍"
-                  : brand === "grok"
-                    ? "xAI 極客氛圍"
-                    : "Gemini 星光氛圍"}
-          </span>
+          <div className="topbar-title">
+            <strong className={brand === "gemini" ? "brand-gradient-text" : undefined}>
+              {isAuto
+                ? hasPaidAccess
+                  ? "⚡ Auto"
+                  : "⚡ Auto（免費）"
+                : familyOptions.find((f) => f.familyId === familyId)?.familyLabel ?? "雲端工作台"}
+            </strong>
+            <span className="topbar-desktop-hint muted">
+              {isAuto
+                ? "依問題自動派發：日常→Flash，程式／分析→主力模型"
+                : brand === "gpt"
+                  ? "OpenAI 氛圍"
+                  : brand === "claude"
+                    ? "Anthropic 書卷氛圍"
+                    : brand === "grok"
+                      ? "xAI 極客氛圍"
+                      : "Gemini 星光氛圍"}
+            </span>
+          </div>
+          <button
+            type="button"
+            className="topbar-new-chat"
+            aria-label="新對話"
+            disabled={busy}
+            onClick={newConversation}
+            title="新對話"
+          >
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+              <path d="M12 5v14M5 12h14" strokeLinecap="round" />
+            </svg>
+          </button>
         </div>
 
         <div className="messages-wrap">

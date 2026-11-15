@@ -301,6 +301,30 @@ a {
   flex-shrink: 0;
 }
 
+.sidebar-head-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-head-row .new-chat-btn {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-close-btn {
+  display: none;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+}
+
 .new-chat-btn {
   width: 100%;
   justify-content: flex-start;
@@ -618,6 +642,40 @@ a {
 
 .topbar .menu-btn {
   display: none;
+}
+
+.topbar-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.topbar-title strong {
+  font-size: 15px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-desktop-hint {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar-new-chat {
+  display: none;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 10px;
+  flex-shrink: 0;
 }
 
 .messages-wrap {
@@ -1665,40 +1723,156 @@ th {
     grid-template-columns: 1fr;
   }
 
+  /* 側欄：對齊 ChatGPT／Claude／Gemini App — 抽屜收合 */
   .sidebar {
     position: fixed;
-    inset: 0 auto 0 0;
-    width: min(86vw, 300px);
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: min(88vw, 320px);
+    padding-top: env(safe-area-inset-top, 0);
+    padding-bottom: env(safe-area-inset-bottom, 0);
     transform: translateX(-105%);
-    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.4);
+    box-shadow: 8px 0 32px rgba(0, 0, 0, 0.45);
+    z-index: 40;
   }
 
   .app.sidebar-open .sidebar {
     transform: translateX(0);
   }
 
+  .sidebar-close-btn {
+    display: inline-flex;
+  }
+
   .sidebar-backdrop {
     display: block;
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.45);
+    background: rgba(0, 0, 0, 0.5);
     z-index: 35;
     border: none;
     padding: 0;
     border-radius: 0;
   }
 
+  /* 頂欄：左選單｜中模型名｜右新對話 */
+  .topbar {
+    padding: 8px 10px;
+    padding-top: max(8px, env(safe-area-inset-top, 0px));
+    gap: 8px;
+    min-height: 52px;
+  }
+
   .topbar .menu-btn {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    justify-content: center;
+    gap: 4px;
     flex-shrink: 0;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-radius: 10px;
+  }
+
+  .menu-btn-label {
+    display: none;
+  }
+
+  .topbar-desktop-hint {
+    display: none;
+  }
+
+  .topbar-new-chat {
+    display: inline-flex;
   }
 
   .topbar select {
     max-width: none;
     flex: 1;
     min-width: 0;
+  }
+
+  .messages {
+    padding: 12px 0 8px;
+  }
+
+  .msg {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .msg.user .bubble {
+    max-width: 92%;
+  }
+
+  .empty {
+    padding: 28px 18px;
+  }
+
+  .empty h2 {
+    font-size: 1.25rem;
+    line-height: 1.35;
+  }
+
+  .empty p {
+    font-size: 14px;
+  }
+
+  /* 輸入區：貼底 + 避開 Home Indicator */
+  .composer {
+    padding: 8px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .composer-shell {
+    max-width: none;
+    padding: 8px 10px;
+  }
+
+  .composer-bar {
+    flex-wrap: wrap;
+    gap: 6px;
+    row-gap: 8px;
+  }
+
+  .composer-model-select {
+    flex: 1 1 140px;
+    min-width: 0;
+    max-width: none;
+    font-size: 13px;
+  }
+
+  .composer-bar .deep-think-toggle {
+    order: 5;
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+
+  .composer-icon-btn,
+  .composer-bar .primary,
+  .composer-bar > button:last-child {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  .composer textarea {
+    font-size: 16px; /* iOS 避免自動放大 */
+    min-height: 44px;
+  }
+
+  .modal-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .modal-panel {
+    width: 100%;
+    max-width: none;
+    max-height: min(92dvh, 920px);
+    border-radius: 16px 16px 0 0;
+    margin: 0;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   }
 
   .landing {
@@ -1716,6 +1890,16 @@ th {
 
   .form-grid {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 420px) {
+  .topbar-title strong {
+    font-size: 14px;
+  }
+
+  .composer-bar-spacer {
+    display: none;
   }
 }
 

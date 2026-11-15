@@ -1,9 +1,16 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "AI 用量平台",
   description: "四大頂級 AI 模型，一個水庫無限暢聊",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#0f1115",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
