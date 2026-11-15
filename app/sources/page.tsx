@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { goToSourcesAfterBind } from "@/lib/cloud-site";
 
 interface QuotaWindow {
   label: string;
@@ -19,6 +20,27 @@ interface SubscriptionQuota {
   primaryUsedPercent: number;
   primaryRemainingPercent: number;
   fetchedAt: number;
+  subscriptionExpiresAt?: string | null;
+  subscriptionActive?: boolean;
+  subscriptionStatus?: "active" | "inactive" | "unknown" | "auth_failed";
+}
+
+function formatSubscriptionExpiry(quota: SubscriptionQuota | null): string | null {
+  if (!quota?.subscriptionExpiresAt) return null;
+  const t = Date.parse(quota.subscriptionExpiresAt);
+  if (!Number.isFinite(t)) return null;
+  const days = (t - Date.now()) / 86_400_000;
+  const date = new Date(t).toLocaleString("zh-TW", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  if (days < 0) return `已於 ${date} 到期`;
+  if (days <= 7) return `訂閱到期 ${date}（剩 ${Math.ceil(days)} 天・平台優先消化）`;
+  return `訂閱到期 ${date}（約 ${Math.ceil(days)} 天）`;
 }
 
 interface SourceStatus {
@@ -50,33 +72,60 @@ const PROVIDER_LABEL: Record<string, string> = {
 };
 
 /**
- * 分潤換算口徑（供夥伴直覺試算）：
- * - 雲端工作台基準：NT$ 199 = 1,000 額度 → 1 額度對應服務費約 NT$ 0.199
- * - 創作者上架分潤 80% → 每消耗 1 額度，夥伴可領回約 NT$ 0.1592
- * - 單一標準 Pro 節點 100% 週容量約可承載 ~2,200 工作台額度（依模型組合浮動），
- *   即滿池 100% 週分潤約 NT$ 350（每月 4.3 週約 NT$ 1,500）
+ * 分潤換算口徑：
+ * 1) 實際已領回：買家消耗額度 ×（NT$199/1000）× 80% = 每點 NT$ 0.1592
+ * 2) 預估（訂閱節點）：以官方訂閱月費為錨，不再用「假設每週 2200 買家額度」灌水
+ *    滿載月估 = 訂閱月費 × 分配%（= 你願意託管出去的訂閱成本等值）
+ *    本週剩餘 = 滿載月估 ×（可調度剩餘% / 分配%）/ 4.3
  */
 const NTD_PER_BUYER_POINT_AT_80_PCT = 0.199 * 0.8;
-const EST_WEEKLY_POINTS_PER_FULL_SUB: Record<string, number> = {
-  gemini: 2400,
-  openai: 2200,
-  xai: 2000,
-  anthropic: 2200,
-  openrouter: 1500,
-};
+const WEEKS_PER_MONTH = 4.3;
+
+/** 台灣官網常見訂閱月費（含稅參考）；用於預估錨定，非 API token 市價 */
+function resolvePlanMonthlyNtd(source: SourceStatus): number {
+  const plan = (source.quota?.planType ?? "").toLowerCase();
+  if (source.provider === "openai") {
+    if (/\bpro\b/.test(plan) && !/plus/.test(plan)) {
+      if (/20|200/.test(plan)) return 6990;
+      if (/5|100/.test(plan)) return 3300;
+      return 3300;
+    }
+    return 690; // ChatGPT Plus
+  }
+  if (source.provider === "gemini") {
+    if (/ultra/.test(plan)) {
+      if (/20/.test(plan)) return 6500;
+      return 3300;
+    }
+    return 650; // Google AI Pro
+  }
+  if (source.provider === "xai") {
+    if (/pro|heavy|premium/.test(plan)) return 3300;
+    return 700; // SuperGrok 量級參考
+  }
+  if (source.provider === "anthropic") return 650;
+  return 690;
+}
 
 function estimateNodePayoutNtd(source: SourceStatus): {
   allocatablePct: number;
   estWeeklyRemNtd: number;
   estMonthlyCapNtd: number;
+  planMonthlyNtd: number;
 } {
-  const fullWeeklyPts = EST_WEEKLY_POINTS_PER_FULL_SUB[source.provider] ?? 2200;
+  const planMonthlyNtd = resolvePlanMonthlyNtd(source);
   const used = source.quota?.primaryUsedPercent ?? 0;
   // 本週在夥伴設定的 shareLimitPct 內還能被平台調度的淨百分比
-  const allocatablePct = Math.max(0, Math.min(source.quota?.primaryRemainingPercent ?? source.shareLimitPct, source.shareLimitPct - used));
-  const estWeeklyRemNtd = Math.round((allocatablePct / 100) * fullWeeklyPts * NTD_PER_BUYER_POINT_AT_80_PCT);
-  const estMonthlyCapNtd = Math.round((source.shareLimitPct / 100) * fullWeeklyPts * 4.3 * NTD_PER_BUYER_POINT_AT_80_PCT);
-  return { allocatablePct, estWeeklyRemNtd, estMonthlyCapNtd };
+  const allocatablePct = Math.max(
+    0,
+    Math.min(source.quota?.primaryRemainingPercent ?? source.shareLimitPct, source.shareLimitPct - used),
+  );
+  const estMonthlyCapNtd = Math.round((source.shareLimitPct / 100) * planMonthlyNtd);
+  const share = Math.max(source.shareLimitPct, 1);
+  const estWeeklyRemNtd = Math.round(
+    estMonthlyCapNtd * (allocatablePct / share) / WEEKS_PER_MONTH,
+  );
+  return { allocatablePct, estWeeklyRemNtd, estMonthlyCapNtd, planMonthlyNtd };
 }
 
 interface SupplierUsageRow {
@@ -294,11 +343,14 @@ export default function SourcesPage() {
       setOauthMsg({ ok: false, text: data.error });
       return;
     }
-    setOauthMsg({ ok: true, text: "✓ 新模型節點綁定成功！已同步剩餘容量" });
+    setOauthMsg({ ok: true, text: "✓ 新模型節點已寫入雲端並同步剩餘容量" });
     setCallbackInput("");
     setActiveAuthUrl(null);
     setSubLabel("");
-    void refresh();
+    // 本機無 DB 時列表讀不到雲端資料，導向線上 /sources
+    goToSourcesAfterBind(() => {
+      void refresh();
+    });
   }
 
   async function importCli(provider: "gemini" | "openai" | "xai") {
@@ -431,10 +483,8 @@ export default function SourcesPage() {
     };
   }, [ledgerData, sources, draftLimits, draftCaps]);
 
-  // 新增模組試算（拉上方新增區滑桿時的即時預估）
-  const newNodeEstMonthlyNtd = Math.round(
-    (shareLimitPct / 100) * 2300 * 4.3 * NTD_PER_BUYER_POINT_AT_80_PCT,
-  );
+  // 新增模組試算：預設以 ChatGPT Plus 月費錨（實際接入後會依方案自動對齊）
+  const newNodeEstMonthlyNtd = Math.round((shareLimitPct / 100) * 690);
 
   return (
     <div className="page">
@@ -489,19 +539,19 @@ export default function SourcesPage() {
             約 NT$ {summaryStats.estWeeklyRemTotal.toLocaleString("zh-TW")}
           </div>
           <div className="muted" style={{ fontSize: 12 }}>
-            依各節點剩餘容量 × 您設定的分配上限換算
+            訂閱月費等值 × 剩餘可調度% ÷ 4.3 週
           </div>
         </div>
 
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="muted" style={{ fontSize: 12 }}>
-            目前配置・滿載每月預估可領回（參考值）
+            目前配置・滿載月估（訂閱成本等值）
           </div>
           <div style={{ fontSize: 28, fontWeight: 800, color: "var(--accent)", margin: "6px 0 4px" }}>
             約 NT$ {summaryStats.estMonthlyCapTotal.toLocaleString("zh-TW")} / 月
           </div>
           <div className="muted" style={{ fontSize: 12 }}>
-            串接越多組模型節點，智慧路由派發優先度與累計回饋越高
+            官方訂閱月費 × 分配%；實際入帳依買家消耗額度 × 80%
           </div>
         </div>
       </div>
@@ -511,7 +561,7 @@ export default function SourcesPage() {
         <div className="row" style={{ justifyContent: "space-between", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
           <h3 style={{ margin: 0 }}>步驟 A：設定已串接節點的分配用量＆回饋金額換算（{sources.length} 組）</h3>
           <span className="muted" style={{ fontSize: 12 }}>
-            拖動滑桿即刻試算金額，放開自動儲存；達設定上限時系統自動停止派發，保留您的自用容量
+            預估錨定官方訂閱月費（如 Plus NT$690）；實際入帳看買家消耗額度 × 80%。達上限自動停派。
           </span>
         </div>
 
@@ -539,6 +589,7 @@ export default function SourcesPage() {
               .map((s) => {
                 const currentLimit = draftLimits[s.id] ?? s.shareLimitPct;
                 const est = estimateNodePayoutNtd({ ...s, shareLimitPct: currentLimit });
+                const expiryLabel = formatSubscriptionExpiry(s.quota);
                 return (
                   <div
                     key={s.id}
@@ -557,15 +608,60 @@ export default function SourcesPage() {
                             {PROVIDER_LABEL[s.provider] ?? s.provider}
                           </span>
                           {!s.enabled ? (
-                            <span className="muted">（已暫停派發）</span>
+                            <span className="muted">
+                              （已暫停
+                              {s.quota?.subscriptionStatus === "inactive"
+                                ? "・偵測到退訂／失效"
+                                : s.quota?.subscriptionStatus === "auth_failed"
+                                  ? "・授權失效"
+                                  : ""}
+                              ）
+                            </span>
                           ) : s.cooldownUntil ? (
                             <span className="notice">冷卻保護中（{Math.ceil((s.cooldownUntil - Date.now()) / 1000)}s）</span>
                           ) : (
                             <span style={{ color: "var(--ok)", fontSize: 12, fontWeight: 600 }}>● 智慧路由待命／派發中</span>
                           )}
+                          {s.authType === "oauth_sub" &&
+                            s.quota?.subscriptionExpiresAt &&
+                            (() => {
+                              const days =
+                                (Date.parse(s.quota.subscriptionExpiresAt) - Date.now()) / 86_400_000;
+                              if (days >= 0 && days <= 7) {
+                                return (
+                                  <span
+                                    style={{
+                                      fontSize: 11,
+                                      fontWeight: 700,
+                                      color: "var(--warn, #d4a017)",
+                                      border: "1px solid var(--warn, #d4a017)",
+                                      borderRadius: 6,
+                                      padding: "1px 6px",
+                                    }}
+                                  >
+                                    即將到期・優先派發
+                                  </span>
+                                );
+                              }
+                              return null;
+                            })()}
                         </div>
                         <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
                           {s.quota?.email ? `${s.quota.email} · ` : ""}識別：{s.keyHint}
+                          {expiryLabel ? (
+                            <>
+                              <br />
+                              {expiryLabel}
+                            </>
+                          ) : s.authType === "oauth_sub" ? (
+                            <>
+                              <br />
+                              訂閱到期日：
+                              {s.provider === "gemini"
+                                ? "Gemini／Antigravity 通常不回傳帳單日（僅能偵測授權失效）"
+                                : "同步後顯示（請按「重抓容量」）"}
+                            </>
+                          ) : null}
                         </div>
                       </div>
 
@@ -704,8 +800,12 @@ export default function SourcesPage() {
                                 約 NT$ {est.estWeeklyRemNtd.toLocaleString("zh-TW")}
                               </strong>
                             </div>
-                            <div className="muted">
-                              滿載月估：<strong style={{ color: "var(--text)" }}>NT$ {est.estMonthlyCapNtd.toLocaleString("zh-TW")} / 月</strong>
+                            <div className="muted" style={{ textAlign: "right" }}>
+                              滿載月估（訂閱 {est.planMonthlyNtd.toLocaleString("zh-TW")} × {currentLimit}%）：
+                              <strong style={{ color: "var(--text)" }}>
+                                {" "}
+                                NT$ {est.estMonthlyCapNtd.toLocaleString("zh-TW")} / 月
+                              </strong>
                             </div>
                           </div>
                         </div>
@@ -1017,7 +1117,7 @@ export default function SourcesPage() {
               <a href={activeAuthUrl} target="_blank" rel="noreferrer">
                 官方 OAuth 視窗
               </a>{" "}
-              完成同意後，若於雲端環境網址列跳轉至 <code>http://localhost...</code>，請複製整串網址貼於下方完成串接：
+              完成同意後，網址列若出現 <code>http://localhost:51121/...</code>，請整串貼下方（寫入走雲端 API，本機不必設 DATABASE_URL）：
             </div>
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <input

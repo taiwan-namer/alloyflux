@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { goToSourcesAfterBind } from "@/lib/cloud-site";
 
 const TERMS_NAME = "《AI 工作流託管與開源評測合作條款》";
 
@@ -117,7 +118,7 @@ export default function VendorPage() {
         const res = await fetch("/api/sources", { cache: "no-store" });
         const list = await res.json();
         if (Array.isArray(list) && initialCountRef.current !== null && list.length > initialCountRef.current) {
-          router.push("/sources");
+          goToSourcesAfterBind((href) => router.push(href));
         }
       } catch {
         // ignore
@@ -147,7 +148,7 @@ export default function VendorPage() {
                 ? "✓ Grok 模組 OAuth 授權完成！正在導向 /sources 設定分配用量…"
                 : "✓ ChatGPT 模組 OAuth 授權完成！正在導向 /sources 設定分配用量…",
           });
-          router.push("/sources");
+          goToSourcesAfterBind((href) => router.push(href));
         } else if (data.error) {
           setOauthMsg({ ok: false, text: data.error });
           setDeviceFlow(null);
@@ -207,7 +208,7 @@ export default function VendorPage() {
           return;
         }
         setOauthMsg({ ok: true, text: "✓ Claude 算力節點接入成功！正在前往 /sources…" });
-        router.push("/sources");
+        goToSourcesAfterBind((href) => router.push(href));
       } else if (selectedModule === "chatgpt") {
         const res = await fetch("/api/oauth", {
           method: "POST",
@@ -262,8 +263,11 @@ export default function VendorPage() {
         setOauthMsg({ ok: false, text: data.error || "授權驗證失敗，請確認貼上完整回呼網址" });
         return;
       }
-      setOauthMsg({ ok: true, text: "✓ Google OAuth 綁定完成並讀取剩餘 %！正在跳轉至 /sources…" });
-      router.push("/sources");
+      setOauthMsg({
+        ok: true,
+        text: "✓ Google OAuth 已寫入雲端並讀取剩餘 %！正在跳轉至線上 /sources…",
+      });
+      goToSourcesAfterBind((href) => router.push(href));
     } finally {
       setBusy(false);
     }
@@ -502,13 +506,16 @@ export default function VendorPage() {
               <div style={{ marginBottom: 8, lineHeight: 1.6, fontSize: 13 }}>
                 <strong>Google OAuth 授權確認：</strong>
                 <br />
-                ・<strong>本機環境</strong>：在彈出視窗按允許後，本機監聽器會自動完成並跳轉 <code>/sources</code>。
+                綁定寫入一律走<strong>雲端 Vercel API</strong>（本機不必也不該放 DATABASE_URL）。
                 <br />
-                ・<strong>雲端／手機環境</strong>：在{" "}
+                ・本機有開 <code>next dev</code>：按允許後監聽器會自動轉發雲端並跳到線上 <code>/sources</code>。
+                <br />
+                ・否則請在{" "}
                 <a href={activeAuthUrl} target="_blank" rel="noreferrer">
                   Google 授權視窗
                 </a>{" "}
-                按允許後，網址列會跳到 <code>http://localhost:51121/oauth-callback?code=...</code>，請<strong>整串複製網址列</strong>貼在下方，即自動綁定讀取剩餘 % 並進入 <code>/sources</code>：
+                按允許後，把網址列 <code>http://localhost:51121/oauth-callback?code=...</code>{" "}
+                <strong>整串貼下方</strong>（同樣寫入雲端）：
               </div>
               <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
                 <input

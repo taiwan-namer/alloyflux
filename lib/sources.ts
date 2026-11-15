@@ -4,7 +4,9 @@ import { db, newId } from "./db";
 import { decrypt, encrypt, hintOf } from "./crypto";
 import type { ModelInfo } from "./models";
 import {
+  daysUntilSubscriptionExpiry,
   fetchSubscriptionQuota,
+  isSubscriptionExpiringSoon,
   quotaWindowForModel,
   refreshOAuthCredentials,
   type OAuthCredentials,
@@ -159,17 +161,25 @@ export async function listSources(): Promise<SourceStatus[]> {
     ...envSources().map(({ secret: _k, ...s }) => s),
   ];
   const now = Date.now();
-  return Promise.all(
-    all.map(async (s) => {
-      const h = health.get(s.id);
-      return {
-        ...s,
-        usedThisMonthPoints: await usedThisMonth(s.id),
-        cooldownUntil: h && h.cooldownUntil > now ? h.cooldownUntil : null,
-        lastError: h?.lastError ?? null,
-      };
-    }),
-  );
+  // 一次查出本月用量，避免 N+1 把 admin／sources API 拖慢甚至逾時
+  const usageRows = (await db()
+    .prepare(
+      `SELECT ref_id AS id, COALESCE(SUM(amount_points), 0) AS used
+       FROM ledger
+       WHERE type = 'source_usage' AND created_at >= ? AND ref_id IS NOT NULL
+       GROUP BY ref_id`,
+    )
+    .all(monthStart())) as { id: string; used: number }[];
+  const usedMap = new Map(usageRows.map((r) => [String(r.id), Number(r.used)]));
+  return all.map((s) => {
+    const h = health.get(s.id);
+    return {
+      ...s,
+      usedThisMonthPoints: usedMap.get(s.id) ?? 0,
+      cooldownUntil: h && h.cooldownUntil > now ? h.cooldownUntil : null,
+      lastError: h?.lastError ?? null,
+    };
+  });
 }
 
 export async function addSource(input: {
@@ -328,12 +338,45 @@ export async function syncSourceQuotaById(sourceId: string): Promise<Subscriptio
     // Token 在節點；平台無法代查，保留上次 quota_json
     return row.quota_json ? (JSON.parse(row.quota_json) as SubscriptionQuota) : null;
   }
-  if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
-    creds = await refreshOAuthCredentials(creds);
-    await saveUpdatedOAuthCreds(sourceId, creds);
+  try {
+    if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
+      creds = await refreshOAuthCredentials(creds);
+      await saveUpdatedOAuthCreds(sourceId, creds);
+    }
+  } catch {
+    const failed: SubscriptionQuota = {
+      planType: creds.planType ?? row.provider,
+      email: creds.email,
+      windows: [],
+      primaryUsedPercent: 100,
+      primaryRemainingPercent: 0,
+      fetchedAt: Date.now(),
+      subscriptionExpiresAt: null,
+      subscriptionActive: false,
+      subscriptionStatus: "auth_failed",
+    };
+    await saveSourceQuota(sourceId, failed);
+    // 重新整理／授權失效 → 自動暫停託管，避免繼續派發
+    if (row.enabled) {
+      await db().prepare("UPDATE sources SET enabled = 0 WHERE id = ?").run(sourceId);
+    }
+    return failed;
   }
   const quota = await fetchSubscriptionQuota(creds);
   await saveSourceQuota(sourceId, quota);
+  // 退訂、降級、授權失效：自動停用；到期日已過也停用
+  const expired =
+    typeof quota.subscriptionExpiresAt === "string" &&
+    Number.isFinite(Date.parse(quota.subscriptionExpiresAt)) &&
+    Date.parse(quota.subscriptionExpiresAt) < Date.now();
+  const shouldDisable =
+    quota.subscriptionActive === false ||
+    quota.subscriptionStatus === "auth_failed" ||
+    quota.subscriptionStatus === "inactive" ||
+    expired;
+  if (shouldDisable && row.enabled) {
+    await db().prepare("UPDATE sources SET enabled = 0 WHERE id = ?").run(sourceId);
+  }
   return quota;
 }
 
@@ -375,6 +418,7 @@ export interface Candidate {
  * 2. 供給者 API Key
  * 3. 平台直連 API Key
  * 4. OpenRouter 備援
+ * 另：已知即將到期（≤7 天）的訂閱節點優先消化剩餘容量
  */
 export async function candidatesFor(model: ModelInfo): Promise<Candidate[]> {
   const now = Date.now();
@@ -389,6 +433,15 @@ export async function candidatesFor(model: ModelInfo): Promise<Candidate[]> {
       if (!s.enabled) return false;
       if (model.category === "node-agent") return false;
       if (s.provider === "openrouter") return true;
+      // 退訂／授權失效的訂閱節點不派發
+      if (
+        s.authType === "oauth_sub" &&
+        (s.quota?.subscriptionActive === false ||
+          s.quota?.subscriptionStatus === "inactive" ||
+          s.quota?.subscriptionStatus === "auth_failed")
+      ) {
+        return false;
+      }
       // Antigravity 訂閱貨源可跑目錄內 Gemini／Claude／GPT-OSS（研究／備援；買家主線走 Node Agent）
       if (model.antigravityId && s.provider === "gemini" && s.authType === "oauth_sub") return true;
       // Grok 訂閱只走 xAI OAuth／xAI API（OpenRouter 已在上方放行）
@@ -422,9 +475,18 @@ export async function candidatesFor(model: ModelInfo): Promise<Candidate[]> {
       if (a.source.kind !== b.source.kind) return a.source.kind === "supplier" ? -1 : 1;
       // 2. OAuth 訂閱帳號優先於 API Key
       if (a.source.authType !== b.source.authType) return a.source.authType === "oauth_sub" ? -1 : 1;
-      // 3. 優先序數字小的先
+      // 3. 即將到期（≤7 天）優先；越近到期越前，把剩餘容量用掉
+      const expA = isSubscriptionExpiringSoon(a.source.quota);
+      const expB = isSubscriptionExpiringSoon(b.source.quota);
+      if (expA !== expB) return expA ? -1 : 1;
+      if (expA && expB) {
+        const dA = daysUntilSubscriptionExpiry(a.source.quota) ?? 999;
+        const dB = daysUntilSubscriptionExpiry(b.source.quota) ?? 999;
+        if (dA !== dB) return dA - dB;
+      }
+      // 4. 優先序數字小的先
       if (a.source.priority !== b.source.priority) return a.source.priority - b.source.priority;
-      // 4. 該模型剩餘額度較多的訂閱帳號優先
+      // 5. 該模型剩餘額度較多的訂閱帳號優先
       const remA =
         (a.source.quota && quotaWindowForModel(a.source.quota, model.antigravityId ?? model.id)?.remainingPercent) ??
         a.source.quota?.primaryRemainingPercent ??

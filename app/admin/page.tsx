@@ -77,6 +77,8 @@ interface Overview {
   stats: {
     totalUsers: number;
     totalPartners: number;
+    oauthSupplierSources?: number;
+    partnerNodes?: number;
     todayMessages: number;
     todayFreeMessages: number;
     weekTopupPoints: number;
@@ -448,13 +450,74 @@ export default function AdminPage() {
     try {
       const res = await fetch("/api/admin/overview", { cache: "no-store" });
       const data = await res.json();
-      if (!res.ok) {
-        setOvErr(data.error || "載入總覽失敗");
+      if (res.ok) {
+        setOv(data as Overview);
+        setOvErr(null);
         return;
       }
-      setOv(data as Overview);
-      setOvErr(null);
+      // overview 失敗時仍嘗試直接拉貨源，避免後台整頁空白
+      const sRes = await fetch("/api/sources", { cache: "no-store" });
+      const sData = await sRes.json();
+      if (sRes.ok && Array.isArray(sData)) {
+        setOv({
+          stats: {
+            totalUsers: 0,
+            totalPartners: 0,
+            oauthSupplierSources: sData.filter((s: SourceRow) => s.kind === "supplier").length,
+            partnerNodes: sData.filter((s: SourceRow) => s.kind === "supplier").length,
+            todayMessages: 0,
+            todayFreeMessages: 0,
+            weekTopupPoints: 0,
+            weekSourceCostPoints: 0,
+            enabledSources: sData.filter((s: SourceRow) => s.enabled).length,
+            totalSources: sData.length,
+            onlineNodes: 0,
+            totalNodes: 0,
+          },
+          sources: sData as SourceRow[],
+          nodes: [],
+          earnings: [],
+          jobStats: [],
+          recentUsers: [],
+          recentLedger: [],
+        });
+        setOvErr(`總覽部分失敗（${data.error || res.status}），已改顯示貨源列表`);
+        return;
+      }
+      setOvErr(data.error || "載入總覽失敗");
     } catch {
+      try {
+        const sRes = await fetch("/api/sources", { cache: "no-store" });
+        const sData = await sRes.json();
+        if (sRes.ok && Array.isArray(sData)) {
+          setOv({
+            stats: {
+              totalUsers: 0,
+              totalPartners: 0,
+              oauthSupplierSources: sData.filter((s: SourceRow) => s.kind === "supplier").length,
+              partnerNodes: sData.filter((s: SourceRow) => s.kind === "supplier").length,
+              todayMessages: 0,
+              todayFreeMessages: 0,
+              weekTopupPoints: 0,
+              weekSourceCostPoints: 0,
+              enabledSources: sData.filter((s: SourceRow) => s.enabled).length,
+              totalSources: sData.length,
+              onlineNodes: 0,
+              totalNodes: 0,
+            },
+            sources: sData as SourceRow[],
+            nodes: [],
+            earnings: [],
+            jobStats: [],
+            recentUsers: [],
+            recentLedger: [],
+          });
+          setOvErr("總覽逾時，已改顯示貨源列表");
+          return;
+        }
+      } catch {
+        /* ignore */
+      }
       setOvErr("網路錯誤，無法載入總覽");
     } finally {
       setLoadingOv(false);
@@ -909,7 +972,11 @@ export default function AdminPage() {
       <>
         <div className="adm-stat-grid">
           <Stat label="會員總數" value={(stats?.totalUsers ?? 0).toLocaleString("zh-TW")} />
-          <Stat label="算力節點夥伴" value={(stats?.totalPartners ?? 0).toLocaleString("zh-TW")} />
+          <Stat
+            label="OAuth 供給節點"
+            value={(stats?.oauthSupplierSources ?? stats?.partnerNodes ?? 0).toLocaleString("zh-TW")}
+            sub={`role=supplier ${stats?.totalPartners ?? 0}`}
+          />
         </div>
         <div className="adm-table-wrap">
           <table className="adm-table">
@@ -951,26 +1018,84 @@ export default function AdminPage() {
   }
 
   function renderPartners() {
-    const list = (ov?.recentUsers ?? []).filter((u) => u.role === "supplier");
+    // 模組 OAuth（/vendor、/sources）寫入 sources，不會建立 users.role=supplier
+    const oauthNodes = (ov?.sources ?? []).filter((s) => s.kind === "supplier");
+    const rolePartners = (ov?.recentUsers ?? []).filter((u) => u.role === "supplier");
     return (
       <>
         <div className="adm-stat-grid">
-          <Stat label="算力節點夥伴總數" value={(stats?.totalPartners ?? 0).toLocaleString("zh-TW")} />
-          <Stat label="近期列表中夥伴" value={list.length} />
-          <Stat label="線上節點" value={`${stats?.onlineNodes ?? 0} / ${stats?.totalNodes ?? 0}`} />
+          <Stat
+            label="OAuth 模組節點"
+            value={(stats?.oauthSupplierSources ?? stats?.partnerNodes ?? oauthNodes.length).toLocaleString("zh-TW")}
+          />
+          <Stat label="網站帳號夥伴（role=supplier）" value={(stats?.totalPartners ?? 0).toLocaleString("zh-TW")} />
+          <Stat label="線上 Node Agent" value={`${stats?.onlineNodes ?? 0} / ${stats?.totalNodes ?? 0}`} />
         </div>
+
+        <h3 className="adm-section-title" style={{ marginTop: 8 }}>
+          已授權模組節點（來自 /vendor・/sources）
+          <span className="adm-count">{oauthNodes.length}</span>
+        </h3>
+        <div className="adm-table-wrap">
+          <table className="adm-table">
+            <thead>
+              <tr>
+                <th>節點名稱</th>
+                <th>供應商</th>
+                <th>識別／Email</th>
+                <th>剩餘</th>
+                <th>分配上限</th>
+                <th>狀態</th>
+              </tr>
+            </thead>
+            <tbody>
+              {oauthNodes.map((s) => {
+                const remain = s.quota?.primaryRemainingPercent;
+                return (
+                  <tr key={s.id}>
+                    <td>
+                      <strong>{s.label}</strong>
+                      <div className="adm-sub">{s.authType === "oauth_sub" ? "OAuth 訂閱" : "API Key"}</div>
+                    </td>
+                    <td>{s.provider}</td>
+                    <td className="adm-sub">{s.quota?.email || s.keyHint || "—"}</td>
+                    <td>{typeof remain === "number" ? `${Math.round(remain)}%` : "—"}</td>
+                    <td>{s.shareLimitPct}%</td>
+                    <td>
+                      <span className={`adm-pill ${s.enabled ? "adm-pill-ok" : "adm-pill-off"}`}>
+                        {s.enabled ? "啟用" : "停用"}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+              {oauthNodes.length === 0 && (
+                <tr>
+                  <td colSpan={6} className="adm-empty-cell">
+                    尚無 OAuth／API 供給節點。請至 /vendor 或 /sources 完成模組授權。
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <h3 className="adm-section-title" style={{ marginTop: 20 }}>
+          網站帳號標記為節點夥伴
+          <span className="adm-count">{rolePartners.length}</span>
+        </h3>
         <div className="adm-table-wrap">
           <table className="adm-table">
             <thead>
               <tr>
                 <th>Email</th>
                 <th>名稱</th>
-                <th>名下節點</th>
+                <th>名下 Node Agent</th>
                 <th>建立時間</th>
               </tr>
             </thead>
             <tbody>
-              {list.map((u) => {
+              {rolePartners.map((u) => {
                 const own = (ov?.nodes ?? []).filter((n) => n.accountName === u.name || n.accountName === u.email);
                 return (
                   <tr key={u.id}>
@@ -981,17 +1106,19 @@ export default function AdminPage() {
                   </tr>
                 );
               })}
-              {list.length === 0 && (
+              {rolePartners.length === 0 && (
                 <tr>
                   <td colSpan={4} className="adm-empty-cell">
-                    近期使用者中尚無算力節點夥伴
+                    尚無 users.role=supplier 帳號（模組 OAuth 不會自動建立此角色）
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
-        <p className="adm-sub adm-note">僅顯示最近建立的 50 位使用者中的節點夥伴；總數取自全站統計。</p>
+        <p className="adm-sub adm-note">
+          ChatGPT／Gemini／Grok 模組授權會出現在上方「已授權模組節點」與「節點託管貨源／各水庫可用餘額」，不會出現在網站帳號夥伴列表。
+        </p>
       </>
     );
   }
@@ -1220,7 +1347,11 @@ export default function AdminPage() {
       <>
         <div className="adm-stat-grid">
           <Stat label="會員總數" value={(stats?.totalUsers ?? 0).toLocaleString("zh-TW")} />
-          <Stat label="算力節點夥伴" value={(stats?.totalPartners ?? 0).toLocaleString("zh-TW")} />
+          <Stat
+            label="OAuth 供給節點"
+            value={(stats?.oauthSupplierSources ?? stats?.partnerNodes ?? stats?.totalSources ?? 0).toLocaleString("zh-TW")}
+            sub={`網站帳號夥伴 ${stats?.totalPartners ?? 0}`}
+          />
           <Stat label="今日訊息" value={(stats?.todayMessages ?? 0).toLocaleString("zh-TW")} sub={`免費層 ${stats?.todayFreeMessages ?? 0}`} />
           <Stat label="啟用貨源" value={`${stats?.enabledSources ?? 0} / ${stats?.totalSources ?? 0}`} />
           <Stat label="線上節點" value={`${stats?.onlineNodes ?? 0} / ${stats?.totalNodes ?? 0}`} />

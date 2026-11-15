@@ -153,6 +153,31 @@ export interface SubscriptionQuota {
   primaryUsedPercent: number;
   primaryRemainingPercent: number;
   fetchedAt: number;
+  /** ISO：訂閱／帳務週期結束（ChatGPT entitlement、Grok billing；Gemini 常無此欄） */
+  subscriptionExpiresAt?: string | null;
+  /** 是否仍為有效付費訂閱；false 表示已退訂／降級／失效 */
+  subscriptionActive?: boolean;
+  /** active | inactive | unknown | auth_failed */
+  subscriptionStatus?: "active" | "inactive" | "unknown" | "auth_failed";
+}
+
+/** 距離訂閱到期的天數；未知則 null */
+export function daysUntilSubscriptionExpiry(quota: SubscriptionQuota | null | undefined): number | null {
+  const iso = quota?.subscriptionExpiresAt;
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return null;
+  return (t - Date.now()) / 86_400_000;
+}
+
+/** 即將到期（預設 7 天內）→ 路由應優先消化其剩餘容量 */
+export function isSubscriptionExpiringSoon(
+  quota: SubscriptionQuota | null | undefined,
+  withinDays = 7,
+): boolean {
+  if (quota?.subscriptionActive === false) return false;
+  const days = daysUntilSubscriptionExpiry(quota);
+  return days !== null && days >= 0 && days <= withinDays;
 }
 
 interface PendingOAuth {
@@ -882,6 +907,19 @@ async function fetchGeminiSubscriptionQuota(creds: OAuthCredentials): Promise<Su
       headers,
       body,
     });
+    if (res.status === 401 || res.status === 403) {
+      return {
+        planType: creds.planType ?? "Google AI Pro",
+        email: creds.email,
+        windows: [],
+        primaryUsedPercent: 100,
+        primaryRemainingPercent: 0,
+        fetchedAt: Date.now(),
+        subscriptionExpiresAt: null,
+        subscriptionActive: false,
+        subscriptionStatus: "auth_failed",
+      };
+    }
     if (res.ok) {
       const data = (await res.json()) as {
         groups?: {
@@ -943,6 +981,10 @@ async function fetchGeminiSubscriptionQuota(creds: OAuthCredentials): Promise<Su
           primaryUsedPercent: primary.uiUsedPercent,
           primaryRemainingPercent: primary.uiRemainingPercent,
           fetchedAt: Date.now(),
+          // Antigravity 公開 API 通常不回傳訂閱帳單到期日；僅能靠授權失效／額度異常推斷
+          subscriptionExpiresAt: null,
+          subscriptionActive: true,
+          subscriptionStatus: "unknown",
         };
       }
     }
@@ -966,7 +1008,69 @@ async function fetchGeminiSubscriptionQuota(creds: OAuthCredentials): Promise<Su
     primaryUsedPercent: 0,
     primaryRemainingPercent: 100,
     fetchedAt: Date.now(),
+    subscriptionExpiresAt: null,
+    subscriptionActive: true,
+    subscriptionStatus: "unknown",
   };
+}
+
+async function fetchChatGptAccountEntitlement(creds: OAuthCredentials): Promise<{
+  planType?: string;
+  email?: string;
+  expiresAt: string | null;
+  active: boolean | null;
+  authFailed: boolean;
+}> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${creds.accessToken}`,
+    Accept: "application/json",
+    "User-Agent": CHATGPT_OAUTH.userAgent,
+    originator: "Codex Desktop",
+  };
+  if (creds.accountId) headers["ChatGPT-Account-Id"] = creds.accountId;
+  try {
+    const res = await fetch(
+      `${CHATGPT_OAUTH.codexBaseUrl}/accounts/check/v4-2023-04-27`,
+      { headers },
+    );
+    if (res.status === 401 || res.status === 403) {
+      return { expiresAt: null, active: false, authFailed: true };
+    }
+    if (!res.ok) return { expiresAt: null, active: null, authFailed: false };
+    const data = (await res.json()) as {
+      accounts?: Record<
+        string,
+        {
+          account?: { email?: string; name?: string };
+          entitlement?: {
+            subscription_plan?: string;
+            has_active_subscription?: boolean;
+            expires_at?: string;
+          };
+        }
+      >;
+    };
+    const acc =
+      data.accounts?.default ??
+      (data.accounts ? Object.values(data.accounts)[0] : undefined);
+    const ent = acc?.entitlement;
+    const plan = ent?.subscription_plan;
+    const active =
+      typeof ent?.has_active_subscription === "boolean"
+        ? ent.has_active_subscription
+        : plan
+          ? !/free|none|unknown/i.test(plan)
+          : null;
+    return {
+      planType: plan,
+      email: acc?.account?.email,
+      expiresAt: ent?.expires_at ?? null,
+      active,
+      authFailed: false,
+    };
+  } catch {
+    return { expiresAt: null, active: null, authFailed: false };
+  }
 }
 
 async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<SubscriptionQuota> {
@@ -978,9 +1082,37 @@ async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<S
   };
   if (creds.accountId) headers["ChatGPT-Account-Id"] = creds.accountId;
 
+  const entitlement = await fetchChatGptAccountEntitlement(creds);
+  if (entitlement.authFailed) {
+    return {
+      planType: (creds.planType ?? "pro").toUpperCase(),
+      email: creds.email,
+      windows: [],
+      primaryUsedPercent: 100,
+      primaryRemainingPercent: 0,
+      fetchedAt: Date.now(),
+      subscriptionExpiresAt: null,
+      subscriptionActive: false,
+      subscriptionStatus: "auth_failed",
+    };
+  }
+
   for (const pathSuffix of ["/codex/usage", "/wham/usage"]) {
     try {
       const res = await fetch(`${CHATGPT_OAUTH.codexBaseUrl}${pathSuffix}`, { headers });
+      if (res.status === 401 || res.status === 403) {
+        return {
+          planType: (creds.planType ?? "pro").toUpperCase(),
+          email: creds.email,
+          windows: [],
+          primaryUsedPercent: 100,
+          primaryRemainingPercent: 0,
+          fetchedAt: Date.now(),
+          subscriptionExpiresAt: entitlement.expiresAt,
+          subscriptionActive: false,
+          subscriptionStatus: "auth_failed",
+        };
+      }
       if (res.ok) {
         const data = (await res.json()) as {
           plan_type?: string;
@@ -1027,22 +1159,38 @@ async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<S
             uiUsedPercent: 0,
             resetAt: null,
           } satisfies QuotaWindow);
+        const planType = (
+          entitlement.planType ??
+          data.plan_type ??
+          creds.planType ??
+          "pro"
+        ).toUpperCase();
+        const active =
+          entitlement.active === false
+            ? false
+            : entitlement.active === true
+              ? true
+              : !/free|none/i.test(planType);
         return {
-          planType: (data.plan_type ?? creds.planType ?? "pro").toUpperCase(),
-          email: data.email ?? creds.email,
+          planType,
+          email: entitlement.email ?? data.email ?? creds.email,
           windows: windows.length ? windows : [primary],
           primaryUsedPercent: primary.uiUsedPercent,
           primaryRemainingPercent: primary.uiRemainingPercent,
           fetchedAt: Date.now(),
+          subscriptionExpiresAt: entitlement.expiresAt,
+          subscriptionActive: active,
+          subscriptionStatus: active ? "active" : "inactive",
         };
       }
     } catch {
       // try next path
     }
   }
+  const active = entitlement.active !== false;
   return {
-    planType: (creds.planType ?? "pro").toUpperCase(),
-    email: creds.email,
+    planType: (entitlement.planType ?? creds.planType ?? "pro").toUpperCase(),
+    email: entitlement.email ?? creds.email,
     windows: [
       {
         label: "5 小時視窗",
@@ -1056,6 +1204,9 @@ async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<S
     primaryUsedPercent: 0,
     primaryRemainingPercent: 100,
     fetchedAt: Date.now(),
+    subscriptionExpiresAt: entitlement.expiresAt,
+    subscriptionActive: active,
+    subscriptionStatus: entitlement.active === null ? "unknown" : active ? "active" : "inactive",
   };
 }
 
@@ -1064,12 +1215,18 @@ async function fetchGrokSubscriptionQuota(creds: OAuthCredentials): Promise<Subs
   const windows: QuotaWindow[] = [];
   let planType = creds.planType ?? "SuperGrok";
   let email = creds.email;
+  let periodEnd: string | null = null;
+  let subscriptionActive: boolean | null = null;
+  let authFailed = false;
 
   try {
     const [billingRes, userRes] = await Promise.all([
       fetch(`${GROK_OAUTH.proxyBaseUrl}/billing?format=credits`, { headers }),
       fetch(`${GROK_OAUTH.proxyBaseUrl}/user?include=subscription`, { headers }),
     ]);
+    if (userRes.status === 401 || userRes.status === 403 || billingRes.status === 401 || billingRes.status === 403) {
+      authFailed = true;
+    }
     if (userRes.ok) {
       const user = (await userRes.json()) as {
         email?: string;
@@ -1080,6 +1237,9 @@ async function fetchGrokSubscriptionQuota(creds: OAuthCredentials): Promise<Subs
         planType = Array.isArray(user.subscriptionTier)
           ? user.subscriptionTier.join(", ")
           : String(user.subscriptionTier);
+        subscriptionActive = !/free|none|inactive/i.test(planType);
+      } else {
+        subscriptionActive = false;
       }
     }
     if (billingRes.ok) {
@@ -1090,7 +1250,7 @@ async function fetchGrokSubscriptionQuota(creds: OAuthCredentials): Promise<Subs
         currentPeriod?: { type?: string; end?: string };
         billingPeriodEnd?: string;
       };
-      const periodEnd = cfg.currentPeriod?.end ?? cfg.billingPeriodEnd ?? null;
+      periodEnd = cfg.currentPeriod?.end ?? cfg.billingPeriodEnd ?? null;
       if (typeof cfg.creditUsagePercent === "number") {
         const used = Math.round(cfg.creditUsagePercent * 10) / 10;
         const rem = Math.max(0, Math.round((100 - used) * 10) / 10);
@@ -1123,6 +1283,20 @@ async function fetchGrokSubscriptionQuota(creds: OAuthCredentials): Promise<Subs
     // fallback below
   }
 
+  if (authFailed) {
+    return {
+      planType,
+      email,
+      windows: [],
+      primaryUsedPercent: 100,
+      primaryRemainingPercent: 0,
+      fetchedAt: Date.now(),
+      subscriptionExpiresAt: periodEnd,
+      subscriptionActive: false,
+      subscriptionStatus: "auth_failed",
+    };
+  }
+
   if (!windows.length) {
     windows.push({
       label: "訂閱額度",
@@ -1130,11 +1304,12 @@ async function fetchGrokSubscriptionQuota(creds: OAuthCredentials): Promise<Subs
       remainingPercent: 100,
       uiRemainingPercent: 100,
       uiUsedPercent: 0,
-      resetAt: null,
+      resetAt: periodEnd,
       modelKey: "grok",
     });
   }
   const primary = windows.reduce((a, b) => (a.remainingPercent <= b.remainingPercent ? a : b));
+  const active = subscriptionActive !== false;
   return {
     planType,
     email,
@@ -1142,6 +1317,10 @@ async function fetchGrokSubscriptionQuota(creds: OAuthCredentials): Promise<Subs
     primaryUsedPercent: primary.uiUsedPercent,
     primaryRemainingPercent: primary.uiRemainingPercent,
     fetchedAt: Date.now(),
+    subscriptionExpiresAt: periodEnd,
+    subscriptionActive: active,
+    subscriptionStatus:
+      subscriptionActive === null ? "unknown" : active ? "active" : "inactive",
   };
 }
 
