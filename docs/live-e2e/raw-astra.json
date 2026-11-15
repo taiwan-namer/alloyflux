@@ -1,0 +1,94 @@
+{
+  "slot": "astra",
+  "modelId": "gpt-6-astra",
+  "label": "GPT-6 Astra",
+  "path": "research_v2",
+  "reusedPreparedResearch": true,
+  "researchInjectionCount": 1,
+  "doubleInjectSuspected": false,
+  "latencyMs": 23111,
+  "finishReason": "completed",
+  "error": null,
+  "completionStatus": "truncated",
+  "inputTokens": 1809,
+  "outputTokens": 716,
+  "cachedInputTokens": 0,
+  "reasoningTokensNote": "若上游合併於 outputTokens 則無法拆分",
+  "costUsdOfficialCatalog": 0.016167,
+  "costNote": "以 models.ts 價目估算；非供應商帳單。訂閱 OAuth 實際為配額％消耗。",
+  "answerChars": 1275,
+  "thinkingChars": 0,
+  "answerPreview": "**目前提供的檢索資料不足以可靠列出 NVIDIA「最近 7 天最重要的 3 則新聞」。**資料僅包含兩個官方新聞頁面的標題，以及一份 SEC 文件的表頭片段；缺少可確認的發布日期與新聞正文。以下列出 **3 筆待核對資料**，不將它們冒充已完整查證的三則獨立新聞。\n\n本輪檢索標示的時間窗為 **2026/11/09–2026/11/16（台北時間）**；這是搜尋範圍，**不代表以下來源均已確認在該期間發布**。\n\n| 資料／來源網址 | 發布日期 | 目前可核對的內容 | 證據限制 |\n|---|---|---|---|\n| **NVIDIA Announces CEO Transition** — [NVIDIA Newsroom](https://nvidianews.nvidia.com/news/nvidia-announces-ceo-transition) | **未提供，無法確認** | 回傳頁面標題為「NVIDIA Announces CEO Transition」（NVIDIA 宣布執行長交接）。 | **只有標題與網站導覽片段，沒有可用的新聞正文。**無法核對交接",
+  "answerFull": "**目前提供的檢索資料不足以可靠列出 NVIDIA「最近 7 天最重要的 3 則新聞」。**資料僅包含兩個官方新聞頁面的標題，以及一份 SEC 文件的表頭片段；缺少可確認的發布日期與新聞正文。以下列出 **3 筆待核對資料**，不將它們冒充已完整查證的三則獨立新聞。\n\n本輪檢索標示的時間窗為 **2026/11/09–2026/11/16（台北時間）**；這是搜尋範圍，**不代表以下來源均已確認在該期間發布**。\n\n| 資料／來源網址 | 發布日期 | 目前可核對的內容 | 證據限制 |\n|---|---|---|---|\n| **NVIDIA Announces CEO Transition** — [NVIDIA Newsroom](https://nvidianews.nvidia.com/news/nvidia-announces-ceo-transition) | **未提供，無法確認** | 回傳頁面標題為「NVIDIA Announces CEO Transition」（NVIDIA 宣布執行長交接）。 | **只有標題與網站導覽片段，沒有可用的新聞正文。**無法核對交接人選、原因、生效日或其他安排；不能僅憑標題斷言相關細節。 |\n| **Form 8-K：nvda-20261111** — [SEC 文件](https://www.sec.gov/Archives/edgar/data/1045810/000104581026000082/nvda-20261111.htm) | **未確認**；表頭出現 `2026-11-11`，但不足以認定為發布日期 | 可見片段包含 `FORM 8-K`、公司識別碼 `0001045810` 與日期字串 `2026-11-11`。 | **有文件表頭片段，但沒有實質申報內容。**無法確認申報事項，也不能推定它與執行長交接有關。 |\n| **Statement From NVIDIA Board of Directors** — [NVIDIA Newsroom](https://nvidianews.nvidia.com/news/statement-from-nvidia-board-of-directors) | **未提供，無法確認** | 回傳頁面標題為「Statement From NVIDIA Board of Directors」（NVIDIA 董事會聲明）。 | **只有標題與網站導覽片段，沒有可用的聲明正文。**無法核對聲明主題、董事會立場，或它是否與上述交接消息屬於同一事件。 |\n\n### 查證結論\n- **無法可靠排名「最重要」**：缺少內容，無從比較影響程度。\n- **無法確認是三則獨立新聞**：新聞稿、董事會聲明與 8-K 可能涉及同一事件，但目前證據不能證實。\n- **沒有足夠證據支持人事異動細節**：目前不能據此聲稱誰離任、誰接任，或何時生效。\n\n因此，這份清單應視為**三筆來源線索，而非已完成核實的近七日新聞摘要**。",
+  "groundingSourceCount": 12,
+  "groundingSources": [
+    {
+      "title": "nvidia.com",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEVzncYsVjoiHRQWd3XttRS2ACmMvgyEzAfr1EfuCRICXfU5piKpzORn0Jcq-ipqmwyA-exe-KXjYkLcRqQv0II-AM55WGDwTBoFdPAqOzCarMTN5dz67OH66VdDu8SdZW9cr8Y9AGDtEV02gz2yUMiG_9XoXSS91E=",
+      "clickable": true
+    },
+    {
+      "title": "sec.gov",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGULH8AExNArfZJuKG_eVtUDF0UrKMETjM85YvlyQepSX25c60G3CMDL35M-nt_2kMDMI3M8I5KVI0lQZgSalW_8CtwzkTDHWgRmMjQ7a7F1DFq2LD8Vbkv6OB_8qUUZyHN1vn0TBPW0-yAOifM0LURo2dxMTPDjX7-wEH0-vwEzhBFub-6UvYHDLw=",
+      "clickable": true
+    },
+    {
+      "title": "nvidia.com",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHX0ZaQ9Jr2wv0wEIL66sRXGw6M5orCN075ibbqTqeT-Y5hhcuO8_9QyTujpLXgjpai0gJziwyINb3Uwf_Eo0cx3K1BEjWGE-GeHmeUczYFTmgj7gA3ZTUG6EIY03QUnJ97h5V4XU0hL2IGQVpKiUv0UBpsbGWNCiAwiw7u6WE2vyk=",
+      "clickable": true
+    },
+    {
+      "title": "nvidia.com",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEZyH-JMrI3cM8falx-bF8kSgT1XloRfgpWKgWwyoTTqD8g34EhFSwdDfC-R63ypKCgv57-tlbSgNXpF4LlDstH1AVh4RiCgP4FfpcMVrYZ-ODBA5eeOafWHHUeo-KHX-mJfHj2lD-9A-mRXCB0Rc4yNA==",
+      "clickable": true
+    },
+    {
+      "title": "theguardian.com",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQGjvjWYy77AZ-sC7gN9MY_ZlTiNCGUKsCpyE0EkhT18IanORPyfXn7rbIYjjmjEE7N6aSZduhmhWSTSwiardibUi_BhT2tGUswz5ezCSgrN-Yo6iYV5wxdgRlDC2x4L4f3fJGkms-VD4mJRJyWfwsDRlI7dAS3C09j3JxaeMDHh3jYQezMT",
+      "clickable": true
+    },
+    {
+      "title": "maaal.com",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQG7CQQe8SWrg542qPEBqosnHn6QzlG7K1OH0Nlpy_ovWWa7lTh9qwjH79IIxROOPT3jqunQMSlyU2t-DNDPxHmhOA1UKIz78LXk_pLKutewKFVe_VmyKg10xlkmtFqTPLgNr13rpNqm9xyvA3jrW8b4dBs=",
+      "clickable": true
+    },
+    {
+      "title": "tradingkey.com",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHl4sJqY2WJxfhWr2g0c6XWnR6c6sHtZ85X2u5bkS0XOaEVlAU-Zz5iMMBHSutMJ86dVaVzwS5waunKJPXNi7rBI3CaWHb2uZAAqdO97wwA2TEFiwVMghk2Jw-4_DkrXLtKp43hOwPtC1HvNHZt03co1Ozod-pLf19S2gxZ8N76L2umEo-LO23CYPyAGgcnscRtoSwvIfpkaFtZRlfB_VftG8ptjtu2rlAe9PzSu_ZaKBKVS5CxQVxtH3KhVR3W4Z34he8=",
+      "clickable": true
+    },
+    {
+      "title": "wealthprofessional.ca",
+      "uri": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQHvlByBpu1X4dmNM1b9zKYQ9Vrk44ZXRccrwzmZtN6EcXUWveLTVpYUCtKUrgKBadkJymBlX1zdSC2fGqPPEtmM2sBz3cc6hV6AlFOn2_xwp0KB51YgY5-4WlttNF_v4d2fmhN9whkE-0BnDSDGcJbc2zDgCnA4m2G5MMEi0S2xh8ZHD-axsoVgxbTPWf2T2TTffVhCv6zvGReV-3xoQWZKXXvGpORySWgiw-ahXGDCI0yjoQeM",
+      "clickable": true
+    },
+    {
+      "title": "NVIDIA Announces CEO Transition | NVIDIA Newsroom",
+      "uri": "https://nvidianews.nvidia.com/news/nvidia-announces-ceo-transition",
+      "clickable": true
+    },
+    {
+      "title": "nvda-20261111",
+      "uri": "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000082/nvda-20261111.htm",
+      "clickable": true
+    },
+    {
+      "title": "Statement From NVIDIA Board of Directors | NVIDIA Newsroom",
+      "uri": "https://nvidianews.nvidia.com/news/statement-from-nvidia-board-of-directors",
+      "clickable": true
+    },
+    {
+      "title": "A Message to Our Company | NVIDIA Newsroom",
+      "uri": "https://nvidianews.nvidia.com/news/a-message-to-our-company",
+      "clickable": true
+    }
+  ],
+  "webSearchQueries": [
+    "Nvidia news November 2026",
+    "Nvidia stock news November 2026 Reuters Bloomberg"
+  ],
+  "nativeSearchLikely": false,
+  "badLinkCount": 0,
+  "truncatedSuspected": false,
+  "trumpMisclassify": false
+}

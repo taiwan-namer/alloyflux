@@ -91,20 +91,31 @@ function mockTrumpHit(): RawSearchHit {
         title: "Trump, Xi, Putin planned meeting at APEC",
         uri: "https://apnews.com/article/trump-xi-putin-apec-1113",
         excerpt:
-          "The White House said Trump plans to meet Xi and Putin during APEC in Shenzhen. Event date discussed for Nov 19. Published Nov 13.",
+          "The White House said Trump plans to meet Xi and Putin during APEC in Shenzhen. Event date discussed for Nov 19. Published Nov 13. Officials said staff are coordinating logistics with counterparts across capitals.",
         publishedAt: "2026-11-13T10:00:00Z",
+        originalUrl: "https://apnews.com/article/trump-xi-putin-apec-1113",
+        resolvedUrl: "https://apnews.com/article/trump-xi-putin-apec-1113",
+        fetchStatus: "ok",
       },
       {
         title: "China has not formally confirmed",
         uri: "https://www.independent.co.uk/news/trump-xi-unconfirmed",
-        excerpt: "Beijing has not formally confirmed the three-way meeting arrangement. 中方尚未正式確認。",
+        excerpt:
+          "Beijing has not formally confirmed the three-way meeting arrangement. 中方尚未正式確認。Reporters noted no schedule update from the foreign ministry overnight.",
         publishedAt: "2026-11-15T08:00:00Z",
+        originalUrl: "https://www.independent.co.uk/news/trump-xi-unconfirmed",
+        resolvedUrl: "https://www.independent.co.uk/news/trump-xi-unconfirmed",
+        fetchStatus: "ok",
       },
       {
         title: "Republicans lose midterms",
         uri: "https://www.reuters.com/world/us/midterms-loss",
-        excerpt: "Republicans lost control after the midterm elections earlier in November.",
+        excerpt:
+          "Republicans lost control after the midterm elections earlier in November. Analysts said several swing districts flipped after late counting finished overnight.",
         publishedAt: "2026-11-05T12:00:00Z",
+        originalUrl: "https://www.reuters.com/world/us/midterms-loss",
+        resolvedUrl: "https://www.reuters.com/world/us/midterms-loss",
+        fetchStatus: "ok",
       },
     ],
   };
@@ -185,6 +196,7 @@ describe("Event Collector", () => {
         relevance: 1,
         freshness: 1 - i * 0.01,
         diversityKey: "election",
+        evidenceGrade: "body_with_date",
       });
     }
     events.push({
@@ -196,6 +208,7 @@ describe("Event Collector", () => {
       relevance: 0.5,
       freshness: 0.9,
       diversityKey: "diplomacy",
+      evidenceGrade: "body_with_date",
     });
     const { events: picked } = rankEventsWithDiversity(events, 4);
     assert.ok(picked.some((e) => e.diversityKey === "diplomacy"));

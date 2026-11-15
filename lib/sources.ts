@@ -444,12 +444,15 @@ export async function claimOAuthCredsForNode(sourceId: string): Promise<OAuthCre
 }
 
 export async function saveSourceQuota(sourceId: string, quota: SubscriptionQuota): Promise<void> {
+  // 節點／本機 Live E2E：不寫回平台 DB
+  if (process.env.SUPPLIER_NODE_MODE === "1") return;
   await db()
     .prepare("UPDATE sources SET quota_json = ?, quota_updated_at = ? WHERE id = ?")
     .run(JSON.stringify(quota), Date.now(), sourceId);
 }
 
 export async function syncSourceQuotaById(sourceId: string): Promise<SubscriptionQuota | null> {
+  if (process.env.SUPPLIER_NODE_MODE === "1") return null;
   const row = (await db().prepare("SELECT * FROM sources WHERE id = ?").get(sourceId)) as unknown as
     | SourceRow
     | undefined;

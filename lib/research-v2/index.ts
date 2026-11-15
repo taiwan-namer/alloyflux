@@ -1,19 +1,26 @@
 export type {
+  CompletionStatus,
+  EvidenceGrade,
   EvidenceLevel,
+  EvidenceProvenance,
+  FetchStatus,
   RawSearchHit,
   ResearchClaim,
   ResearchClaimType,
   ResearchCorpus,
+  ResearchCost,
   ResearchDebugSnapshot,
   ResearchEvent,
   ResearchGateStatus,
   ResearchIntent,
   ResearchPlan,
+  ResearchResult,
   ResearchSource,
   ResearchSupplyPath,
   ResearchVerdict,
 } from "./types";
 
+export { PHASE4_PRODUCT_MODELS } from "./types";
 export { planResearch, formatDateInTimeZone, plannerQueryFingerprint } from "./planner";
 export { collectEventsFromHit, rankEventsWithDiversity } from "./collector";
 export { gateEvidence } from "./gate";
@@ -46,6 +53,22 @@ export {
   modelNeedsPlatformResearch,
   mockGatewayWithResearch,
 } from "./gateway-contract";
+export {
+  verdictToResearchResult,
+  geminiGroundingToResearchResult,
+  completionFromGate,
+} from "./contract";
+export {
+  createLiveBudget,
+  checkLiveBudget,
+  recordLiveUsage,
+  combinedAnswerCap,
+  isLiveE2EEnabled,
+  DEFAULT_LIVE_BUDGET,
+  type LiveTestMode,
+  type LiveBudgetCounters,
+} from "./live-budget";
+export { validatePublicHttpsUrl, isBlockedIp, safeFetchText } from "./ssrf";
 
 import { needsWebResearch, shouldSkipLiveResearch } from "../web-research";
 import {

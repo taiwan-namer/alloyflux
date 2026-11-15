@@ -267,9 +267,18 @@ function withResearchSystem(
   research: ResearchBundle | ResearchAttach | null | undefined,
 ): string {
   if (!research) return baseSystem;
+  // P0-1：若 Gateway／extraSystemContext 已含同一份注入，禁止再附加
+  if (
+    /【系統即時聯網檢索結果｜|【本輪聯網查證未完成｜/.test(baseSystem)
+  ) {
+    return baseSystem;
+  }
   if (isResearchAttach(research)) {
     const v = research.verdict;
-    if (v?.injectionText) return `${baseSystem}\n\n${v.injectionText}`;
+    if (v?.injectionText) {
+      if (baseSystem.includes(v.injectionText)) return baseSystem;
+      return `${baseSystem}\n\n${v.injectionText}`;
+    }
     if (research.bundle) return `${baseSystem}\n\n${formatResearchInjection(research.bundle)}`;
     return baseSystem;
   }

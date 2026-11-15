@@ -12,7 +12,15 @@ import {
 import { listSources, readOAuthCreds, saveUpdatedOAuthCreds } from "./sources";
 
 export type ResearchSource = { title: string; uri: string };
-export type ResearchPage = { title: string; uri: string; excerpt: string };
+export type ResearchPage = {
+  title: string;
+  uri: string;
+  excerpt: string;
+  publishedAt?: string;
+  originalUrl?: string;
+  resolvedUrl?: string;
+  fetchStatus?: "ok" | "failed" | "skipped" | "unresolved" | "blocked_ssrf";
+};
 export type ResearchBundle = {
   brief: string;
   sources: ResearchSource[];
@@ -145,10 +153,14 @@ export function isUsablePageExcerpt(text: string): boolean {
   return true;
 }
 
-/** 去掉 utm／fbclid 等追蹤參數；過長 query 只留 origin+path */
-export function cleanSourceUrl(uri: string, maxLen = 200): string {
+/**
+ * 正規化來源 URL：去追蹤參數；可選顯示截斷。
+ * Phase 4：預設不插入「…」——截斷會破壞 href／配對鍵。
+ * 顯示用短標請用 displaySourceUrl。
+ */
+export function cleanSourceUrl(uri: string, maxLen = 2048): string {
   try {
-    const u = new URL(uri);
+    const u = new URL(uri.trim());
     for (const key of [...u.searchParams.keys()]) {
       if (/^utm_/i.test(key) || /^(fbclid|gclid|mc_cid|mc_eid|ref|ref_src|spm|si)$/i.test(key)) {
         u.searchParams.delete(key);
@@ -157,10 +169,20 @@ export function cleanSourceUrl(uri: string, maxLen = 200): string {
     let out =
       u.search.length > 48 ? `${u.origin}${u.pathname}` : `${u.origin}${u.pathname}${u.search}`;
     if (out.endsWith("/") && u.pathname !== "/") out = out.slice(0, -1);
-    return out.length > maxLen ? `${out.slice(0, maxLen - 1)}…` : out;
+    // 僅在明確要求極短顯示時截斷；不加省略號以免被當成可點連結
+    if (out.length > maxLen) return out.slice(0, maxLen);
+    return out;
   } catch {
-    return uri.length > maxLen ? `${uri.slice(0, maxLen - 1)}…` : uri;
+    const t = uri.trim();
+    return t.length > maxLen ? t.slice(0, maxLen) : t;
   }
+}
+
+/** UI 顯示用短網址（可含 …）；不得回傳給 href／sourceId */
+export function displaySourceUrl(uri: string, maxLen = 64): string {
+  const cleaned = cleanSourceUrl(uri);
+  if (cleaned.length <= maxLen) return cleaned;
+  return `${cleaned.slice(0, Math.max(1, maxLen - 1))}…`;
 }
 
 /** 優先不同 hostname：官方／主流媒體 → 一般站 → wikipedia／youtube */
@@ -200,70 +222,124 @@ export function pickSourcesDiverse(sources: ResearchSource[], limit = MAX_RESEAR
   return picked;
 }
 
-/** 層 2：抓取網頁並抽可讀正文（先淨化再截到單篇上限） */
+/** 從 HTML meta／JSON-LD 抽發布時間；抽不到則 undefined（禁止填造） */
+export function extractPublishedAtFromHtml(html: string): string | undefined {
+  const metaPatterns = [
+    /<meta[^>]+property=["']article:published_time["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']article:published_time["']/i,
+    /<meta[^>]+property=["']og:published_time["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:published_time["']/i,
+    /<meta[^>]+name=["']pubdate["'][^>]+content=["']([^"']+)["']/i,
+    /<meta[^>]+name=["']publishdate["'][^>]+content=["']([^"']+)["']/i,
+    /<time[^>]+datetime=["']([^"']+)["']/i,
+  ];
+  for (const re of metaPatterns) {
+    const m = html.match(re);
+    if (m?.[1]) {
+      const t = Date.parse(m[1]);
+      if (Number.isFinite(t)) return new Date(t).toISOString();
+    }
+  }
+  const ld = html.match(
+    /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/i,
+  );
+  if (ld?.[1]) {
+    try {
+      const json = JSON.parse(ld[1]) as Record<string, unknown> | Record<string, unknown>[];
+      const nodes = Array.isArray(json) ? json : [json, ...(Array.isArray((json as { "@graph"?: unknown })["@graph"]) ? ((json as { "@graph": unknown[] })["@graph"] as Record<string, unknown>[]) : [])];
+      for (const n of nodes) {
+        if (!n || typeof n !== "object") continue;
+        const d = (n.datePublished || n.dateCreated || n.uploadDate) as string | undefined;
+        if (d) {
+          const t = Date.parse(d);
+          if (Number.isFinite(t)) return new Date(t).toISOString();
+        }
+      }
+    } catch {
+      // ignore malformed json-ld
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 層 2：SSRF 安全抓取＋抽可讀正文。
+ * 無法安全展開時回傳 fetchStatus，不把 Flash 摘要冒充正文。
+ */
 export async function fetchPageExcerpt(
   uri: string,
   signal?: AbortSignal,
 ): Promise<ResearchPage | null> {
-  if (!/^https?:\/\//i.test(uri)) return null;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 10_000);
-  const onAbort = () => ctrl.abort();
-  signal?.addEventListener("abort", onAbort);
-  try {
-    const res = await fetch(uri, {
-      method: "GET",
-      redirect: "follow",
-      signal: ctrl.signal,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (compatible; AIResearchBot/1.0; +https://localhost) AppleWebKit/537.36",
-        Accept: "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
-      },
-    });
-    if (!res.ok) return null;
-    const ctype = (res.headers.get("content-type") || "").toLowerCase();
-    if (ctype && !/text\/html|text\/plain|application\/xhtml/i.test(ctype)) return null;
-    const raw = await res.text();
-    const html = raw.slice(0, 500_000);
-    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-    const title = (titleMatch?.[1] || "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 200);
-    const stripped = html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
-      .replace(/<!--[\s\S]*?-->/g, " ")
-      .replace(/<\/(p|div|h1|h2|h3|h4|li|tr|br|section|article)>/gi, "\n")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&nbsp;/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/[ \t]+\n/g, "\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .replace(/[ \t]{2,}/g, " ")
-      .trim();
-    const text = cleanArticleText(stripped);
-    const excerpt = text.slice(0, MAX_PAGE_CHARS);
-    if (!isUsablePageExcerpt(excerpt)) return null;
+  if (!/^https:\/\//i.test(uri)) {
     return {
-      uri: res.url || uri,
-      title: title || uri,
-      // 先留到單篇上限；formatResearchInjection 再做均分／餘額遞補
-      excerpt,
+      uri,
+      title: uri,
+      excerpt: "",
+      originalUrl: uri,
+      fetchStatus: "blocked_ssrf",
     };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
   }
+
+  const { safeFetchText } = await import("./research-v2/ssrf");
+  const fetched = await safeFetchText(uri, { signal, maxBytes: 500_000 });
+  if (!fetched.ok || !fetched.body) {
+    return {
+      uri: fetched.resolvedUrl || uri,
+      title: uri,
+      excerpt: "",
+      originalUrl: uri,
+      resolvedUrl: fetched.resolvedUrl,
+      fetchStatus: fetched.fetchStatus,
+    };
+  }
+
+  const html = fetched.body;
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = (titleMatch?.[1] || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+  const publishedAt = extractPublishedAtFromHtml(html);
+  const stripped = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<\/(p|div|h1|h2|h3|h4|li|tr|br|section|article)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+  const text = cleanArticleText(stripped);
+  const excerpt = text.slice(0, MAX_PAGE_CHARS);
+  const resolved = fetched.resolvedUrl || uri;
+  if (!isUsablePageExcerpt(excerpt)) {
+    return {
+      uri: resolved,
+      title: title || uri,
+      excerpt: excerpt || title || "",
+      publishedAt,
+      originalUrl: uri,
+      resolvedUrl: resolved,
+      fetchStatus: excerpt || title ? "ok" : "failed",
+    };
+  }
+  return {
+    uri: resolved,
+    title: title || uri,
+    excerpt,
+    publishedAt,
+    originalUrl: uri,
+    resolvedUrl: resolved,
+    fetchStatus: "ok",
+  };
 }
 
 export async function fetchPagesForSources(
@@ -278,10 +354,13 @@ export async function fetchPagesForSources(
   for (let i = 0; i < settled.length; i++) {
     if (pages.length >= limit) break;
     const r = settled[i];
-    if (r.status === "fulfilled" && r.value && isUsablePageExcerpt(r.value.excerpt)) {
+    if (r.status !== "fulfilled" || !r.value) continue;
+    const page = r.value;
+    // 僅收可用正文；SSRF／失敗頁不進入 pages（Collector 仍可由 grounding sources 建 title_only）
+    if (page.fetchStatus === "ok" && isUsablePageExcerpt(page.excerpt)) {
       pages.push({
-        ...r.value,
-        title: r.value.title || picked[i].title,
+        ...page,
+        title: page.title || picked[i].title,
       });
     }
   }

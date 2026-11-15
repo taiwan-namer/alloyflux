@@ -77,15 +77,28 @@ async function liveFetchHit(
     );
 
     const hit: RawSearchHit = {
-      brief: searchHit.brief, // Flash 原文；Collector 不以 700 字 brief 當唯一真相
-      sources: searchHit.sources.map((s) => ({ title: s.title, uri: s.uri })),
+      brief: searchHit.brief, // Flash 原文；Collector 不以 brief 當 article_body
+      sources: searchHit.sources.map((s) => ({
+        title: s.title,
+        uri: s.uri,
+        originalUrl: s.uri,
+      })),
       queries: searchHit.queries.length ? searchHit.queries : plan.queries,
-      pages: pages.map((p) => ({ title: p.title, uri: p.uri, excerpt: p.excerpt })),
+      pages: pages.map((p) => ({
+        title: p.title,
+        uri: p.uri,
+        excerpt: p.excerpt,
+        publishedAt: p.publishedAt,
+        originalUrl: p.originalUrl || p.uri,
+        resolvedUrl: p.resolvedUrl || p.uri,
+        fetchStatus: p.fetchStatus ?? "ok",
+      })),
       provider: searchHit.provider,
       limitations: [
         "grounding_partial_serp",
         "published_at_often_missing_from_grounding",
         "brief_is_flash_summary_not_full_serp",
+        "flash_brief_is_search_snippet_not_article_body",
       ],
     };
     return { hit, modelCallCount };
@@ -135,6 +148,7 @@ function buildDebugSnapshot(input: {
     limitations: corpus?.limitations.slice(0, 8) ?? [],
     durationMs: input.durationMs,
     modelCallCount: input.modelCallCount,
+    flashCalls: input.modelCallCount,
   };
 }
 

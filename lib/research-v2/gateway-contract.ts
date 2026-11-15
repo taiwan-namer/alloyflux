@@ -25,22 +25,42 @@ export function attachResearchToDone<T extends { type: string }>(
 ): T {
   if (!verdict || ev.type !== "done") return ev;
   const done = ev as T & DoneLike;
+  const completionStatus = verdict.completionStatus ??
+    (verdict.status === "ok"
+      ? "complete"
+      : verdict.status === "partial"
+        ? "truncated"
+        : verdict.status === "failed"
+          ? "failed"
+          : "unknown");
   if (!verdict.showVerifiedBadge) {
     return {
       ...done,
       groundingSources: done.groundingSources,
       webSearchQueries: done.webSearchQueries,
+      completionStatus,
+      researchGateStatus: verdict.status,
     } as T;
   }
   const merged = new Map<string, { title: string; uri: string }>();
-  for (const s of done.groundingSources ?? []) merged.set(s.uri, s);
-  for (const s of verdict.sources) merged.set(s.uri, s);
+  for (const s of done.groundingSources ?? []) {
+    // 拒絕含省略號的壞連結
+    if (!s.uri || s.uri.includes("…")) continue;
+    merged.set(s.uri, s);
+  }
+  for (const s of verdict.sources) {
+    const uri = s.resolvedUrl || s.uri;
+    if (!uri || uri.includes("…")) continue;
+    merged.set(uri, { title: s.title, uri });
+  }
   return {
     ...done,
     groundingSources: [...merged.values()],
     webSearchQueries: verdict.webSearchQueries.length
       ? verdict.webSearchQueries
       : done.webSearchQueries,
+    completionStatus,
+    researchGateStatus: verdict.status,
   } as T;
 }
 

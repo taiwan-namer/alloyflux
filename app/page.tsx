@@ -49,6 +49,8 @@ interface Message {
   viaDailyBypass?: boolean;
   groundingSources?: { title: string; uri: string }[];
   webSearchQueries?: string[];
+  /** Research V2：complete｜truncated｜failed｜unknown */
+  completionStatus?: "complete" | "truncated" | "failed" | "unknown";
   quotaLabel?: string;
   quotaUsedPct?: number;
   quotaBeforePct?: number;
@@ -321,13 +323,29 @@ function hostnameOfUrl(raw: string): string {
 }
 
 function cleanHref(raw: string): string {
-  // 去掉句尾誤吃的標點
-  return raw.replace(/[),.;:!?，。；：！？]+$/g, "");
+  // 去掉句尾誤吃的標點；拒絕含省略號的截斷假網址
+  const t = raw.replace(/[),.;:!?，。；：！？]+$/g, "").trim();
+  if (!t || t.includes("…") || t.includes("...")) return "";
+  try {
+    const u = new URL(t);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+    return u.toString();
+  } catch {
+    return "";
+  }
 }
 
-/** 內文來源：顯示短標籤／網域 chip，完整網址放 title，避免 UTM 長串刷版 */
+/** 內文來源：顯示短標籤／網域 chip，完整可點網址放 href（不得使用 … 截斷） */
 function SourceChip({ href, label }: { href: string; label?: string }) {
   const url = cleanHref(href);
+  if (!url) {
+    const host = hostnameOfUrl(href);
+    return (
+      <span className="md-link-chip md-link-chip-dead" title={href || "unresolved"}>
+        <span className="md-link-label">{(label?.trim() || host || "來源").slice(0, 42)}</span>
+      </span>
+    );
+  }
   const host = hostnameOfUrl(url);
   const text = (label?.trim() || host).replace(/^https?:\/\//i, "");
   const display = text.length > 42 ? `${host}` : text;
@@ -1657,6 +1675,9 @@ export default function ChatPage() {
               viaDailyBypass: false,
               groundingSources: ev.groundingSources ?? ev.usage?.groundingSources,
               webSearchQueries: ev.webSearchQueries ?? ev.usage?.webSearchQueries,
+              completionStatus:
+                (ev.completionStatus as Message["completionStatus"] | undefined) ??
+                m.completionStatus,
               quotaLabel: ev.usage?.quotaLabel,
               quotaUsedPct: ev.usage?.quotaUsedPct,
               quotaBeforePct: ev.usage?.quotaRemainingBeforePct,
@@ -2027,7 +2048,13 @@ export default function ChatPage() {
                           ? ` · 本次消耗 ${fmt(m.chargedPoints, 2)} 額度`
                           : " · 免費體驗額度"
                         : ""}
-                      {m.groundingSources && m.groundingSources.length > 0 ? " · 已上網查證" : ""}
+                      {m.groundingSources && m.groundingSources.length > 0
+                        ? m.completionStatus === "truncated"
+                          ? " · 部分查證"
+                          : m.completionStatus === "failed"
+                            ? " · 查證未完成"
+                            : " · 已上網查證"
+                        : ""}
                     </span>
                   </div>
                 )}
@@ -2035,6 +2062,9 @@ export default function ChatPage() {
                   <details className="grounding-box">
                     <summary className="grounding-title">
                       參考來源（{Math.min(m.groundingSources.length, 8)}）
+                      {m.completionStatus && m.completionStatus !== "complete"
+                        ? ` · ${m.completionStatus}`
+                        : ""}
                     </summary>
                     <div className="grounding-chips">
                       {m.groundingSources.slice(0, 8).map((s) => (

@@ -168,11 +168,12 @@ export async function* routeChat(
       })
     : null;
 
-  // Node 進程無平台 ALS：把同一份 injection 併入 extraSystemContext
-  const ctxWithResearch =
+  // P0-1：Node 無 ALS → 注入進 extraSystemContext；Local 由 withResearchSystem＋ALS 重用，禁止雙重注入
+  const ctxForNode =
     prepared?.injectionText
       ? [ctx, prepared.injectionText].filter(Boolean).join("\n\n")
       : ctx;
+  const ctxForLocal = ctx;
 
   async function* routeBody(): AsyncGenerator<GatewayEvent> {
     if (model.category === "node-agent" || nodeAvailable) {
@@ -182,7 +183,7 @@ export async function* routeChat(
           upstreamMessages,
           userId,
           signal,
-          ctxWithResearch,
+          ctxForNode,
           customSys,
         )) {
           yield attachResearchToDone(ev, prepared);
@@ -196,7 +197,7 @@ export async function* routeChat(
       }
     }
 
-    yield* routeLocalCandidates(model, upstreamMessages, userId, signal, ctxWithResearch, customSys, prepared);
+    yield* routeLocalCandidates(model, upstreamMessages, userId, signal, ctxForLocal, customSys, prepared);
   }
 
   yield* withPlatformResearchScope(prepared, supplyPath, routeBody());

@@ -1,7 +1,10 @@
 import { cleanSourceUrl } from "../web-research";
 import { sanitizeEvidenceText } from "./sanitize";
 import type {
+  EvidenceGrade,
   EvidenceLevel,
+  EvidenceProvenance,
+  FetchStatus,
   RawSearchHit,
   ResearchClaim,
   ResearchClaimType,
@@ -15,6 +18,8 @@ const PREFERRED_HOST_RE =
   /(reuters\.com|apnews\.com|bloomberg\.com|bbc\.(com|co\.uk)|nytimes\.com|wsj\.com|ft\.com|cnbc\.com|theguardian\.com|cbsnews\.com|independent\.co\.uk|cna\.com\.tw|udn\.com)/i;
 const DEMOTED_HOST_RE =
   /(wikipedia\.org|youtube\.com|youtu\.be|bilibili\.com)/i;
+const OFFICIAL_HOST_RE =
+  /(sec\.gov|whitehouse\.gov|gov\.tw|europa\.eu|un\.org|nvidianews\.nvidia\.com)/i;
 
 function hostnameOf(uri: string): string {
   try {
@@ -25,7 +30,7 @@ function hostnameOf(uri: string): string {
 }
 
 function sourceQuality(host: string): ResearchSource["quality"] {
-  if (PREFERRED_HOST_RE.test(host)) return "preferred";
+  if (PREFERRED_HOST_RE.test(host) || OFFICIAL_HOST_RE.test(host)) return "preferred";
   if (DEMOTED_HOST_RE.test(host)) return "demoted";
   return "normal";
 }
@@ -76,7 +81,14 @@ function guessTopic(text: string): string {
   return "other";
 }
 
-function inferClaimType(text: string): ResearchClaimType {
+function inferClaimType(text: string, provenance: EvidenceProvenance): ResearchClaimType {
+  // 僅標題／搜尋摘要：不得升格為已核對事實
+  if (provenance === "title_only" || provenance === "search_snippet") {
+    if (/尚未確認|未正式確認|未證實|unconfirmed|not\s+confirm/i.test(text)) return "unconfirmed";
+    if (/否認|駁斥|denied/i.test(text)) return "denied";
+    if (/主張|質疑|聲稱|alleged|says?|claims?/i.test(text)) return "party_claim";
+    return "unconfirmed";
+  }
   if (/尚未確認|未正式確認|未證實|沒有證實|unconfirmed|not\s+confirm/i.test(text)) {
     return "unconfirmed";
   }
@@ -88,7 +100,11 @@ function inferClaimType(text: string): ResearchClaimType {
   return "reported_fact";
 }
 
-function inferAttribution(text: string): string | undefined {
+/**
+ * 歸屬僅在來源文本支持時填寫；不可從 Flash brief 單獨捏造。
+ */
+function inferAttribution(text: string, provenance: EvidenceProvenance): string | undefined {
+  if (provenance === "title_only" && text.length < 40) return undefined;
   if (/中方尚未|中國尚未|北京尚未/i.test(text)) return "中方尚未確認";
   if (/克里姆林|俄方確認|俄羅斯確認/i.test(text)) return "俄方／克里姆林宮";
   if (/白宮|美方宣布|美國宣布/i.test(text)) return "美方／白宮";
@@ -96,17 +112,49 @@ function inferAttribution(text: string): string | undefined {
   return undefined;
 }
 
+function provenanceForSource(opts: {
+  hasBody: boolean;
+  host: string;
+  fetchStatus: FetchStatus;
+}): EvidenceProvenance {
+  if (opts.hasBody) {
+    if (OFFICIAL_HOST_RE.test(opts.host)) return "official_document";
+    return "article_body";
+  }
+  if (opts.fetchStatus === "ok") return "title_only";
+  return "title_only";
+}
+
 function evidenceLevelFor(
   quality: ResearchSource["quality"],
   claimType: ResearchClaimType,
-  hasExcerpt: boolean,
+  provenance: EvidenceProvenance,
 ): EvidenceLevel {
   if (claimType === "unconfirmed") return "weak";
-  if (quality === "preferred" && hasExcerpt) return "strong";
+  if (provenance === "title_only" || provenance === "search_snippet" || provenance === "unknown") {
+    return "insufficient";
+  }
+  if (quality === "preferred" && provenance === "article_body") return "strong";
+  if (quality === "preferred" && provenance === "official_document") return "strong";
   if (quality === "preferred") return "moderate";
-  if (quality === "normal" && hasExcerpt) return "moderate";
+  if (quality === "normal" && provenance === "article_body") return "moderate";
   if (quality === "demoted") return "weak";
   return "insufficient";
+}
+
+function gradeEvent(ev: ResearchEvent, sources: ResearchSource[]): EvidenceGrade {
+  const linked = sources.filter((s) => ev.sourceIds.includes(s.sourceId));
+  const hasBody = linked.some(
+    (s) => s.provenance === "article_body" || s.provenance === "official_document",
+  );
+  const hasDate = Boolean(ev.publishedAt) || linked.some((s) => s.publishedAt);
+  const hasConflict = ev.claims.some((c) => c.claimType === "denied") &&
+    ev.claims.some((c) => c.claimType === "reported_fact" || c.claimType === "party_claim");
+  if (hasConflict) return "conflict";
+  if (hasBody && hasDate) return "body_with_date";
+  if (hasBody) return "body_missing_date";
+  if (linked.length === 0) return "search_failed";
+  return "title_only";
 }
 
 function freshnessScore(publishedAt: string | undefined, plan: ResearchPlan, nowMs: number): number {
@@ -131,7 +179,8 @@ function qualityScore(q: ResearchSource["quality"]): number {
 }
 
 /**
- * 從 RawSearchHit 建立結構化 Corpus（不做 700 字真相截斷）
+ * 從 RawSearchHit 建立結構化 Corpus。
+ * Flash brief 僅作線索／unconfirmed 提示，不得冒充 article_body。
  */
 export function collectEventsFromHit(
   plan: ResearchPlan,
@@ -142,56 +191,87 @@ export function collectEventsFromHit(
   const limitations = [
     ...(hit.limitations ?? []),
     "grounding_partial_serp: Gemini Grounding 非完整 SERP，僅能使用回傳之 URI／摘要",
+    "flash_brief_is_search_snippet_not_article_body",
   ];
 
-  const pageByUri = new Map(hit.pages.map((p) => [cleanSourceUrl(p.uri), p]));
+  const pageByUri = new Map(
+    hit.pages.map((p) => [cleanSourceUrl(p.resolvedUrl || p.uri), p]),
+  );
+  // 也以 originalUrl 索引
+  for (const p of hit.pages) {
+    if (p.originalUrl) pageByUri.set(cleanSourceUrl(p.originalUrl), p);
+    pageByUri.set(cleanSourceUrl(p.uri), p);
+  }
+
   const rawSources: ResearchSource[] = [];
   const seenUri = new Set<string>();
 
   for (const s of hit.sources) {
-    const uri = cleanSourceUrl(s.uri);
+    const originalUrl = cleanSourceUrl(s.originalUrl || s.uri);
+    const resolvedUrl = s.resolvedUrl ? cleanSourceUrl(s.resolvedUrl) : undefined;
+    const uri = resolvedUrl || originalUrl;
     if (!/^https?:\/\//i.test(uri)) continue;
     if (seenUri.has(uri)) continue;
     seenUri.add(uri);
     const host = hostnameOf(uri);
-    const page = pageByUri.get(uri);
-    const publishedAt = s.publishedAt || page?.publishedAt;
+    const page = pageByUri.get(uri) || pageByUri.get(originalUrl);
+    const hasBody = Boolean(page?.excerpt && page.excerpt.length >= 120);
+    const fetchStatus: FetchStatus =
+      page?.fetchStatus ?? (hasBody ? "ok" : page ? "ok" : "unresolved");
+    const provenance = provenanceForSource({ hasBody, host, fetchStatus });
+    const publishedAt = s.publishedAt || page?.publishedAt || undefined;
     rawSources.push({
       sourceId: stableId("src", uri),
       title: (s.title || page?.title || host || uri).trim(),
       uri,
+      originalUrl,
+      resolvedUrl: resolvedUrl || (page?.resolvedUrl ? cleanSourceUrl(page.resolvedUrl) : undefined),
       host,
-      publishedAt: publishedAt || undefined,
-      excerpt: page?.excerpt ? sanitizeEvidenceText(page.excerpt, 900) : undefined,
+      publishedAt,
+      excerpt: hasBody && page?.excerpt ? sanitizeEvidenceText(page.excerpt, 900) : undefined,
       quality: sourceQuality(host),
+      fetchStatus,
+      provenance,
     });
   }
 
-  // 頁面有、sources 沒有的也納入
   for (const p of hit.pages) {
-    const uri = cleanSourceUrl(p.uri);
+    const originalUrl = cleanSourceUrl(p.originalUrl || p.uri);
+    const resolvedUrl = p.resolvedUrl ? cleanSourceUrl(p.resolvedUrl) : cleanSourceUrl(p.uri);
+    const uri = resolvedUrl || originalUrl;
     if (!/^https?:\/\//i.test(uri) || seenUri.has(uri)) continue;
     seenUri.add(uri);
     const host = hostnameOf(uri);
+    const hasBody = Boolean(p.excerpt && p.excerpt.length >= 120);
+    const fetchStatus: FetchStatus = p.fetchStatus ?? (hasBody ? "ok" : "failed");
     rawSources.push({
       sourceId: stableId("src", uri),
       title: (p.title || host).trim(),
       uri,
+      originalUrl,
+      resolvedUrl,
       host,
       publishedAt: p.publishedAt || undefined,
-      excerpt: p.excerpt ? sanitizeEvidenceText(p.excerpt, 900) : undefined,
+      excerpt: hasBody ? sanitizeEvidenceText(p.excerpt, 900) : undefined,
       quality: sourceQuality(host),
+      fetchStatus,
+      provenance: provenanceForSource({ hasBody, host, fetchStatus }),
     });
   }
 
   const byMerge = new Map<string, ResearchEvent>();
+  // brief 僅作 search_snippet 線索，不用來當 article_body claim
   const briefSafe = sanitizeEvidenceText(hit.brief, 2000);
 
   for (const src of rawSources) {
     const topic = guessTopic(`${src.title} ${src.excerpt ?? ""}`);
     const mergeKey = eventMergeKey(src.title, src.publishedAt, topic);
-    const claimType = inferClaimType(`${src.title}\n${src.excerpt ?? ""}\n${briefSafe}`);
-    const attribution = inferAttribution(`${src.title}\n${src.excerpt ?? ""}\n${briefSafe}`);
+    const claimText =
+      src.provenance === "article_body" || src.provenance === "official_document"
+        ? `${src.title}\n${src.excerpt ?? ""}`
+        : src.title;
+    const claimType = inferClaimType(claimText, src.provenance);
+    const attribution = inferAttribution(claimText, src.provenance);
     const statement = sanitizeEvidenceText(
       src.excerpt?.slice(0, 280) || src.title,
       280,
@@ -202,20 +282,19 @@ export function collectEventsFromHit(
       claimType,
       sourceIds: [src.sourceId],
       attribution,
-      evidenceLevel: evidenceLevelFor(src.quality, claimType, Boolean(src.excerpt)),
+      evidenceLevel: evidenceLevelFor(src.quality, claimType, src.provenance),
+      provenance: src.provenance,
     };
 
     const existing = byMerge.get(mergeKey);
     if (existing) {
       if (!existing.sourceIds.includes(src.sourceId)) existing.sourceIds.push(src.sourceId);
-      // 同事件合併主張（去重 statement）
       if (!existing.claims.some((c) => c.statement === claim.statement)) {
         existing.claims.push(claim);
       } else {
         const c0 = existing.claims.find((c) => c.statement === claim.statement);
         if (c0 && !c0.sourceIds.includes(src.sourceId)) c0.sourceIds.push(src.sourceId);
       }
-      // publishedAt：只在缺值時補；eventAt 永不由 publishedAt 填入
       if (!existing.publishedAt && src.publishedAt) existing.publishedAt = src.publishedAt;
       existing.relevance = Math.max(existing.relevance, qualityScore(src.quality));
       existing.freshness = Math.max(existing.freshness, freshnessScore(src.publishedAt, plan, nowMs));
@@ -225,7 +304,6 @@ export function collectEventsFromHit(
     const event: ResearchEvent = {
       eventId: stableId("evt", mergeKey),
       title: src.title.slice(0, 160),
-      // 不把 publishedAt 寫入 eventAt
       eventAt: undefined,
       publishedAt: src.publishedAt,
       topic,
@@ -234,11 +312,12 @@ export function collectEventsFromHit(
       relevance: qualityScore(src.quality),
       freshness: freshnessScore(src.publishedAt, plan, nowMs),
       diversityKey: topic,
+      evidenceGrade: "unknown",
     };
     byMerge.set(mergeKey, event);
   }
 
-  // brief 中明確「尚未確認」→ 若尚無 unconfirmed claim，補一條弱主張（不新造新聞事實）
+  // brief 中「尚未確認」→ 以 search_snippet 補弱主張（明確 provenance）
   if (/尚未確認|未正式確認|unconfirmed/i.test(briefSafe) && byMerge.size) {
     const first = [...byMerge.values()][0];
     if (first && !first.claims.some((c) => c.claimType === "unconfirmed")) {
@@ -251,21 +330,35 @@ export function collectEventsFromHit(
         ),
         claimType: "unconfirmed",
         sourceIds: first.sourceIds.slice(0, 1),
-        attribution: inferAttribution(briefSafe),
+        attribution: inferAttribution(briefSafe, "search_snippet"),
         evidenceLevel: "weak",
+        provenance: "search_snippet",
       });
     }
   }
 
+  for (const ev of byMerge.values()) {
+    ev.evidenceGrade = gradeEvent(ev, rawSources);
+  }
+
   const rawEvents = [...byMerge.values()];
   const ranked = rankEventsWithDiversity(rawEvents, plan.limits.maxEvents);
+
+  let bodyWithDate = 0;
+  let bodyMissingDate = 0;
+  let titleOnly = 0;
+  for (const e of ranked.events) {
+    if (e.evidenceGrade === "body_with_date") bodyWithDate += 1;
+    else if (e.evidenceGrade === "body_missing_date") bodyMissingDate += 1;
+    else if (e.evidenceGrade === "title_only") titleOnly += 1;
+  }
 
   return {
     plan,
     sources: rawSources,
     events: ranked.events,
     queriesUsed: hit.queries.slice(0, plan.limits.maxQueries),
-    pagesFetched: hit.pages.length,
+    pagesFetched: hit.pages.filter((p) => p.fetchStatus !== "blocked_ssrf").length,
     limitations,
     searchProvider: hit.provider,
     stats: {
@@ -275,6 +368,9 @@ export function collectEventsFromHit(
       dedupedEventCount: byMerge.size,
       truncatedEvents: ranked.truncated,
       excluded: ranked.excluded,
+      bodyWithDate,
+      bodyMissingDate,
+      titleOnly,
     },
   };
 }
@@ -299,7 +395,6 @@ export function rankEventsWithDiversity(
   const MAX_PER_TOPIC = 2;
   const excluded: { eventId: string; title: string; reason: string }[] = [];
 
-  // 第一輪：每主題最多 2
   for (const e of scored) {
     if (picked.length >= maxEvents) break;
     const n = topicCount.get(e.diversityKey) ?? 0;
@@ -307,7 +402,6 @@ export function rankEventsWithDiversity(
     picked.push(e);
     topicCount.set(e.diversityKey, n + 1);
   }
-  // 第二輪：填滿
   for (const e of scored) {
     if (picked.length >= maxEvents) break;
     if (picked.some((p) => p.eventId === e.eventId)) continue;
