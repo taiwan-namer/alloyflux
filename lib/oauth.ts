@@ -12,13 +12,17 @@ const DEFAULT_AGY_CLIENT_ID = [
 ].join("");
 const DEFAULT_AGY_CLIENT_SECRET = ["GOCSPX", "-K58FWR486LdLJ1m", "LB8sXC4z6qDAf"].join("");
 
+const GEMINI_LOOPBACK_REDIRECT = "http://localhost:51121/oauth-callback";
+const GEMINI_WEB_CALLBACK_PATH = "/api/oauth/gemini/callback";
+
 export const GEMINI_OAUTH = {
   clientId: process.env.GEMINI_OAUTH_CLIENT_ID?.trim() || DEFAULT_AGY_CLIENT_ID,
   clientSecret: process.env.GEMINI_OAUTH_CLIENT_SECRET?.trim() || DEFAULT_AGY_CLIENT_SECRET,
   authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
   tokenUrl: "https://oauth2.googleapis.com/token",
   userInfoUrl: "https://www.googleapis.com/oauth2/v2/userinfo",
-  redirectUri: "http://localhost:51121/oauth-callback",
+  /** @deprecated 請改用 resolveGeminiOAuthRedirectUri()；內建 CLI client 才走 loopback */
+  redirectUri: GEMINI_LOOPBACK_REDIRECT,
   scopes: [
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -217,14 +221,63 @@ export function decodeJwtPayload(jwt: string): Record<string, unknown> {
   }
 }
 
-// === Build Browser OAuth URLs (with manual redirect URL paste support for mobile / remote) ===
-export function startGeminiOAuth(opts?: { label?: string; shareLimitPct?: number }): { state: string; authUrl: string } {
+/** 是否仍在使用 Antigravity／Gemini CLI 內建桌面 client（只能 localhost 回呼） */
+export function isBundledAntigravityGeminiClient(): boolean {
+  const id = GEMINI_OAUTH.clientId.trim();
+  return id === DEFAULT_AGY_CLIENT_ID || id.startsWith("1071006060591-");
+}
+
+function publicAppBaseForOAuth(): string {
+  const raw =
+    process.env.GEMINI_OAUTH_PUBLIC_BASE?.trim() ||
+    process.env.NEXT_PUBLIC_APP_URL?.trim() ||
+    process.env.OAUTH_CLOUD_API_BASE?.trim() ||
+    "";
+  return raw.replace(/\/$/, "");
+}
+
+/**
+ * 自訂「網頁應用程式」OAuth client（非 CLI 內建）時，可走正式網域 HTTPS 回呼，
+ * 供給者在任何電腦開線上站都能一鍵授權。
+ */
+export function geminiWebOAuthReady(): boolean {
+  if (isBundledAntigravityGeminiClient()) return false;
+  if (process.env.GEMINI_OAUTH_REDIRECT_URI?.trim()) return true;
+  return Boolean(publicAppBaseForOAuth());
+}
+
+export function resolveGeminiOAuthRedirectUri(): string {
+  const explicit = process.env.GEMINI_OAUTH_REDIRECT_URI?.trim();
+  if (explicit) return explicit;
+  if (geminiWebOAuthReady()) {
+    const base = publicAppBaseForOAuth();
+    if (base) return `${base}${GEMINI_WEB_CALLBACK_PATH}`;
+  }
+  return GEMINI_LOOPBACK_REDIRECT;
+}
+
+export type GeminiOAuthMode = "web" | "loopback";
+
+export function geminiOAuthMode(): GeminiOAuthMode {
+  return geminiWebOAuthReady() ? "web" : "loopback";
+}
+
+// === Build Browser OAuth URLs（web＝正式網域回呼；loopback＝本機 51121／可貼網址） ===
+export function startGeminiOAuth(opts?: {
+  label?: string;
+  shareLimitPct?: number;
+  redirectUri?: string;
+}): { state: string; authUrl: string; redirectUri: string; mode: GeminiOAuthMode } {
   const { verifier, challenge } = createPkce();
-  // 將 verifier 與設定直接編碼進 state，即使開發環境熱重載也絕不會遺失授權狀態
+  const redirectUri = opts?.redirectUri?.trim() || resolveGeminiOAuthRedirectUri();
+  const mode: GeminiOAuthMode = redirectUri.startsWith("http://localhost") || redirectUri.startsWith("http://127.0.0.1")
+    ? "loopback"
+    : "web";
+  // 將 verifier 與設定直接編碼進 state，即使開發環境熱重載／跨機器回呼也不會遺失
   const statePayload = {
     p: "gemini" as const,
     v: verifier,
-    r: GEMINI_OAUTH.redirectUri,
+    r: redirectUri,
     l: opts?.label,
     s: opts?.shareLimitPct,
   };
@@ -232,14 +285,14 @@ export function startGeminiOAuth(opts?: { label?: string; shareLimitPct?: number
   pendingOAuth.set(state, {
     provider: "gemini",
     verifier,
-    redirectUri: GEMINI_OAUTH.redirectUri,
+    redirectUri,
     label: opts?.label,
     shareLimitPct: opts?.shareLimitPct,
     createdAt: Date.now(),
   });
   const params = new URLSearchParams({
     client_id: GEMINI_OAUTH.clientId,
-    redirect_uri: GEMINI_OAUTH.redirectUri,
+    redirect_uri: redirectUri,
     response_type: "code",
     scope: GEMINI_OAUTH.scopes.join(" "),
     access_type: "offline",
@@ -249,7 +302,7 @@ export function startGeminiOAuth(opts?: { label?: string; shareLimitPct?: number
     code_challenge_method: "S256",
     state,
   });
-  return { state, authUrl: `${GEMINI_OAUTH.authUrl}?${params.toString()}` };
+  return { state, authUrl: `${GEMINI_OAUTH.authUrl}?${params.toString()}`, redirectUri, mode };
 }
 
 export function startChatGptOAuth(opts?: { label?: string; shareLimitPct?: number }): { state: string; authUrl: string } {

@@ -170,6 +170,7 @@ export default function SourcesPage() {
   } | null>(null);
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [geminiWebOAuthReady, setGeminiWebOAuthReady] = useState(false);
 
   // 單一節點即時滑桿草稿（拖動時即時換算金額，放開寫入後端）
   const [draftLimits, setDraftLimits] = useState<Record<string, number>>({});
@@ -232,8 +233,18 @@ export default function SourcesPage() {
     void syncAndRefresh();
     fetch("/api/oauth")
       .then((r) => r.json())
-      .then((d) => setLocalCli(d.localCli ?? []))
+      .then((d) => {
+        setLocalCli(d.localCli ?? []);
+        setGeminiWebOAuthReady(Boolean(d.geminiWebOAuthReady));
+      })
       .catch(() => {});
+    if (typeof window !== "undefined") {
+      const q = new URLSearchParams(window.location.search);
+      if (q.get("oauth") === "ok") {
+        setOauthMsg({ ok: true, text: "✓ Google 模組串接成功！已自動讀取剩餘容量並納入分配試算" });
+        window.history.replaceState({}, "", "/sources");
+      }
+    }
     const t = setInterval(() => void refresh(), 10_000);
     return () => clearInterval(t);
   }, [syncAndRefresh, refresh]);
@@ -285,6 +296,12 @@ export default function SourcesPage() {
       return;
     }
     setActiveOAuthState(data.state);
+    // 正式網域 Web OAuth：同一分頁導向 Google，同意後回 /api/oauth/gemini/callback → /sources
+    if (action === "start_gemini" && data.mode === "web" && data.authUrl) {
+      setActiveAuthUrl(null);
+      window.location.assign(data.authUrl as string);
+      return;
+    }
     setActiveAuthUrl(data.authUrl);
     window.open(data.authUrl, "_blank", "noopener,noreferrer");
   }
@@ -974,7 +991,11 @@ export default function SourcesPage() {
             onClick={() => void startBrowserOAuth("start_gemini")}
           >
             <div style={{ fontWeight: 700 }}>✦ Google Gemini 模組（AI Pro / Ultra）</div>
-            <div style={{ fontSize: 12, opacity: 0.9, marginTop: 3 }}>一鍵 Google OAuth 授權 · 讀取剩餘 %</div>
+            <div style={{ fontSize: 12, opacity: 0.9, marginTop: 3 }}>
+              {geminiWebOAuthReady
+                ? "一鍵 Google OAuth（正式網域回呼）· 讀取剩餘 %"
+                : "一鍵 Google OAuth 授權 · 讀取剩餘 %"}
+            </div>
           </button>
 
           <button
@@ -1110,14 +1131,19 @@ export default function SourcesPage() {
           </div>
         )}
 
-        {activeAuthUrl && (
+        {activeAuthUrl && !geminiWebOAuthReady && (
           <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
             <div style={{ marginBottom: 8, fontSize: 13, lineHeight: 1.6 }}>
-              在新開的{" "}
+              目前為本機回呼模式。在新開的{" "}
               <a href={activeAuthUrl} target="_blank" rel="noreferrer">
                 官方 OAuth 視窗
               </a>{" "}
-              完成同意後，網址列若出現 <code>http://localhost:51121/...</code>，請整串貼下方（寫入走雲端 API，本機不必設 DATABASE_URL）：
+              完成同意後，網址列若出現 <code>http://localhost:51121/...</code>，請整串貼下方（寫入走雲端 API，本機不必設 DATABASE_URL）。
+              <br />
+              <span className="muted">
+                若要讓任何電腦都能一鍵完成（不必貼網址），請在 Google Cloud 建立「網頁應用程式」OAuth client，並於 Vercel 設定自訂{" "}
+                <code>GEMINI_OAUTH_CLIENT_ID</code>／<code>SECRET</code>。
+              </span>
             </div>
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <input

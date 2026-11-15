@@ -2,9 +2,11 @@ import { createServer, type Server } from "node:http";
 import {
   completeOAuthByCode,
   detectLocalCliCredentials,
+  geminiOAuthMode,
   importLocalCliCredential,
   pollChatGptDeviceFlow,
   pollGrokDeviceFlow,
+  resolveGeminiOAuthRedirectUri,
   startChatGptDeviceFlow,
   startChatGptOAuth,
   startGeminiOAuth,
@@ -150,10 +152,14 @@ function ensureLocalCallbackListener(port: number, expectedPath: string) {
 
 export async function GET() {
   try {
+    const geminiMode = geminiOAuthMode();
     return Response.json({
       localCli: detectLocalCliCredentials(),
       persistMode: shouldProxyOAuthPersist() ? "cloud" : "local",
       cloudApiBase: shouldProxyOAuthPersist() ? cloudApiBase() : null,
+      geminiOAuthMode: geminiMode,
+      geminiRedirectUri: resolveGeminiOAuthRedirectUri(),
+      geminiWebOAuthReady: geminiMode === "web",
     });
   } catch (e) {
     return jsonError(e);
@@ -191,8 +197,11 @@ export async function POST(req: Request) {
 
     switch (body.action) {
       case "start_gemini": {
-        ensureLocalCallbackListener(51121, "/oauth-callback");
         const res = startGeminiOAuth({ label: body.label, shareLimitPct: body.shareLimitPct });
+        // 僅 CLI 內建 client（loopback）才需本機 51121；正式網域 Web OAuth 由 /api/oauth/gemini/callback 接手
+        if (res.mode === "loopback") {
+          ensureLocalCallbackListener(51121, "/oauth-callback");
+        }
         return Response.json({
           ...res,
           persistMode: shouldProxyOAuthPersist(req) ? "cloud" : "local",

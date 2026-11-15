@@ -95,6 +95,7 @@ export default function VendorPage() {
   const [activeOAuthState, setActiveOAuthState] = useState<string | null>(null);
   const [activeAuthUrl, setActiveAuthUrl] = useState<string | null>(null);
   const [callbackInput, setCallbackInput] = useState("");
+  const [geminiWebOAuthReady, setGeminiWebOAuthReady] = useState(false);
   const [deviceFlow, setDeviceFlow] = useState<{
     kind: "chatgpt" | "grok";
     state: string;
@@ -118,6 +119,10 @@ export default function VendorPage() {
           }
         }
       })
+      .catch(() => {});
+    fetch("/api/oauth", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d) => setGeminiWebOAuthReady(Boolean(d.geminiWebOAuthReady)))
       .catch(() => {});
   }, [router]);
 
@@ -206,6 +211,11 @@ export default function VendorPage() {
           return;
         }
         setActiveOAuthState(data.state);
+        if (data.mode === "web" && data.authUrl) {
+          setActiveAuthUrl(null);
+          window.location.assign(data.authUrl as string);
+          return;
+        }
         setActiveAuthUrl(data.authUrl);
         window.open(data.authUrl, "_blank", "noopener,noreferrer");
       } else if (selectedModule === "claude" && claudeMode === "api_key") {
@@ -554,18 +564,20 @@ export default function VendorPage() {
             )}
           </button>
 
-          {/* Google OAuth 雲端貼回網址列 */}
-          {activeAuthUrl && (
+          {/* 僅 loopback 模式才需貼回網址；Web OAuth 會自動導回站台 */}
+          {activeAuthUrl && !geminiWebOAuthReady && (
             <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
               <div style={{ marginBottom: 8, lineHeight: 1.6, fontSize: 13 }}>
-                <strong>Google OAuth 授權確認：</strong>
-                <br />
-                Google code 在本機兌換（與啟動時同一組 OAuth client），憑證再寫入雲端（本機不必放 DATABASE_URL）。
+                <strong>Google OAuth 授權確認（本機回呼模式）：</strong>
                 <br />
                 ・請保持 <code>npm run dev</code> 開著，按允許後監聽 <code>51121</code> 會自動完成。
                 <br />
                 ・若瀏覽器停在無法連線頁，把網址列{" "}
                 <code>http://localhost:51121/oauth-callback?code=...</code> <strong>整串貼下方</strong>：
+                <br />
+                <span className="muted">
+                  線上站一鍵授權需在 Vercel 設定自訂 Google「網頁應用程式」OAuth client（非 CLI 內建 ID）。
+                </span>
               </div>
               <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
                 <input
