@@ -16,13 +16,13 @@ export async function POST(req: Request) {
     if (!body.email?.trim() || !body.password) {
       return Response.json({ error: "請填 Email 與密碼" }, { status: 400 });
     }
-    const user = authenticateEmailPassword(body.email, body.password);
+    const user = await authenticateEmailPassword(body.email, body.password);
     const token = issueSessionToken(user.id);
     return new Response(
       JSON.stringify({
         ok: true,
         user: publicUser(user),
-        balance: balance(user.id),
+        balance: await balance(user.id),
         redirect: homePathFor(user),
       }),
       {

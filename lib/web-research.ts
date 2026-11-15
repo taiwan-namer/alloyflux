@@ -37,7 +37,7 @@ const WEB_RESEARCH_INTENT_RE =
 async function ensureFresh(sourceId: string, creds: OAuthCredentials): Promise<OAuthCredentials> {
   if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
     const refreshed = await refreshOAuthCredentials(creds);
-    saveUpdatedOAuthCreds(sourceId, refreshed);
+    await saveUpdatedOAuthCreds(sourceId, refreshed);
     return refreshed;
   }
   return creds;
@@ -331,7 +331,7 @@ async function searchViaAntigravity(
       const boot = await bootstrapGeminiAccount(fresh.accessToken);
       if (boot.projectId) {
         fresh.projectId = boot.projectId;
-        saveUpdatedOAuthCreds(sourceId, fresh);
+        await saveUpdatedOAuthCreds(sourceId, fresh);
       }
     } catch {
       // continue
@@ -479,9 +479,9 @@ export async function resolveResearchChannel(): Promise<
   | { kind: "apiKey"; apiKey: string }
   | null
 > {
-  for (const s of listSources()) {
+  for (const s of await listSources()) {
     if (!s.enabled || s.provider !== "gemini" || s.authType !== "oauth_sub") continue;
-    const creds = readOAuthCreds(s.id);
+    const creds = await readOAuthCreds(s.id);
     if (!creds || creds.delegatedToNode) continue;
     if (!creds.accessToken && !creds.refreshToken) continue;
     return { kind: "antigravity", sourceId: s.id, creds };

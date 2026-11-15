@@ -6,16 +6,16 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   try {
-    const user = requireUser(req);
+    const user = await requireUser(req);
     const body = (await req.json()) as { code?: string };
-    const result = redeemCode(user.id, body.code || "");
+    const result = await redeemCode(user.id, body.code || "");
     return Response.json(
       {
         ok: true,
         points: result.points,
         message: result.balanceNote,
-        balance: balance(user.id),
-        quotaCap: quotaCapFromLedger(user.id),
+        balance: await balance(user.id),
+        quotaCap: await quotaCapFromLedger(user.id),
       },
       {
         headers: {

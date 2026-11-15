@@ -5,8 +5,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
-    requireAdmin(req);
-    const nodes = listNodes();
+    await requireAdmin(req);
+    const nodes = await listNodes();
     return Response.json({
       online: nodes.filter((n) => n.online).length,
       total: nodes.length,

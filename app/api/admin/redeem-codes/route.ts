@@ -5,8 +5,8 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
-    requireAdmin(req);
-    return Response.json({ codes: listRecentRedeemCodes(30) });
+    await requireAdmin(req);
+    return Response.json({ codes: await listRecentRedeemCodes(30) });
   } catch (e) {
     return jsonError(e);
   }
@@ -14,13 +14,13 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    requireAdmin(req);
+    await requireAdmin(req);
     const body = (await req.json().catch(() => ({}))) as {
       points?: number;
       maxUses?: number;
       note?: string;
     };
-    const created = createRedeemCode({
+    const created = await createRedeemCode({
       points: body.points ?? 1000,
       maxUses: body.maxUses ?? 1,
       note: body.note ?? "admin mint",

@@ -79,12 +79,12 @@ async function* streamViaNodeAgent(
   const route = resolveNodeRoute(model);
   if (!route) throw new UpstreamError(400, "此模型未設定 Node Agent 路由");
 
-  const nodes = listOnlineNodesForModel(route.providerKey, route.upstreamModel);
+  const nodes = await listOnlineNodesForModel(route.providerKey, route.upstreamModel);
   if (!nodes.length) {
     throw new UpstreamError(503, `沒有在線節點可執行 ${route.providerKey}:${route.upstreamModel}`);
   }
 
-  const job = enqueueInferenceJob({
+  const job = await enqueueInferenceJob({
     userId,
     modelId: model.id,
     providerKey: route.providerKey,
@@ -115,7 +115,7 @@ async function* streamViaNodeAgent(
   }
 
   const { getJob } = await import("./inference-jobs");
-  const done = getJob(job.id);
+  const done = await getJob(job.id);
   const fallback = chargePointsFromUsd(officialCostUsd(model, usage), model.tier, model.effort);
   yield {
     type: "done",
@@ -147,7 +147,7 @@ export async function* routeChat(
 
   const route = resolveNodeRoute(model);
   const nodeAvailable =
-    route && listOnlineNodesForModel(route.providerKey, route.upstreamModel).length > 0;
+    route && (await listOnlineNodesForModel(route.providerKey, route.upstreamModel)).length > 0;
 
   if (model.category === "node-agent" || nodeAvailable) {
     try {
@@ -161,7 +161,7 @@ export async function* routeChat(
   }
 
   // 混合水庫：含 oauth_sub；candidatesFor 已過濾 share_limit / cooldown
-  const allCandidates = candidatesFor(model);
+  const allCandidates = await candidatesFor(model);
   if (allCandidates.length === 0) {
     throw new NoSourceError(
       "目前沒有可用貨源。請綁定訂閱／API Key，或啟動 Node Agent。",

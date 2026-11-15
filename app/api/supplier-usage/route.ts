@@ -8,18 +8,19 @@ const WEEK_MS = 7 * 24 * 3600_000;
 
 export async function GET(req: Request) {
   try {
-    requireSupplier(req);
+    await requireSupplier(req);
     const since = Date.now() - WEEK_MS;
+    const sources = (await listSources()).filter((s) => s.authType === "oauth_sub");
     return Response.json(
-      listSources()
-        .filter((s) => s.authType === "oauth_sub")
-        .map((s) => ({
+      await Promise.all(
+        sources.map(async (s) => ({
           sourceId: s.id,
           label: s.label,
           provider: s.provider,
           quota: s.quota,
-          ...supplierUsage(s.id, since),
+          ...(await supplierUsage(s.id, since)),
         })),
+      ),
     );
   } catch (e) {
     return jsonError(e);

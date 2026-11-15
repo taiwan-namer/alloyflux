@@ -23,7 +23,7 @@ function bearer(req: Request): string {
  * 平台依 usage 計算點數並冪等結算。
  */
 export async function POST(req: Request) {
-  const node = authenticateNode(bearer(req));
+  const node = await authenticateNode(bearer(req));
   if (!node) return Response.json({ error: "節點憑證無效" }, { status: 401 });
 
   const body = (await req.json().catch(() => ({}))) as {
@@ -37,10 +37,10 @@ export async function POST(req: Request) {
   };
 
   if (!body.jobId) return Response.json({ error: "缺少 jobId" }, { status: 400 });
-  touchHeartbeat(node.id, {});
+  await touchHeartbeat(node.id, {});
 
   if (body.action === "running") {
-    return Response.json({ ok: markJobRunning(body.jobId, node.id) });
+    return Response.json({ ok: await markJobRunning(body.jobId, node.id) });
   }
 
   if (body.action === "event") {
@@ -49,12 +49,12 @@ export async function POST(req: Request) {
     if (body.event.type === "text" && body.event.text.length > 100_000) {
       return Response.json({ error: "text 過大" }, { status: 413 });
     }
-    return Response.json({ ok: pushJobEvent(body.jobId, node.id, body.event) });
+    return Response.json({ ok: await pushJobEvent(body.jobId, node.id, body.event) });
   }
 
   if (body.action === "fail") {
     return Response.json({
-      ok: failJob(body.jobId, node.id, body.error || "node failed", body.status ?? 500),
+      ok: await failJob(body.jobId, node.id, body.error || "node failed", body.status ?? 500),
     });
   }
 
@@ -68,13 +68,13 @@ export async function POST(req: Request) {
       typeof body.platformCostUsd === "number"
         ? body.platformCostUsd
         : (usage.inputTokens * 0.1 + usage.outputTokens * 0.4) / 1_000_000;
-    const job = getJob(body.jobId);
+    const job = await getJob(body.jobId);
     const jobModel = job ? findModel(job.modelId) : undefined;
     const bill = chargePointsFromUsd(costUsd, jobModel?.tier, jobModel?.effort);
     const supplierRewardPoints =
       Math.round(bill.chargedPoints * supplierRewardShare() * 10000) / 10000;
     return Response.json({
-      ok: completeJob(body.jobId, node.id, {
+      ok: await completeJob(body.jobId, node.id, {
         usage,
         platformCostPoints: bill.officialCostPoints,
         chargedPoints: bill.chargedPoints,

@@ -3,18 +3,18 @@ import { registerNode, type RegisterCapabilityInput } from "@/lib/node-registry"
 
 export const dynamic = "force-dynamic";
 
-function authorizeRegister(req: Request): void {
+async function authorizeRegister(req: Request): Promise<void> {
   const token = process.env.AGENT_REGISTER_TOKEN?.trim();
   const h = req.headers.get("authorization") || "";
   const m = h.match(/^Bearer\s+(.+)$/i);
   if (token && m?.[1]?.trim() === token) return;
-  requireAdmin(req);
+  await requireAdmin(req);
 }
 
 /** Agent 註冊：需管理員 Session，或 Bearer AGENT_REGISTER_TOKEN */
 export async function POST(req: Request) {
   try {
-    authorizeRegister(req);
+    await authorizeRegister(req);
     const body = (await req.json().catch(() => ({}))) as {
       label?: string;
       accountName?: string;
@@ -23,7 +23,7 @@ export async function POST(req: Request) {
       capabilities?: RegisterCapabilityInput[];
     };
 
-    const { node, credential } = registerNode({
+    const { node, credential } = await registerNode({
       label: body.label,
       accountName: body.accountName,
       maxConcurrency: body.maxConcurrency,

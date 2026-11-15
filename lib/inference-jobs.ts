@@ -167,8 +167,10 @@ function rowToJob(r: Record<string, unknown>): InferenceJob {
   };
 }
 
-export function getJob(id: string): InferenceJob | null {
-  const row = db().prepare("SELECT * FROM inference_jobs WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+export async function getJob(id: string): Promise<InferenceJob | null> {
+  const row = (await db().prepare("SELECT * FROM inference_jobs WHERE id = ?").get(id)) as
+    | Record<string, unknown>
+    | undefined;
   return row ? rowToJob(row) : null;
 }
 
@@ -178,38 +180,40 @@ function enqueueForNode(nodeId: string, jobId: string): void {
   queues.set(nodeId, q);
 }
 
-function pickNode(providerKey: string, upstreamModel: string): SupplierNode | null {
-  const nodes = listOnlineNodesForModel(providerKey, upstreamModel);
+async function pickNode(providerKey: string, upstreamModel: string): Promise<SupplierNode | null> {
+  const nodes = await listOnlineNodesForModel(providerKey, upstreamModel);
   if (!nodes.length) return null;
-  // 負載最低優先
-  return nodes.sort((a, b) => activeJobCount(a.id) - activeJobCount(b.id))[0];
+  // 負載最低優先（先各查一次 active job 數再排序）
+  const loads = new Map<string, number>();
+  for (const n of nodes) loads.set(n.id, await activeJobCount(n.id));
+  return nodes.sort((a, b) => (loads.get(a.id) ?? 0) - (loads.get(b.id) ?? 0))[0];
 }
 
-function assignJobToNode(jobId: string, node: SupplierNode, payload: string): void {
-  const credHash = db()
+async function assignJobToNode(jobId: string, node: SupplierNode, payload: string): Promise<void> {
+  const credHash = (await db()
     .prepare("SELECT credential_hash FROM supplier_nodes WHERE id = ?")
-    .get(node.id) as { credential_hash: string };
+    .get(node.id)) as { credential_hash: string };
   const signature = signJobPayload(credHash.credential_hash, payload);
   const now = Date.now();
-  db()
+  await db()
     .prepare(
       `UPDATE inference_jobs SET status = 'assigned', assigned_node_id = ?, assigned_at = ?,
        attempt_count = attempt_count + 1, signature = ?, timeout_at = ? WHERE id = ?`,
     )
     .run(node.id, now, signature, now + JOB_TIMEOUT_MS, jobId);
-  db()
+  await db()
     .prepare(
       `INSERT INTO job_attempts (id, job_id, node_id, status, started_at) VALUES (?, ?, ?, 'assigned', ?)`,
     )
     .run(newId(), jobId, node.id, now);
-  bumpJobsToday(node.id);
+  await bumpJobsToday(node.id);
   enqueueForNode(node.id, jobId);
   if (!live.has(jobId)) {
     live.set(jobId, { events: [], ended: false, waiters: [] });
   }
 }
 
-export function enqueueInferenceJob(input: {
+export async function enqueueInferenceJob(input: {
   userId: string;
   modelId: string;
   providerKey: string;
@@ -217,7 +221,7 @@ export function enqueueInferenceJob(input: {
   messages: ChatMessage[];
   extraSystemContext?: string;
   customSystemPrompt?: string;
-}): InferenceJob {
+}): Promise<InferenceJob> {
   const ctx = input.extraSystemContext?.trim() || undefined;
   const custom = input.customSystemPrompt?.trim() || undefined;
   const payload = payloadCanonical(input.messages, input.modelId, input.upstreamModel, ctx, custom);
@@ -227,7 +231,7 @@ export function enqueueInferenceJob(input: {
   const id = newId();
   const now = Date.now();
   const hash = sha256(payload);
-  db()
+  await db()
     .prepare(
       `INSERT INTO inference_jobs (
         id, user_id, model_id, provider_key, upstream_model, messages_json, status,
@@ -249,15 +253,15 @@ export function enqueueInferenceJob(input: {
 
   live.set(id, { events: [], ended: false, waiters: [] });
 
-  const node = pickNode(input.providerKey, input.upstreamModel);
-  if (node) assignJobToNode(id, node, payload);
-  return getJob(id)!;
+  const node = await pickNode(input.providerKey, input.upstreamModel);
+  if (node) await assignJobToNode(id, node, payload);
+  return (await getJob(id))!;
 }
 
-export function cancelJob(jobId: string, reason = "cancelled"): boolean {
-  const job = getJob(jobId);
+export async function cancelJob(jobId: string, reason = "cancelled"): Promise<boolean> {
+  const job = await getJob(jobId);
   if (!job || ["completed", "failed", "cancelled", "timeout"].includes(job.status)) return false;
-  db()
+  await db()
     .prepare(
       `UPDATE inference_jobs SET status = 'cancelled', error_message = ?, completed_at = ?, settlement_status = 'skipped' WHERE id = ?`,
     )
@@ -281,30 +285,30 @@ function wake(jobId: string): void {
 }
 
 /** 逾時／斷線：標記失敗或重新入隊 */
-export function sweepStaleJobs(): void {
+export async function sweepStaleJobs(): Promise<void> {
   const now = Date.now();
-  const stale = db()
+  const stale = (await db()
     .prepare(
       `SELECT * FROM inference_jobs WHERE status IN ('queued', 'assigned', 'running') AND timeout_at < ?`,
     )
-    .all(now) as Record<string, unknown>[];
+    .all(now)) as Record<string, unknown>[];
 
   for (const row of stale) {
     const job = rowToJob(row);
     if (job.attemptCount < MAX_FAILOVER_ATTEMPTS && job.status !== "queued") {
       // 重新排隊給其他節點
-      db()
+      await db()
         .prepare(
           `UPDATE inference_jobs SET status = 'queued', assigned_node_id = NULL, signature = NULL,
            error_message = ?, timeout_at = ? WHERE id = ?`,
         )
         .run(`attempt timeout → failover`, now + JOB_TIMEOUT_MS, job.id);
-      db()
+      await db()
         .prepare(
           `UPDATE job_attempts SET status = 'timeout', error_message = 'timeout', finished_at = ? WHERE job_id = ? AND finished_at IS NULL`,
         )
         .run(now, job.id);
-      const node = pickNode(job.providerKey, job.upstreamModel);
+      const node = await pickNode(job.providerKey, job.upstreamModel);
       if (node) {
         const payload = payloadCanonical(
           job.messages,
@@ -313,9 +317,9 @@ export function sweepStaleJobs(): void {
           job.extraSystemContext,
           job.customSystemPrompt,
         );
-        assignJobToNode(job.id, node, payload);
+        await assignJobToNode(job.id, node, payload);
       } else {
-        db()
+        await db()
           .prepare(
             `UPDATE inference_jobs SET status = 'timeout', completed_at = ?, error_message = ?, settlement_status = 'skipped' WHERE id = ?`,
           )
@@ -323,7 +327,7 @@ export function sweepStaleJobs(): void {
         failLive(job.id, 504, "任務逾時且無可用節點");
       }
     } else if (job.status === "queued") {
-      const node = pickNode(job.providerKey, job.upstreamModel);
+      const node = await pickNode(job.providerKey, job.upstreamModel);
       if (node) {
         const payload = payloadCanonical(
           job.messages,
@@ -332,9 +336,9 @@ export function sweepStaleJobs(): void {
           job.extraSystemContext,
           job.customSystemPrompt,
         );
-        assignJobToNode(job.id, node, payload);
+        await assignJobToNode(job.id, node, payload);
       } else {
-        db()
+        await db()
           .prepare(
             `UPDATE inference_jobs SET status = 'timeout', completed_at = ?, error_message = ?, settlement_status = 'skipped' WHERE id = ?`,
           )
@@ -342,7 +346,7 @@ export function sweepStaleJobs(): void {
         failLive(job.id, 504, "排隊逾時");
       }
     } else {
-      db()
+      await db()
         .prepare(
           `UPDATE inference_jobs SET status = 'timeout', completed_at = ?, error_message = ?, settlement_status = 'skipped' WHERE id = ?`,
         )
@@ -356,27 +360,27 @@ export async function pollJobForNode(nodeId: string, waitMs = POLL_WAIT_MS): Pro
   job: InferenceJob;
   signature: string;
 } | null> {
-  sweepStaleJobs();
+  await sweepStaleJobs();
   const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
     const q = queues.get(nodeId) ?? [];
     const jobId = q.shift();
     if (jobId) {
       queues.set(nodeId, q);
-      const job = getJob(jobId);
+      const job = await getJob(jobId);
       if (job && job.assignedNodeId === nodeId && (job.status === "assigned" || job.status === "running")) {
         return { job, signature: job.signature ?? "" };
       }
       continue;
     }
     // 也掃 DB 裡已 assigned 但佇列遺失的任務（進程重啟）
-    const orphan = db()
+    const orphan = (await db()
       .prepare(
         `SELECT id FROM inference_jobs WHERE assigned_node_id = ? AND status = 'assigned' ORDER BY assigned_at LIMIT 1`,
       )
-      .get(nodeId) as { id: string } | undefined;
+      .get(nodeId)) as { id: string } | undefined;
     if (orphan) {
-      const job = getJob(orphan.id)!;
+      const job = (await getJob(orphan.id))!;
       return { job, signature: job.signature ?? "" };
     }
     await new Promise((r) => setTimeout(r, 400));
@@ -384,26 +388,26 @@ export async function pollJobForNode(nodeId: string, waitMs = POLL_WAIT_MS): Pro
   return null;
 }
 
-export function markJobRunning(jobId: string, nodeId: string): boolean {
-  const job = getJob(jobId);
+export async function markJobRunning(jobId: string, nodeId: string): Promise<boolean> {
+  const job = await getJob(jobId);
   if (!job || job.assignedNodeId !== nodeId) return false;
   if (job.status !== "assigned" && job.status !== "running") return false;
-  db()
+  await db()
     .prepare(`UPDATE inference_jobs SET status = 'running', started_at = COALESCE(started_at, ?) WHERE id = ?`)
     .run(Date.now(), jobId);
   return true;
 }
 
-export function pushJobEvent(jobId: string, nodeId: string, event: JobStreamEvent): boolean {
-  const job = getJob(jobId);
+export async function pushJobEvent(jobId: string, nodeId: string, event: JobStreamEvent): Promise<boolean> {
+  const job = await getJob(jobId);
   if (!job || job.assignedNodeId !== nodeId) return false;
   if (["completed", "failed", "cancelled", "timeout"].includes(job.status)) return false;
-  markJobRunning(jobId, nodeId);
+  await markJobRunning(jobId, nodeId);
   const l = live.get(jobId) ?? { events: [], ended: false, waiters: [] };
   live.set(jobId, l);
   l.events.push(event);
   if (event.type === "text") {
-    db()
+    await db()
       .prepare(`UPDATE inference_jobs SET result_text = COALESCE(result_text, '') || ? WHERE id = ?`)
       .run(event.text, jobId);
   }
@@ -411,7 +415,7 @@ export function pushJobEvent(jobId: string, nodeId: string, event: JobStreamEven
   return true;
 }
 
-export function completeJob(
+export async function completeJob(
   jobId: string,
   nodeId: string,
   result: {
@@ -420,13 +424,13 @@ export function completeJob(
     chargedPoints: number;
     supplierRewardPoints: number;
   },
-): boolean {
-  const job = getJob(jobId);
+): Promise<boolean> {
+  const job = await getJob(jobId);
   if (!job || job.assignedNodeId !== nodeId) return false;
   if (["completed", "failed", "cancelled", "timeout"].includes(job.status)) return true; // 冪等
 
   const now = Date.now();
-  db()
+  await db()
     .prepare(
       `UPDATE inference_jobs SET status = 'completed', completed_at = ?,
        input_tokens = ?, cached_input_tokens = ?, output_tokens = ?,
@@ -443,13 +447,13 @@ export function completeJob(
       result.supplierRewardPoints,
       jobId,
     );
-  db()
+  await db()
     .prepare(
       `UPDATE job_attempts SET status = 'completed', finished_at = ? WHERE job_id = ? AND node_id = ? AND finished_at IS NULL`,
     )
     .run(now, jobId, nodeId);
 
-  settleJobIdempotent(jobId);
+  await settleJobIdempotent(jobId);
 
   const l = live.get(jobId) ?? { events: [], ended: false, waiters: [] };
   live.set(jobId, l);
@@ -458,26 +462,26 @@ export function completeJob(
   return true;
 }
 
-export function failJob(jobId: string, nodeId: string, message: string, status = 500): boolean {
-  const job = getJob(jobId);
+export async function failJob(jobId: string, nodeId: string, message: string, status = 500): Promise<boolean> {
+  const job = await getJob(jobId);
   if (!job || job.assignedNodeId !== nodeId) return false;
   if (["completed", "failed", "cancelled", "timeout"].includes(job.status)) return true;
 
   const now = Date.now();
-  db()
+  await db()
     .prepare(
       `UPDATE job_attempts SET status = 'failed', error_message = ?, finished_at = ? WHERE job_id = ? AND node_id = ? AND finished_at IS NULL`,
     )
     .run(message, now, jobId, nodeId);
 
   if (job.attemptCount < MAX_FAILOVER_ATTEMPTS) {
-    db()
+    await db()
       .prepare(
         `UPDATE inference_jobs SET status = 'queued', assigned_node_id = NULL, signature = NULL,
          error_message = ?, timeout_at = ? WHERE id = ?`,
       )
       .run(message, now + JOB_TIMEOUT_MS, jobId);
-    const node = pickNode(job.providerKey, job.upstreamModel);
+    const node = await pickNode(job.providerKey, job.upstreamModel);
     if (node && node.id !== nodeId) {
       const payload = payloadCanonical(
         job.messages,
@@ -486,12 +490,12 @@ export function failJob(jobId: string, nodeId: string, message: string, status =
         job.extraSystemContext,
         job.customSystemPrompt,
       );
-      assignJobToNode(jobId, node, payload);
+      await assignJobToNode(jobId, node, payload);
       return true;
     }
   }
 
-  db()
+  await db()
     .prepare(
       `UPDATE inference_jobs SET status = 'failed', completed_at = ?, error_message = ?, settlement_status = 'skipped' WHERE id = ?`,
     )
@@ -505,14 +509,16 @@ export async function* streamJobResult(
   jobId: string,
   signal?: AbortSignal,
 ): AsyncGenerator<JobStreamEvent> {
-  const onAbort = () => cancelJob(jobId, "client aborted");
+  const onAbort = () => {
+    void cancelJob(jobId, "client aborted").catch(() => {});
+  };
   signal?.addEventListener("abort", onAbort, { once: true });
   let idx = 0;
   try {
     while (true) {
-      sweepStaleJobs();
+      await sweepStaleJobs();
       const l = live.get(jobId);
-      const job = getJob(jobId);
+      const job = await getJob(jobId);
       if (!job) throw Object.assign(new Error("job not found"), { status: 404 });
 
       if (l) {

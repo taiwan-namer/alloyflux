@@ -32,21 +32,21 @@ const ANALYSIS_INTENT_RE =
 const LIGHT_INTENT_RE = /翻譯|translate|改寫|潤飾|潤稿|摘要|總結|重點整理|整理重點|summarize/i;
 
 /** 排除「已知帳號目錄沒有此模型」的貨源（如帳號未開 Gemini 3.1 Pro） */
-function usableCandidates(model: ModelInfo) {
-  return candidatesFor(model).filter((c) => !sourceCatalogLacksModel(c.source.id, model));
+async function usableCandidates(model: ModelInfo) {
+  return (await candidatesFor(model)).filter((c) => !sourceCatalogLacksModel(c.source.id, model));
 }
 
-function hasAvailableUpstream(model: ModelInfo): boolean {
-  if (usableCandidates(model).length > 0) return true;
-  if (model.antigravityId && listOnlineNodesForModel("antigravity", model.antigravityId).length > 0) return true;
-  if (model.codexId && listOnlineNodesForModel("chatgpt-codex", model.codexId).length > 0) return true;
+async function hasAvailableUpstream(model: ModelInfo): Promise<boolean> {
+  if ((await usableCandidates(model)).length > 0) return true;
+  if (model.antigravityId && (await listOnlineNodesForModel("antigravity", model.antigravityId)).length > 0) return true;
+  if (model.codexId && (await listOnlineNodesForModel("chatgpt-codex", model.codexId)).length > 0) return true;
   return false;
 }
 
 /** 該模型目前最健康貨源的剩餘 %（無配額資訊視為 50） */
-function healthScore(model: ModelInfo): number {
+async function healthScore(model: ModelInfo): Promise<number> {
   let best = -1;
-  for (const c of usableCandidates(model)) {
+  for (const c of await usableCandidates(model)) {
     const q = c.source.quota;
     const rem =
       (q && quotaWindowForModel(q, model.antigravityId ?? model.id)?.remainingPercent) ??
@@ -57,14 +57,29 @@ function healthScore(model: ModelInfo): number {
   return best < 0 ? 50 : best;
 }
 
-function pickFromPool(ids: string[], byHealth: boolean, exclude: ReadonlySet<string>): ModelInfo | null {
-  const pool = ids
-    .filter((id) => !exclude.has(id))
-    .map((id) => findModel(id))
-    .filter((m): m is ModelInfo => Boolean(m) && hasAvailableUpstream(m!));
+async function pickFromPool(
+  ids: string[],
+  byHealth: boolean,
+  exclude: ReadonlySet<string>,
+): Promise<ModelInfo | null> {
+  const pool: ModelInfo[] = [];
+  for (const id of ids) {
+    if (exclude.has(id)) continue;
+    const m = findModel(id);
+    if (m && (await hasAvailableUpstream(m))) pool.push(m);
+  }
   if (!pool.length) return null;
   if (!byHealth) return pool[0];
-  return pool.reduce((a, b) => (healthScore(b) > healthScore(a) ? b : a));
+  let best = pool[0];
+  let bestScore = await healthScore(best);
+  for (const m of pool.slice(1)) {
+    const s = await healthScore(m);
+    if (s > bestScore) {
+      best = m;
+      bestScore = s;
+    }
+  }
+  return best;
 }
 
 function classifyLane(text: string, hasImages: boolean): { lane: AutoLane; reason: string } {
@@ -88,19 +103,19 @@ function classifyLane(text: string, hasImages: boolean): { lane: AutoLane; reaso
  * 2) 程式／分析／長文／圖片＋分析 → L3（依水庫剩餘量挑）
  * 3) 其餘 → L2 Flash
  */
-export function resolveAutoModel(input: {
+export async function resolveAutoModel(input: {
   text: string;
   hasImages: boolean;
   lastAssistant?: { content: string; model: string | null };
   forceMain?: boolean;
   /** 本輪已嘗試失敗（如帳號目錄沒有）的模型，重新派發時略過 */
   excludeModelIds?: ReadonlySet<string>;
-}): AutoDecision | null {
+}): Promise<AutoDecision | null> {
   const text = input.text.trim();
   const exclude = input.excludeModelIds ?? new Set<string>();
 
   if (input.forceMain) {
-    const m = pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude) ?? pickFromPool(AUTO_LIGHT_MODEL_IDS, false, exclude);
+    const m = await pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude) ?? await pickFromPool(AUTO_LIGHT_MODEL_IDS, false, exclude);
     return m ? { model: m, lane: AUTO_MAIN_MODEL_IDS.includes(m.id) ? "main" : "light", reason: "使用者要求主力重答" } : null;
   }
 
@@ -114,25 +129,25 @@ export function resolveAutoModel(input: {
     const inLight = AUTO_LIGHT_MODEL_IDS.includes(prev.model);
     const inMain = AUTO_MAIN_MODEL_IDS.includes(prev.model);
     const prevModel = findModel(prev.model);
-    if ((inLight || inMain) && prevModel && !exclude.has(prevModel.id) && hasAvailableUpstream(prevModel)) {
+    if ((inLight || inMain) && prevModel && !exclude.has(prevModel.id) && (await hasAvailableUpstream(prevModel))) {
       return { model: prevModel, lane: inMain ? "main" : "light", reason: "黏性路由（延續上一輪任務）" };
     }
     if (!inLight) {
-      const m = pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude);
+      const m = await pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude);
       if (m) return { model: m, lane: "main", reason: "黏性路由（上一輪模型不可用，改派主力）" };
     }
   }
 
   const { lane, reason } = classifyLane(text, input.hasImages);
   if (lane === "main") {
-    const m = pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude);
+    const m = await pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude);
     if (m) return { model: m, lane: "main", reason };
-    const fallback = pickFromPool(AUTO_LIGHT_MODEL_IDS, false, exclude);
+    const fallback = await pickFromPool(AUTO_LIGHT_MODEL_IDS, false, exclude);
     return fallback ? { model: fallback, lane: "light", reason: `${reason}（主力不可用，改派輕量）` } : null;
   }
-  const m = pickFromPool(AUTO_LIGHT_MODEL_IDS, false, exclude);
+  const m = await pickFromPool(AUTO_LIGHT_MODEL_IDS, false, exclude);
   if (m) return { model: m, lane: "light", reason };
-  const fallback = pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude);
+  const fallback = await pickFromPool(AUTO_MAIN_MODEL_IDS, true, exclude);
   return fallback ? { model: fallback, lane: "main", reason: `${reason}（輕量不可用，改派主力）` } : null;
 }
 

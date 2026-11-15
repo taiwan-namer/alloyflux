@@ -9,9 +9,9 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(req: Request) {
   try {
-    const user = requireUser(req);
+    const user = await requireUser(req);
     const body = (await req.json().catch(() => ({}))) as { label?: string };
-    const created = createUserApiKey(user.id, body.label ?? "新金鑰");
+    const created = await createUserApiKey(user.id, body.label ?? "新金鑰");
     return Response.json(
       {
         apiKey: created.apiKey,
@@ -21,7 +21,7 @@ export async function POST(req: Request) {
           keyHint: created.keyHint,
           createdAt: created.createdAt,
         },
-        keys: listUserApiKeys(user.id),
+        keys: await listUserApiKeys(user.id),
       },
       {
         headers: {

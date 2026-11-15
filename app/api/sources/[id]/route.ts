@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    requireSupplier(req);
+    await requireSupplier(req);
     const { id } = await params;
     const patch = (await req.json()) as {
       enabled?: boolean;
@@ -13,7 +13,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
       monthlyCapPoints?: number | null;
       shareLimitPct?: number;
     };
-    updateSource(id, patch);
+    await updateSource(id, patch);
     return Response.json({ ok: true });
   } catch (e) {
     return jsonError(e);
@@ -22,9 +22,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    requireSupplier(req);
+    await requireSupplier(req);
     const { id } = await params;
-    deleteSource(id);
+    await deleteSource(id);
     return Response.json({ ok: true });
   } catch (e) {
     return jsonError(e);

@@ -9,7 +9,7 @@ function bearer(req: Request): string {
 }
 
 export async function POST(req: Request) {
-  const node = authenticateNode(bearer(req));
+  const node = await authenticateNode(bearer(req));
   if (!node) return Response.json({ error: "節點憑證無效" }, { status: 401 });
 
   const body = (await req.json().catch(() => ({}))) as {
@@ -18,7 +18,7 @@ export async function POST(req: Request) {
     meta?: Record<string, unknown>;
   };
 
-  touchHeartbeat(node.id, {
+  await touchHeartbeat(node.id, {
     activeJobs: body.activeJobs,
     acceptingJobs: body.acceptingJobs,
     meta: body.meta,

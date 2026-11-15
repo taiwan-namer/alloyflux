@@ -12,7 +12,7 @@ function bearer(req: Request): string {
 
 /** Long poll：只回傳指派給此節點的任務（含簽章，無 API Key／OAuth） */
 export async function POST(req: Request) {
-  const node = authenticateNode(bearer(req));
+  const node = await authenticateNode(bearer(req));
   if (!node) return Response.json({ error: "節點憑證無效" }, { status: 401 });
   if (node.status === "revoked") return Response.json({ error: "節點已撤銷" }, { status: 403 });
 
@@ -22,7 +22,7 @@ export async function POST(req: Request) {
     waitMs?: number;
   };
 
-  touchHeartbeat(node.id, {
+  await touchHeartbeat(node.id, {
     acceptingJobs: body.acceptingJobs,
     activeJobs: body.activeJobs,
   });

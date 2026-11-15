@@ -39,7 +39,7 @@ function normalizeImages(raw: unknown): ChatImage[] {
 
 export async function POST(req: Request) {
   try {
-    const user = requireUser(req);
+    const user = await requireUser(req);
     const body = (await req.json()) as {
       conversationId?: string;
       model: string;
@@ -60,7 +60,7 @@ export async function POST(req: Request) {
     if (!trimmed && images.length === 0) {
       return Response.json({ error: "訊息不能是空的" }, { status: 400 });
     }
-    if (balance(userId) <= 0) return Response.json({ error: "可用額度不足，請先兌換儲值碼" }, { status: 402 });
+    if ((await balance(userId)) <= 0) return Response.json({ error: "可用額度不足，請先兌換儲值碼" }, { status: 402 });
 
     const upstreamContent = trimmed || "（見附圖）";
     const dbContent = images.length
@@ -68,13 +68,13 @@ export async function POST(req: Request) {
       : upstreamContent;
 
     let convId = body.conversationId;
-    if (convId && !getConversation(userId, convId)) convId = undefined;
+    if (convId && !(await getConversation(userId, convId))) convId = undefined;
 
     let model: ModelInfo;
     let autoDecision: AutoDecision | null = null;
     let autoInput: Parameters<typeof resolveAutoModel>[0] | null = null;
     if (isAuto) {
-      const prior = convId ? listMessages(convId) : [];
+      const prior = convId ? await listMessages(convId) : [];
       const lastAssistant = [...prior].reverse().find((m) => m.role === "assistant");
       autoInput = {
         text: upstreamContent,
@@ -82,7 +82,7 @@ export async function POST(req: Request) {
         lastAssistant: lastAssistant ? { content: lastAssistant.content, model: lastAssistant.model } : undefined,
         forceMain: body.autoForce === "main",
       };
-      autoDecision = resolveAutoModel(autoInput);
+      autoDecision = await resolveAutoModel(autoInput);
       if (!autoDecision) {
         return Response.json({ error: "Auto 目前沒有可用模型，請稍後再試或手動選擇模型" }, { status: 503 });
       }
@@ -100,12 +100,12 @@ export async function POST(req: Request) {
 
     // Auto 對話：user 訊息／對話記 "auto"，assistant 記實際派發模型
     const userModelTag = isAuto ? AUTO_MODEL_ID : model.id;
-    if (!convId) convId = createConversation(userId, dbContent.slice(0, 30), userModelTag);
-    addUserMessage(convId, dbContent, userModelTag);
+    if (!convId) convId = await createConversation(userId, dbContent.slice(0, 30), userModelTag);
+    await addUserMessage(convId, dbContent, userModelTag);
     // 零成本靜默記憶：規則擷取自述背景／偏好（不另開模型請求）
-    maybeRememberFromUserMessage(userId, upstreamContent);
+    await maybeRememberFromUserMessage(userId, upstreamContent);
 
-    const fullHistory: ChatMessage[] = listMessages(convId)
+    const fullHistory: ChatMessage[] = (await listMessages(convId))
       .filter((m) => m.content.trim())
       .slice(-DB_HISTORY_READ)
       .map((m) => ({ role: m.role, content: m.content }));
@@ -123,7 +123,7 @@ export async function POST(req: Request) {
       }
     }
 
-    const extraSystemContext = buildUserMemoryContext(userId, convId) || undefined;
+    const extraSystemContext = (await buildUserMemoryContext(userId, convId)) || undefined;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -154,7 +154,7 @@ export async function POST(req: Request) {
                   send(ev);
                   continue;
                 }
-                settleAssistantMessage({
+                await settleAssistantMessage({
                   userId,
                   conversationId: convId!,
                   content: answer,
@@ -174,7 +174,7 @@ export async function POST(req: Request) {
                 });
                 send({
                   ...ev,
-                  balance: balance(userId),
+                  balance: await balance(userId),
                   modelId: model.id,
                   effort: model.effort ?? null,
                   deepThink: deepThinkApplied,
@@ -185,7 +185,7 @@ export async function POST(req: Request) {
               // Auto 派到帳號目錄沒有的模型且尚未吐字 → 靜默改派下一個候選（最多再試 2 次）
               if (!autoInput || streamed || !(e instanceof ModelNotInCatalogError) || triedAutoModels.size >= 2) throw e;
               triedAutoModels.add(model.id);
-              const next = resolveAutoModel({ ...autoInput, excludeModelIds: triedAutoModels });
+              const next = await resolveAutoModel({ ...autoInput, excludeModelIds: triedAutoModels });
               if (!next) throw e;
               console.log("[auto-route] reroute", { from: model.id, to: next.model.id, reason: e.message });
               autoDecision = next;

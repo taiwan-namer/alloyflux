@@ -426,7 +426,7 @@ async function post(url: string, headers: Record<string, string>, body: unknown,
 async function ensureFreshOAuth(sourceId: string, creds: OAuthCredentials): Promise<OAuthCredentials> {
   if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
     const refreshed = await refreshOAuthCredentials(creds);
-    saveUpdatedOAuthCreds(sourceId, refreshed);
+    await saveUpdatedOAuthCreds(sourceId, refreshed);
     return refreshed;
   }
   return creds;
@@ -467,7 +467,7 @@ async function forceRefreshGeminiOAuth(sourceId: string, creds: OAuthCredentials
   } catch {
     // 專案 bootstrap 失敗仍先用新 token 再試一次
   }
-  saveUpdatedOAuthCreds(sourceId, next);
+  await saveUpdatedOAuthCreds(sourceId, next);
   return next;
 }
 
@@ -894,7 +894,7 @@ async function* chatgptSubscriptionStream(
       primaryRemainingPercent: Math.round(pRem),
       fetchedAt: Date.now(),
     };
-    saveSourceQuota(c.source.id, snap);
+    await saveSourceQuota(c.source.id, snap);
   }
 
   const usage: Usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, upstreamModelId: upstreamModel };
@@ -941,7 +941,7 @@ async function* chatgptSubscriptionStream(
       {
         const pRem = Math.max(0, 100 - pUsed);
         const sRem = Math.max(0, 100 - sUsed);
-        saveSourceQuota(c.source.id, {
+        await saveSourceQuota(c.source.id, {
           planType: (creds.planType ?? "pro").toUpperCase(),
           email: creds.email,
           windows: [

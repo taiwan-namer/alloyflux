@@ -79,7 +79,7 @@ export async function GET(req: Request) {
     profile.name?.trim() ||
     [profile.given_name, profile.family_name].filter(Boolean).join(" ").trim() ||
     undefined;
-  const user = upsertGoogleUser({ email: profile.email, name: googleName });
+  const user = await upsertGoogleUser({ email: profile.email, name: googleName });
   const session = issueSessionToken(user.id);
 
   const headers = new Headers();

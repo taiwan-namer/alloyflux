@@ -4,7 +4,7 @@ import { balance, quotaCapFromLedger, usageSummary } from "@/lib/store";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
-  const user = getSessionUser(req);
+  const user = await getSessionUser(req);
   if (!user) {
     return Response.json({
       user: null,
@@ -14,9 +14,9 @@ export async function GET(req: Request) {
   return Response.json(
     {
       user: publicUser(user),
-      balance: balance(user.id),
-      quotaCap: quotaCapFromLedger(user.id),
-      usage: usageSummary(user.id),
+      balance: await balance(user.id),
+      quotaCap: await quotaCapFromLedger(user.id),
+      usage: await usageSummary(user.id),
       googleEnabled: buyerGoogleConfigured(),
       redirect: homePathFor(user),
     },

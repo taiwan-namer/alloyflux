@@ -132,8 +132,10 @@ function envSources(): (Source & { secret: string })[] {
   });
 }
 
-function dbSources(): (Source & { resolveSecret: () => string })[] {
-  const rows = db().prepare("SELECT * FROM sources ORDER BY priority, created_at").all() as unknown as SourceRow[];
+async function dbSources(): Promise<(Source & { resolveSecret: () => string })[]> {
+  const rows = (await db()
+    .prepare("SELECT * FROM sources ORDER BY priority, created_at")
+    .all()) as unknown as SourceRow[];
   return rows.map((r) => ({ ...rowToSource(r), resolveSecret: () => decrypt(r.encrypted_key) }));
 }
 
@@ -142,43 +144,45 @@ function monthStart(): number {
   return new Date(d.getFullYear(), d.getMonth(), 1).getTime();
 }
 
-function usedThisMonth(sourceId: string): number {
-  const row = db()
+async function usedThisMonth(sourceId: string): Promise<number> {
+  const row = (await db()
     .prepare(
       "SELECT COALESCE(SUM(amount_points), 0) AS used FROM ledger WHERE type = 'source_usage' AND ref_id = ? AND created_at >= ?",
     )
-    .get(sourceId, monthStart()) as { used: number };
-  return row.used;
+    .get(sourceId, monthStart())) as { used: number };
+  return Number(row.used);
 }
 
-export function listSources(): SourceStatus[] {
+export async function listSources(): Promise<SourceStatus[]> {
   const all: Source[] = [
-    ...dbSources().map(({ resolveSecret: _k, ...s }) => s),
+    ...(await dbSources()).map(({ resolveSecret: _k, ...s }) => s),
     ...envSources().map(({ secret: _k, ...s }) => s),
   ];
   const now = Date.now();
-  return all.map((s) => {
-    const h = health.get(s.id);
-    return {
-      ...s,
-      usedThisMonthPoints: usedThisMonth(s.id),
-      cooldownUntil: h && h.cooldownUntil > now ? h.cooldownUntil : null,
-      lastError: h?.lastError ?? null,
-    };
-  });
+  return Promise.all(
+    all.map(async (s) => {
+      const h = health.get(s.id);
+      return {
+        ...s,
+        usedThisMonthPoints: await usedThisMonth(s.id),
+        cooldownUntil: h && h.cooldownUntil > now ? h.cooldownUntil : null,
+        lastError: h?.lastError ?? null,
+      };
+    }),
+  );
 }
 
-export function addSource(input: {
+export async function addSource(input: {
   label: string;
   kind: SourceKind;
   provider: SourceProvider;
   apiKey: string;
   priority?: number;
   monthlyCapPoints?: number | null;
-}): string {
+}): Promise<string> {
   const apiKey = input.apiKey.trim();
   const id = newId();
-  db()
+  await db()
     .prepare(
       `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, enabled, created_at)
        VALUES (?, ?, ?, ?, 'api_key', ?, ?, ?, ?, 100, 1, ?)`,
@@ -216,7 +220,7 @@ export async function addOAuthSubscriptionSource(input: {
         ? `Grok 訂閱 ${input.creds.email ?? ""}`.trim()
         : `ChatGPT 訂閱 ${input.creds.email ?? ""}`.trim());
 
-  db()
+  await db()
     .prepare(
       `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, quota_json, quota_updated_at, enabled, created_at)
        VALUES (?, ?, 'supplier', ?, 'oauth_sub', ?, ?, ?, NULL, ?, ?, ?, 1, ?)`,
@@ -237,7 +241,7 @@ export async function addOAuthSubscriptionSource(input: {
   return { id, quota };
 }
 
-export function saveUpdatedOAuthCreds(sourceId: string, creds: OAuthCredentials): void {
+export async function saveUpdatedOAuthCreds(sourceId: string, creds: OAuthCredentials): Promise<void> {
   // 節點進程：只寫本機憑證檔，絕不把 Token 寫回平台
   if (process.env.SUPPLIER_NODE_MODE === "1") {
     const dir = path.join(process.cwd(), "data", "node-creds");
@@ -247,7 +251,7 @@ export function saveUpdatedOAuthCreds(sourceId: string, creds: OAuthCredentials)
   }
   // 平台已委託：禁止把 Token 寫回 DB
   try {
-    const row = db().prepare("SELECT encrypted_key FROM sources WHERE id = ?").get(sourceId) as
+    const row = (await db().prepare("SELECT encrypted_key FROM sources WHERE id = ?").get(sourceId)) as
       | { encrypted_key: string }
       | undefined;
     if (row) {
@@ -257,14 +261,14 @@ export function saveUpdatedOAuthCreds(sourceId: string, creds: OAuthCredentials)
   } catch {
     // continue normal save
   }
-  db()
+  await db()
     .prepare("UPDATE sources SET encrypted_key = ? WHERE id = ?")
     .run(encrypt(JSON.stringify(creds)), sourceId);
   health.delete(sourceId);
 }
 
-export function readOAuthCreds(sourceId: string): OAuthCredentials | null {
-  const row = db().prepare("SELECT encrypted_key, auth_type FROM sources WHERE id = ?").get(sourceId) as
+export async function readOAuthCreds(sourceId: string): Promise<OAuthCredentials | null> {
+  const row = (await db().prepare("SELECT encrypted_key, auth_type FROM sources WHERE id = ?").get(sourceId)) as
     | { encrypted_key: string; auth_type: string }
     | undefined;
   if (!row || row.auth_type !== "oauth_sub") return null;
@@ -275,14 +279,14 @@ export function readOAuthCreds(sourceId: string): OAuthCredentials | null {
   }
 }
 
-export function isSourceDelegatedToNode(sourceId: string): boolean {
-  const creds = readOAuthCreds(sourceId);
+export async function isSourceDelegatedToNode(sourceId: string): Promise<boolean> {
+  const creds = await readOAuthCreds(sourceId);
   return Boolean(creds?.delegatedToNode);
 }
 
 /** 節點領取憑證後，平台清除 Token，只留 metadata */
-export function claimOAuthCredsForNode(sourceId: string): OAuthCredentials | null {
-  const creds = readOAuthCreds(sourceId);
+export async function claimOAuthCredsForNode(sourceId: string): Promise<OAuthCredentials | null> {
+  const creds = await readOAuthCreds(sourceId);
   if (!creds || creds.delegatedToNode) return null;
   if (!creds.accessToken && !creds.refreshToken) return null;
 
@@ -298,7 +302,7 @@ export function claimOAuthCredsForNode(sourceId: string): OAuthCredentials | nul
     delegatedToNode: true,
   };
   // 直接寫 stub，避開 saveUpdatedOAuthCreds 的「已委託不寫回」防護
-  db()
+  await db()
     .prepare("UPDATE sources SET encrypted_key = ?, key_hint = ? WHERE id = ?")
     .run(
       encrypt(JSON.stringify(stub)),
@@ -308,14 +312,16 @@ export function claimOAuthCredsForNode(sourceId: string): OAuthCredentials | nul
   return creds;
 }
 
-export function saveSourceQuota(sourceId: string, quota: SubscriptionQuota): void {
-  db()
+export async function saveSourceQuota(sourceId: string, quota: SubscriptionQuota): Promise<void> {
+  await db()
     .prepare("UPDATE sources SET quota_json = ?, quota_updated_at = ? WHERE id = ?")
     .run(JSON.stringify(quota), Date.now(), sourceId);
 }
 
 export async function syncSourceQuotaById(sourceId: string): Promise<SubscriptionQuota | null> {
-  const row = db().prepare("SELECT * FROM sources WHERE id = ?").get(sourceId) as unknown as SourceRow | undefined;
+  const row = (await db().prepare("SELECT * FROM sources WHERE id = ?").get(sourceId)) as unknown as
+    | SourceRow
+    | undefined;
   if (!row || row.auth_type !== "oauth_sub") return null;
   let creds = JSON.parse(decrypt(row.encrypted_key)) as OAuthCredentials;
   if (creds.delegatedToNode) {
@@ -324,34 +330,36 @@ export async function syncSourceQuotaById(sourceId: string): Promise<Subscriptio
   }
   if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
     creds = await refreshOAuthCredentials(creds);
-    saveUpdatedOAuthCreds(sourceId, creds);
+    await saveUpdatedOAuthCreds(sourceId, creds);
   }
   const quota = await fetchSubscriptionQuota(creds);
-  saveSourceQuota(sourceId, quota);
+  await saveSourceQuota(sourceId, quota);
   return quota;
 }
 
 export async function syncAllSubscriptionQuotas(): Promise<void> {
-  const rows = db()
+  const rows = (await db()
     .prepare("SELECT id FROM sources WHERE auth_type = 'oauth_sub' AND enabled = 1")
-    .all() as { id: string }[];
+    .all()) as { id: string }[];
   await Promise.allSettled(rows.map((r) => syncSourceQuotaById(r.id)));
 }
 
-export function updateSource(
+export async function updateSource(
   id: string,
   patch: { enabled?: boolean; priority?: number; monthlyCapPoints?: number | null; shareLimitPct?: number },
-): void {
-  if (patch.enabled !== undefined) db().prepare("UPDATE sources SET enabled = ? WHERE id = ?").run(patch.enabled ? 1 : 0, id);
-  if (patch.priority !== undefined) db().prepare("UPDATE sources SET priority = ? WHERE id = ?").run(patch.priority, id);
+): Promise<void> {
+  if (patch.enabled !== undefined)
+    await db().prepare("UPDATE sources SET enabled = ? WHERE id = ?").run(patch.enabled ? 1 : 0, id);
+  if (patch.priority !== undefined)
+    await db().prepare("UPDATE sources SET priority = ? WHERE id = ?").run(patch.priority, id);
   if (patch.monthlyCapPoints !== undefined)
-    db().prepare("UPDATE sources SET monthly_cap_points = ? WHERE id = ?").run(patch.monthlyCapPoints, id);
+    await db().prepare("UPDATE sources SET monthly_cap_points = ? WHERE id = ?").run(patch.monthlyCapPoints, id);
   if (patch.shareLimitPct !== undefined)
-    db().prepare("UPDATE sources SET share_limit_pct = ? WHERE id = ?").run(patch.shareLimitPct, id);
+    await db().prepare("UPDATE sources SET share_limit_pct = ? WHERE id = ?").run(patch.shareLimitPct, id);
 }
 
-export function deleteSource(id: string): void {
-  db().prepare("DELETE FROM sources WHERE id = ?").run(id);
+export async function deleteSource(id: string): Promise<void> {
+  await db().prepare("DELETE FROM sources WHERE id = ?").run(id);
   health.delete(id);
 }
 
@@ -368,14 +376,15 @@ export interface Candidate {
  * 3. 平台直連 API Key
  * 4. OpenRouter 備援
  */
-export function candidatesFor(model: ModelInfo): Candidate[] {
+export async function candidatesFor(model: ModelInfo): Promise<Candidate[]> {
   const now = Date.now();
   const pool: { source: Source; resolveSecret: () => string }[] = [
-    ...dbSources().map(({ resolveSecret, ...source }) => ({ source, resolveSecret })),
+    ...(await dbSources()).map(({ resolveSecret, ...source }) => ({ source, resolveSecret })),
     ...envSources().map(({ secret, ...source }) => ({ source, resolveSecret: () => secret })),
   ];
 
-  return pool
+  // 先套用不需查 DB 的過濾，再只對有月上限的貨源查本月用量（async，不能放在 filter callback 內）
+  const eligible = pool
     .filter(({ source: s }) => {
       if (!s.enabled) return false;
       if (model.category === "node-agent") return false;
@@ -388,8 +397,17 @@ export function candidatesFor(model: ModelInfo): Candidate[] {
       if (model.category === "antigravity-claude" || model.category === "antigravity-gpt") return false;
       return s.provider === model.provider;
     })
-    .filter(({ source: s }) => (health.get(s.id)?.cooldownUntil ?? 0) <= now)
-    .filter(({ source: s }) => s.monthlyCapPoints === null || usedThisMonth(s.id) < s.monthlyCapPoints)
+    .filter(({ source: s }) => (health.get(s.id)?.cooldownUntil ?? 0) <= now);
+
+  const underCap = await Promise.all(
+    eligible.map(async ({ source: s }) => {
+      if (s.monthlyCapPoints === null) return true;
+      return (await usedThisMonth(s.id)) < s.monthlyCapPoints;
+    }),
+  );
+
+  return eligible
+    .filter((_, i) => underCap[i])
     .filter(({ source: s }) => {
       if (s.authType === "oauth_sub" && s.quota) {
         // 依「使用者選的模型」對應配額窗熔斷（Argon／Gemini 總額／Claude·GPT 第三方）

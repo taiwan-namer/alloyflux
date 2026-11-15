@@ -5,12 +5,12 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   try {
-    const user = requireUser(req);
+    const user = await requireUser(req);
     return Response.json(
       {
-        balance: balance(user.id),
-        quotaCap: quotaCapFromLedger(user.id),
-        usage: usageSummary(user.id),
+        balance: await balance(user.id),
+        quotaCap: await quotaCapFromLedger(user.id),
+        usage: await usageSummary(user.id),
         apiKey: user.apiKey,
       },
       {

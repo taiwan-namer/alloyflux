@@ -23,7 +23,7 @@ export async function POST(req: Request) {
       return Response.json({ error: "請填 Email 與密碼" }, { status: 400 });
     }
     const role: UserRole = body.role === "supplier" ? "supplier" : "buyer";
-    const user = createUser({
+    const user = await createUser({
       email: body.email,
       password: body.password,
       name: body.name,
@@ -34,7 +34,7 @@ export async function POST(req: Request) {
       JSON.stringify({
         ok: true,
         user: publicUser(user),
-        balance: balance(user.id),
+        balance: await balance(user.id),
         redirect: homePathFor(user),
       }),
       {

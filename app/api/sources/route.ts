@@ -7,8 +7,8 @@ export const dynamic = "force-dynamic";
 /** 供給者／管理員：綁訂閱與 API Key 貨源 */
 export async function GET(req: Request) {
   try {
-    requireSupplier(req);
-    return Response.json(listSources());
+    await requireSupplier(req);
+    return Response.json(await listSources());
   } catch (e) {
     return jsonError(e);
   }
@@ -16,7 +16,7 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    requireSupplier(req);
+    await requireSupplier(req);
     const body = (await req.json()) as {
       label?: string;
       kind: SourceKind;
@@ -33,7 +33,7 @@ export async function POST(req: Request) {
     const check = await verifyKey(body.provider, body.apiKey.trim());
     if (!check.ok) return Response.json({ error: `Key 驗證失敗：${check.message}` }, { status: 400 });
 
-    addSource({
+    await addSource({
       label: body.label ?? "",
       kind: body.kind,
       provider: body.provider,

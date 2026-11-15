@@ -56,7 +56,7 @@ function sse(data: unknown): string {
  * system／developer 會合併為 customSystemPrompt 透傳上游。
  */
 export async function POST(req: Request) {
-  const auth = authenticatePlatformApiKey(req);
+  const auth = await authenticatePlatformApiKey(req);
   if (!auth) {
     return Response.json(
       {
@@ -85,7 +85,7 @@ export async function POST(req: Request) {
     return Response.json({ error: { message: "messages required", type: "invalid_request_error" } }, { status: 400 });
   }
 
-  if (balance(userId) <= 0) {
+  if ((await balance(userId)) <= 0) {
     return Response.json({ error: { message: "Insufficient credits", type: "insufficient_quota" } }, { status: 402 });
   }
 
@@ -99,8 +99,8 @@ export async function POST(req: Request) {
 
   // 影子對話：只記本輪最後一則 user（完整上下文由客戶端 messages 提供）
   const lastUser = [...messages].reverse().find((m) => m.role === "user")!;
-  const convId = createConversation(userId, lastUser.content.slice(0, 30), model.id);
-  addUserMessage(convId, lastUser.content, model.id);
+  const convId = await createConversation(userId, lastUser.content.slice(0, 30), model.id);
+  await addUserMessage(convId, lastUser.content, model.id);
 
   const completionId = `chatcmpl_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
   const created = Math.floor(Date.now() / 1000);
@@ -133,7 +133,7 @@ export async function POST(req: Request) {
               });
             }
             if (ev.type === "done") {
-              settleAssistantMessage({
+              await settleAssistantMessage({
                 userId,
                 conversationId: convId,
                 content: answer,
@@ -203,7 +203,7 @@ export async function POST(req: Request) {
     );
   }
 
-  settleAssistantMessage({
+  await settleAssistantMessage({
     userId,
     conversationId: convId,
     content: answer,

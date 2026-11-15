@@ -8,14 +8,14 @@ import { listSources } from "@/lib/sources";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const sources = listSources().filter((s) => s.enabled);
+  const sources = (await listSources()).filter((s) => s.enabled);
   let antigravityIds = new Set<string>();
   try {
-    const row = db()
+    const row = (await db()
       .prepare(
         "SELECT encrypted_key FROM sources WHERE auth_type = 'oauth_sub' AND provider = 'gemini' AND enabled = 1 LIMIT 1",
       )
-      .get() as { encrypted_key: string } | undefined;
+      .get()) as { encrypted_key: string } | undefined;
     if (row) {
       const creds = JSON.parse(decrypt(row.encrypted_key)) as OAuthCredentials;
       antigravityIds = new Set(
@@ -30,17 +30,17 @@ export async function GET() {
   const hasOpenRouter = sources.some((s) => s.provider === "openrouter");
 
   return Response.json(
-    MODELS.map((m) => {
+    await Promise.all(MODELS.map(async (m) => {
       let available = false;
       let note: string | undefined;
 
       if (m.category === "node-agent" || m.nodeProviderKey) {
         const pk = m.nodeProviderKey ?? (m.antigravityId ? "antigravity" : m.codexId ? "chatgpt-codex" : "");
         const up = m.nodeUpstreamModel ?? m.antigravityId ?? m.codexId ?? m.id;
-        const online = pk ? listOnlineNodesForModel(pk, up).length > 0 : false;
+        const online = pk ? (await listOnlineNodesForModel(pk, up)).length > 0 : false;
         available = online || m.id === "node-mock"; // mock 也要節點在線才真正跑；UI 仍顯示
         if (m.id === "node-mock") {
-          available = listOnlineNodesForModel("mock", "node-mock").length > 0;
+          available = (await listOnlineNodesForModel("mock", "node-mock")).length > 0;
           note = available ? "Node Agent Online" : "請啟動 Node Agent（npm run node-agent -- start）";
         } else if (!online) {
           note = "等待對應能力的 Node Agent 上線";
@@ -86,6 +86,6 @@ export async function GET() {
         available,
         note,
       };
-    }),
+    })),
   );
 }
