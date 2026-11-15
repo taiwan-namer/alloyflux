@@ -1,4 +1,15 @@
 import { db, newId } from "./db";
+import { topUp } from "./store";
+
+/** 封測用無限儲值金鑰（Vercel env：TEST_TOPUP_KEY）；正式上線請刪除 */
+export function testTopUpKey(): string {
+  return process.env.TEST_TOPUP_KEY?.trim() || "";
+}
+
+export function testTopUpPoints(): number {
+  const n = Number(process.env.TEST_TOPUP_POINTS ?? 10_000);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 10_000;
+}
 
 export async function createRedeemCode(input: {
   points?: number;
@@ -29,6 +40,14 @@ export async function redeemCode(
 ): Promise<{ points: number; balanceNote: string }> {
   const code = rawCode.trim().toUpperCase();
   if (!code) throw Object.assign(new Error("請輸入兌換碼"), { status: 400 });
+
+  // 封測金鑰：可重複兌換、不寫 redeem_codes（之後拔掉 TEST_TOPUP_KEY 即失效）
+  const testKey = testTopUpKey().toUpperCase();
+  if (testKey && code === testKey) {
+    const points = testTopUpPoints();
+    await topUp(userId, points, `封測自動儲值（${code.slice(0, 8)}…）`);
+    return { points, balanceNote: `封測儲值已入帳 ${points} 額度` };
+  }
 
   return db().transaction(async (d) => {
     const row = (await d.prepare("SELECT * FROM redeem_codes WHERE code = ?").get(code)) as

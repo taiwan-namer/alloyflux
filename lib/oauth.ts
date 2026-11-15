@@ -774,28 +774,50 @@ export function buildChatGptCredsFromTokens(tokens: {
   };
 }
 
+/** Gemini refresh 可能來自「網頁 client」或「Antigravity CLI client」；兩者 client_id 不同不可混用 */
+function geminiOAuthClientPairs(): { clientId: string; clientSecret: string; label: string }[] {
+  const pairs: { clientId: string; clientSecret: string; label: string }[] = [
+    { clientId: GEMINI_OAUTH.clientId, clientSecret: GEMINI_OAUTH.clientSecret, label: "primary" },
+  ];
+  if (GEMINI_OAUTH.clientId !== DEFAULT_AGY_CLIENT_ID) {
+    pairs.push({
+      clientId: DEFAULT_AGY_CLIENT_ID,
+      clientSecret: DEFAULT_AGY_CLIENT_SECRET,
+      label: "antigravity-cli",
+    });
+  }
+  return pairs;
+}
+
 // === Refresh OAuth Credentials Automatically ===
 export async function refreshOAuthCredentials(creds: OAuthCredentials): Promise<OAuthCredentials> {
   if (!creds.refreshToken) return creds;
   if (creds.provider === "gemini") {
-    const res = await fetch(GEMINI_OAUTH.tokenUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: creds.refreshToken,
-        client_id: GEMINI_OAUTH.clientId,
-        client_secret: GEMINI_OAUTH.clientSecret,
-      }),
-    });
-    if (!res.ok) throw new Error(`Gemini Token 刷新失敗（${res.status}）`);
-    const t = (await res.json()) as { access_token: string; refresh_token?: string; expires_in?: number };
-    return {
-      ...creds,
-      accessToken: t.access_token,
-      refreshToken: t.refresh_token || creds.refreshToken,
-      expiresAt: Date.now() + Number(t.expires_in ?? 3600) * 1000,
-    };
+    let lastErr = "Gemini Token 刷新失敗";
+    for (const pair of geminiOAuthClientPairs()) {
+      const res = await fetch(GEMINI_OAUTH.tokenUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: creds.refreshToken,
+          client_id: pair.clientId,
+          client_secret: pair.clientSecret,
+        }),
+      });
+      if (!res.ok) {
+        lastErr = `Gemini Token 刷新失敗（${res.status}/${pair.label}）`;
+        continue;
+      }
+      const t = (await res.json()) as { access_token: string; refresh_token?: string; expires_in?: number };
+      return {
+        ...creds,
+        accessToken: t.access_token,
+        refreshToken: t.refresh_token || creds.refreshToken,
+        expiresAt: Date.now() + Number(t.expires_in ?? 3600) * 1000,
+      };
+    }
+    throw new Error(lastErr);
   }
   if (creds.provider === "xai") {
     const res = await fetch(GROK_OAUTH.tokenUrl, {

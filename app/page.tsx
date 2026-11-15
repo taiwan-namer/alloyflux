@@ -2387,7 +2387,7 @@ export default function ChatPage() {
                 <input
                   value={redeemInput}
                   onChange={(e) => setRedeemInput(e.target.value)}
-                  placeholder="VIP199-XXXX"
+                  placeholder="VIP199-XXXX 或封測儲值金鑰"
                   style={{ flex: 1, minWidth: 160 }}
                 />
                 <button type="button" className="primary" onClick={() => void redeem()}>
