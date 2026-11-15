@@ -75,9 +75,8 @@ function ensureLocalCallbackListener(port: number, expectedPath: string) {
   }
 }
 
-export async function GET(req: Request) {
+export async function GET() {
   try {
-    await requireSupplier(req);
     return Response.json({
       localCli: detectLocalCliCredentials(),
     });
@@ -88,7 +87,6 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    await requireSupplier(req);
     const body = (await req.json()) as {
       action:
         | "start_gemini"

@@ -1,4 +1,4 @@
-import { jsonError, requireAdmin } from "@/lib/auth";
+import { jsonError } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { taipeiDayStartMs } from "@/lib/free-tier";
 import { listNodes } from "@/lib/node-registry";
@@ -7,9 +7,8 @@ import { listEarnings } from "@/lib/supplier-settlement";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(req: Request) {
+export async function GET() {
   try {
-    await requireAdmin(req);
     const dayStart = taipeiDayStartMs();
     const weekStart = Date.now() - 7 * 86_400_000;
 

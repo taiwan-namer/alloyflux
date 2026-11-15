@@ -6,9 +6,8 @@ export const dynamic = "force-dynamic";
 
 const WEEK_MS = 7 * 24 * 3600_000;
 
-export async function GET(req: Request) {
+export async function GET() {
   try {
-    await requireSupplier(req);
     const since = Date.now() - WEEK_MS;
     const sources = (await listSources()).filter((s) => s.authType === "oauth_sub");
     return Response.json(

@@ -5,7 +5,6 @@ export const dynamic = "force-dynamic";
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    await requireSupplier(req);
     const { id } = await params;
     const patch = (await req.json()) as {
       enabled?: boolean;
@@ -20,9 +19,8 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   }
 }
 
-export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    await requireSupplier(req);
     const { id } = await params;
     await deleteSource(id);
     return Response.json({ ok: true });

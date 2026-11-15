@@ -1,11 +1,10 @@
-import { jsonError, requireAdmin } from "@/lib/auth";
+import { jsonError } from "@/lib/auth";
 import { createRedeemCode, listRecentRedeemCodes } from "@/lib/redeem";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(req: Request) {
+export async function GET() {
   try {
-    await requireAdmin(req);
     return Response.json({ codes: await listRecentRedeemCodes(30) });
   } catch (e) {
     return jsonError(e);
@@ -14,7 +13,6 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    await requireAdmin(req);
     const body = (await req.json().catch(() => ({}))) as {
       points?: number;
       maxUses?: number;

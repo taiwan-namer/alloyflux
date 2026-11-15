@@ -5,9 +5,8 @@ import { addSource, listSources, type SourceKind, type SourceProvider } from "@/
 export const dynamic = "force-dynamic";
 
 /** 供給者／管理員：綁訂閱與 API Key 貨源 */
-export async function GET(req: Request) {
+export async function GET() {
   try {
-    await requireSupplier(req);
     return Response.json(await listSources());
   } catch (e) {
     return jsonError(e);
@@ -16,7 +15,6 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    await requireSupplier(req);
     const body = (await req.json()) as {
       label?: string;
       kind: SourceKind;

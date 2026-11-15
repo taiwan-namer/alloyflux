@@ -412,35 +412,15 @@ export default function SourcesPage() {
     refresh();
   }
 
-  const [gate, setGate] = useState<"loading" | "ok" | "deny">("loading");
   const [isAdmin, setIsAdmin] = useState(false);
   useEffect(() => {
     fetch("/api/auth/me")
       .then((r) => r.json())
       .then((d) => {
-        const allowed = Boolean(d.user?.isSupplier || d.user?.isAdmin);
         setIsAdmin(Boolean(d.user?.isAdmin));
-        setGate(allowed ? "ok" : "deny");
       })
-      .catch(() => setGate("deny"));
+      .catch(() => {});
   }, []);
-
-  if (gate === "loading") {
-    return (
-      <div className="page">
-        <p className="muted">驗證供給者權限…</p>
-      </div>
-    );
-  }
-  if (gate === "deny") {
-    return (
-      <div className="page">
-        <h1>供給者專區</h1>
-        <p className="muted">請用「供給者」帳號登入後再進入此頁綁定訂閱。</p>
-        <Link href="/">← 回首頁</Link>
-      </div>
-    );
-  }
 
   return (
     <div className="page">

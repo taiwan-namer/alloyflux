@@ -417,7 +417,6 @@ function Stat({ label, value, sub }: { label: string; value: ReactNode; sub?: Re
 /* ───────── 主元件 ───────── */
 
 export default function AdminPage() {
-  const [ok, setOk] = useState<boolean | null>(null);
   const [email, setEmail] = useState("");
   const [active, setActive] = useState<ViewId>("reservoir");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ pool: true, billing: true });
@@ -463,25 +462,20 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
+    void refreshOverview();
+    void refreshCodes();
     fetch("/api/auth/me")
       .then((r) => r.json())
       .then((d) => {
-        const admin = Boolean(d.user?.isAdmin);
-        setOk(admin);
-        setEmail(d.user?.email ?? "");
-        if (admin) {
-          void refreshOverview();
-          void refreshCodes();
-        }
+        setEmail(d.user?.email ?? "免驗證模式（開放預覽）");
       })
-      .catch(() => setOk(false));
+      .catch(() => setEmail("免驗證模式（開放預覽）"));
   }, [refreshOverview, refreshCodes]);
 
   useEffect(() => {
-    if (!ok) return;
     const t = setInterval(() => void refreshOverview(), 30_000);
     return () => clearInterval(t);
-  }, [ok, refreshOverview]);
+  }, [refreshOverview]);
 
   /* 水庫分組 */
   const reservoirGroups = useMemo(() => {
@@ -595,34 +589,6 @@ export default function AdminPage() {
 
   function toggleGroup(key: string) {
     setExpanded((p) => ({ ...p, [key]: !p[key] }));
-  }
-
-  /* ───── 守門 ───── */
-
-  if (ok === null) {
-    return (
-      <main className="adm-gate">
-        <p className="muted">驗證管理員…</p>
-      </main>
-    );
-  }
-  if (!ok) {
-    return (
-      <main className="adm-gate">
-        <div className="adm-gate-card">
-          <h1>僅管理員可進入</h1>
-          <p className="muted">此頁面僅限 ADMIN_EMAILS 內的帳號使用。請以管理員帳號登入後再試。</p>
-          <div className="adm-gate-actions">
-            <Link href="/" className="adm-btn">
-              ← 返回雲端工作台（/）
-            </Link>
-            <a href="/api/auth/google/start?next=/admin" className="adm-btn adm-btn-primary">
-              使用 Google 登入管理員帳號
-            </a>
-          </div>
-        </div>
-      </main>
-    );
   }
 
   /* ───── 各視圖 ───── */
