@@ -1082,36 +1082,17 @@ async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<S
   };
   if (creds.accountId) headers["ChatGPT-Account-Id"] = creds.accountId;
 
+  // 注意：Codex device token 常能打 /wham/usage，但 /accounts/check 會 401。
+  // 不可因 entitlement 401 就判定整組失效（會誤停用剛綁好的 GPT）。
   const entitlement = await fetchChatGptAccountEntitlement(creds);
-  if (entitlement.authFailed) {
-    return {
-      planType: (creds.planType ?? "pro").toUpperCase(),
-      email: creds.email,
-      windows: [],
-      primaryUsedPercent: 100,
-      primaryRemainingPercent: 0,
-      fetchedAt: Date.now(),
-      subscriptionExpiresAt: null,
-      subscriptionActive: false,
-      subscriptionStatus: "auth_failed",
-    };
-  }
+  let usageAuthFailed = false;
 
   for (const pathSuffix of ["/codex/usage", "/wham/usage"]) {
     try {
       const res = await fetch(`${CHATGPT_OAUTH.codexBaseUrl}${pathSuffix}`, { headers });
       if (res.status === 401 || res.status === 403) {
-        return {
-          planType: (creds.planType ?? "pro").toUpperCase(),
-          email: creds.email,
-          windows: [],
-          primaryUsedPercent: 100,
-          primaryRemainingPercent: 0,
-          fetchedAt: Date.now(),
-          subscriptionExpiresAt: entitlement.expiresAt,
-          subscriptionActive: false,
-          subscriptionStatus: "auth_failed",
-        };
+        usageAuthFailed = true;
+        continue;
       }
       if (res.ok) {
         const data = (await res.json()) as {
@@ -1160,20 +1141,16 @@ async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<S
             resetAt: null,
           } satisfies QuotaWindow);
         const planType = (
-          entitlement.planType ??
           data.plan_type ??
+          entitlement.planType ??
           creds.planType ??
           "pro"
         ).toUpperCase();
-        const active =
-          entitlement.active === false
-            ? false
-            : entitlement.active === true
-              ? true
-              : !/free|none/i.test(planType);
+        // 用量 API 成功＝token 有效；僅當 entitlement 明確說未訂閱才標 inactive
+        const active = entitlement.active === false ? false : true;
         return {
           planType,
-          email: entitlement.email ?? data.email ?? creds.email,
+          email: data.email ?? entitlement.email ?? creds.email,
           windows: windows.length ? windows : [primary],
           primaryUsedPercent: primary.uiUsedPercent,
           primaryRemainingPercent: primary.uiRemainingPercent,
@@ -1187,6 +1164,22 @@ async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<S
       // try next path
     }
   }
+
+  // 用量與 entitlement 都拿不到：只有兩邊都像授權失敗才標 auth_failed
+  if (usageAuthFailed && entitlement.authFailed) {
+    return {
+      planType: (creds.planType ?? "pro").toUpperCase(),
+      email: creds.email,
+      windows: [],
+      primaryUsedPercent: 100,
+      primaryRemainingPercent: 0,
+      fetchedAt: Date.now(),
+      subscriptionExpiresAt: entitlement.expiresAt,
+      subscriptionActive: false,
+      subscriptionStatus: "auth_failed",
+    };
+  }
+
   const active = entitlement.active !== false;
   return {
     planType: (entitlement.planType ?? creds.planType ?? "pro").toUpperCase(),

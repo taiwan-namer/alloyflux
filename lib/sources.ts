@@ -344,45 +344,38 @@ export async function syncSourceQuotaById(sourceId: string): Promise<Subscriptio
       await saveUpdatedOAuthCreds(sourceId, creds);
     }
   } catch {
-    const failed: SubscriptionQuota = {
-      planType: creds.planType ?? row.provider,
-      email: creds.email,
-      windows: [],
-      primaryUsedPercent: 100,
-      primaryRemainingPercent: 0,
-      fetchedAt: Date.now(),
-      subscriptionExpiresAt: null,
-      subscriptionActive: false,
-      subscriptionStatus: "auth_failed",
-    };
-    await saveSourceQuota(sourceId, failed);
-    // 重新整理／授權失效 → 自動暫停託管，避免繼續派發
-    if (row.enabled) {
-      await db().prepare("UPDATE sources SET enabled = 0 WHERE id = ?").run(sourceId);
-    }
-    return failed;
+    // refresh 失敗先仍嘗試用現有 access token 查用量；兩邊都掛才標失效
   }
   const quota = await fetchSubscriptionQuota(creds);
   await saveSourceQuota(sourceId, quota);
-  // 退訂、降級、授權失效：自動停用；到期日已過也停用
+
   const expired =
     typeof quota.subscriptionExpiresAt === "string" &&
     Number.isFinite(Date.parse(quota.subscriptionExpiresAt)) &&
-    Date.parse(quota.subscriptionExpiresAt) < Date.now();
+    Date.parse(quota.subscriptionExpiresAt) < Date.now() - 86_400_000; // 寬限 1 天，避免時區誤殺
+  // 僅在「明確退訂」或「用量＋授權都失敗」時停用；unknown／單一端點 401 不砍
   const shouldDisable =
-    quota.subscriptionActive === false ||
     quota.subscriptionStatus === "auth_failed" ||
-    quota.subscriptionStatus === "inactive" ||
+    (quota.subscriptionActive === false && quota.subscriptionStatus === "inactive") ||
     expired;
+  const healthy =
+    quota.subscriptionStatus !== "auth_failed" &&
+    quota.subscriptionActive !== false &&
+    (quota.windows?.length ?? 0) > 0;
+
   if (shouldDisable && row.enabled) {
     await db().prepare("UPDATE sources SET enabled = 0 WHERE id = ?").run(sourceId);
+  } else if (healthy && !row.enabled) {
+    // 誤殺後若用量恢復正常，自動重新啟用
+    await db().prepare("UPDATE sources SET enabled = 1 WHERE id = ?").run(sourceId);
   }
   return quota;
 }
 
 export async function syncAllSubscriptionQuotas(): Promise<void> {
+  // 含已停用的訂閱節點：可藉成功同步自動恢復
   const rows = (await db()
-    .prepare("SELECT id FROM sources WHERE auth_type = 'oauth_sub' AND enabled = 1")
+    .prepare("SELECT id FROM sources WHERE auth_type = 'oauth_sub'")
     .all()) as { id: string }[];
   await Promise.allSettled(rows.map((r) => syncSourceQuotaById(r.id)));
 }
@@ -433,13 +426,8 @@ export async function candidatesFor(model: ModelInfo): Promise<Candidate[]> {
       if (!s.enabled) return false;
       if (model.category === "node-agent") return false;
       if (s.provider === "openrouter") return true;
-      // 退訂／授權失效的訂閱節點不派發
-      if (
-        s.authType === "oauth_sub" &&
-        (s.quota?.subscriptionActive === false ||
-          s.quota?.subscriptionStatus === "inactive" ||
-          s.quota?.subscriptionStatus === "auth_failed")
-      ) {
+      // 僅明確 auth_failed 才跳過；勿因 accounts/check 誤判 inactive 而整組不派發
+      if (s.authType === "oauth_sub" && s.quota?.subscriptionStatus === "auth_failed") {
         return false;
       }
       // Antigravity 訂閱貨源可跑目錄內 Gemini／Claude／GPT-OSS（研究／備援；買家主線走 Node Agent）
