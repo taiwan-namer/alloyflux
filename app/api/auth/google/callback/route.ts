@@ -99,16 +99,22 @@ export async function GET(req: Request) {
     profile.name?.trim() ||
     [profile.given_name, profile.family_name].filter(Boolean).join(" ").trim() ||
     undefined;
-  const user = await upsertGoogleUser({
-    email: profile.email,
-    name: googleName,
-    role: parsedState.role,
-  });
-  const session = issueSessionToken(user.id);
+  try {
+    const user = await upsertGoogleUser({
+      email: profile.email,
+      name: googleName,
+      role: parsedState.role,
+    });
+    const session = issueSessionToken(user.id);
 
-  const headers = new Headers();
-  headers.set("Location", parsedState.next || (parsedState.role === "supplier" ? "/sources" : "/"));
-  headers.append("Set-Cookie", sessionCookieHeader(session));
-  headers.append("Set-Cookie", "aup_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
-  return new Response(null, { status: 302, headers });
+    const headers = new Headers();
+    headers.set("Location", parsedState.next || (parsedState.role === "supplier" ? "/sources" : "/"));
+    headers.append("Set-Cookie", sessionCookieHeader(session));
+    headers.append("Set-Cookie", "aup_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+    return new Response(null, { status: 302, headers });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const code = /timeout|ECONN|DATABASE|connect/i.test(msg) ? "db_timeout" : "db_error";
+    return Response.redirect(new URL(`/?auth_error=${code}`, req.url));
+  }
 }
