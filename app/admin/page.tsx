@@ -94,6 +94,9 @@ interface Overview {
   jobStats: { status: string; count: number }[];
   recentUsers: UserRow[];
   recentLedger: LedgerRow[];
+  _fromCloud?: boolean;
+  _cloudApiBase?: string;
+  _partial?: boolean;
 }
 
 interface CodeRow {
@@ -659,6 +662,7 @@ export default function AdminPage() {
   const stats = ov?.stats;
 
   function renderReservoir() {
+    const allSuppliers = (ov?.sources ?? []).filter((s) => s.kind === "supplier");
     return (
       <>
         <div className="adm-toolbar">
@@ -671,7 +675,80 @@ export default function AdminPage() {
           <Link href="/sources" className="adm-btn">
             前往 /sources 綁定授權
           </Link>
+          {ov?._fromCloud ? (
+            <span className="adm-pill adm-pill-ok">資料來源：雲端 {ov._cloudApiBase ?? ""}</span>
+          ) : null}
         </div>
+
+        <section className="adm-section">
+          <h3 className="adm-section-title">
+            全站供給者用量總覽
+            <span className="adm-count">{allSuppliers.length}</span>
+          </h3>
+          <div className="adm-table-wrap">
+            <table className="adm-table">
+              <thead>
+                <tr>
+                  <th>節點</th>
+                  <th>供應商</th>
+                  <th>Email／識別</th>
+                  <th>主池剩餘</th>
+                  <th>各視窗</th>
+                  <th>分配上限</th>
+                  <th>本月已用點</th>
+                  <th>狀態</th>
+                </tr>
+              </thead>
+              <tbody>
+                {allSuppliers.map((s) => {
+                  const wins = s.quota?.windows ?? [];
+                  const remain = s.quota?.primaryRemainingPercent;
+                  return (
+                    <tr key={s.id}>
+                      <td>
+                        <strong>{s.label}</strong>
+                        <div className="adm-sub">{s.authType === "oauth_sub" ? "OAuth 訂閱" : "API Key"}</div>
+                      </td>
+                      <td>{s.provider}</td>
+                      <td className="adm-sub">{s.quota?.email || s.keyHint || "—"}</td>
+                      <td>
+                        {typeof remain === "number" ? (
+                          <span className={`adm-text-${level(remain)}`}>{Math.round(remain)}%</span>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="adm-sub">
+                        {wins.length
+                          ? wins
+                              .map(
+                                (w) =>
+                                  `${w.label} ${Math.round(w.uiRemainingPercent ?? w.remainingPercent)}%`,
+                              )
+                              .join(" · ")
+                          : "尚無視窗資料"}
+                      </td>
+                      <td>{s.shareLimitPct}%</td>
+                      <td>{fmtNum(s.usedThisMonthPoints)}</td>
+                      <td>
+                        <span className={`adm-pill ${s.enabled ? "adm-pill-ok" : "adm-pill-off"}`}>
+                          {s.enabled ? "啟用" : "停用"}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {allSuppliers.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="adm-empty-cell">
+                      尚無供給節點。請確認雲端已綁定，或按重新整理。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
 
         {PROVIDER_GROUPS.map((g) => {
           const entries = reservoirGroups[g.key] ?? [];

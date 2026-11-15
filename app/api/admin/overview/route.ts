@@ -2,6 +2,7 @@ import { jsonError } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { taipeiDayStartMs } from "@/lib/free-tier";
 import { listNodes } from "@/lib/node-registry";
+import { cloudApiBase, hasLocalDatabaseUrl } from "@/lib/oauth-persist";
 import { listSources } from "@/lib/sources";
 import { listEarnings } from "@/lib/supplier-settlement";
 
@@ -15,12 +16,73 @@ async function settled<T>(p: Promise<T>, fallback: T): Promise<T> {
   }
 }
 
-export async function GET() {
+/** 本機無 DB 時改讀雲端總覽（與 /sources 同一份 Supabase 資料） */
+async function fetchCloudOverview(req: Request): Promise<Response | null> {
+  if (req.headers.get("x-admin-no-proxy") === "1") return null;
   try {
+    const res = await fetch(`${cloudApiBase()}/api/admin/overview`, {
+      cache: "no-store",
+      headers: { "x-admin-no-proxy": "1" },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return Response.json({ ...data, _fromCloud: true, _cloudApiBase: cloudApiBase() });
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCloudSources(): Promise<Awaited<ReturnType<typeof listSources>>> {
+  try {
+    const res = await fetch(`${cloudApiBase()}/api/sources`, {
+      cache: "no-store",
+      headers: { "x-oauth-no-proxy": "1" },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function GET(req: Request) {
+  try {
+    // 本機開發常無 DATABASE_URL：直接代理雲端，否則後台水庫全 0
+    if (!hasLocalDatabaseUrl()) {
+      const cloud = await fetchCloudOverview(req);
+      if (cloud) return cloud;
+      const sources = await fetchCloudSources();
+      return Response.json({
+        stats: {
+          totalUsers: 0,
+          totalPartners: 0,
+          oauthSupplierSources: sources.filter((s) => s.kind === "supplier").length,
+          partnerNodes: sources.filter((s) => s.kind === "supplier").length,
+          todayMessages: 0,
+          todayFreeMessages: 0,
+          weekTopupPoints: 0,
+          weekSourceCostPoints: 0,
+          enabledSources: sources.filter((s) => s.enabled).length,
+          totalSources: sources.length,
+          onlineNodes: 0,
+          totalNodes: 0,
+        },
+        sources,
+        nodes: [],
+        earnings: [],
+        jobStats: [],
+        recentUsers: [],
+        recentLedger: [],
+        _fromCloud: true,
+        _cloudApiBase: cloudApiBase(),
+        _partial: true,
+      });
+    }
+
     const dayStart = taipeiDayStartMs();
     const weekStart = Date.now() - 7 * 86_400_000;
 
-    // 貨源必須優先回傳；其餘區塊失敗不應讓整頁變空白
     const sources = await settled(listSources(), []);
     const [nodes, earnings] = await Promise.all([
       settled(listNodes(), []),
@@ -110,7 +172,6 @@ export async function GET() {
     return Response.json({
       stats: {
         totalUsers: Number(usersCountRow?.n ?? 0),
-        // 舊欄位：users.role=supplier；模組 OAuth 不會建這種帳號，另回傳 oauth 節點數
         totalPartners: rolePartners,
         oauthSupplierSources,
         partnerNodes: oauthSupplierSources,

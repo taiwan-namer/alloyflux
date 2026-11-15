@@ -1,12 +1,34 @@
-import { jsonError, requireSupplier } from "@/lib/auth";
+import { jsonError } from "@/lib/auth";
+import { cloudApiBase, hasLocalDatabaseUrl } from "@/lib/oauth-persist";
 import { BASE_URL } from "@/lib/providers";
 import { addSource, listSources, type SourceKind, type SourceProvider } from "@/lib/sources";
 
 export const dynamic = "force-dynamic";
 
 /** 供給者／管理員：綁訂閱與 API Key 貨源 */
-export async function GET() {
+export async function GET(req: Request) {
   try {
+    if (!hasLocalDatabaseUrl()) {
+      // 本機無 DB：改讀雲端貨源列表（與線上 /sources 同一資料）
+      if (req.headers.get("x-oauth-no-proxy") !== "1") {
+        try {
+          const res = await fetch(`${cloudApiBase()}/api/sources`, {
+            cache: "no-store",
+            headers: { "x-oauth-no-proxy": "1" },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            return Response.json(data);
+          }
+        } catch {
+          // fall through
+        }
+      }
+      return Response.json(
+        { error: "本機未設定 DATABASE_URL，且無法讀取雲端貨源" },
+        { status: 503 },
+      );
+    }
     return Response.json(await listSources());
   } catch (e) {
     return jsonError(e);
