@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 interface QuotaWindow {
   label: string;
@@ -42,12 +42,42 @@ interface SourceStatus {
 }
 
 const PROVIDER_LABEL: Record<string, string> = {
-  gemini: "Google Gemini",
+  gemini: "Google Gemini（含 Claude／GPT 多模型池）",
   openai: "OpenAI ChatGPT",
   anthropic: "Anthropic Claude",
   xai: "xAI Grok",
   openrouter: "OpenRouter",
 };
+
+/**
+ * 分潤換算口徑（供夥伴直覺試算）：
+ * - 雲端工作台基準：NT$ 199 = 1,000 額度 → 1 額度對應服務費約 NT$ 0.199
+ * - 創作者上架分潤 80% → 每消耗 1 額度，夥伴可領回約 NT$ 0.1592
+ * - 單一標準 Pro 節點 100% 週容量約可承載 ~2,200 工作台額度（依模型組合浮動），
+ *   即滿池 100% 週分潤約 NT$ 350（每月 4.3 週約 NT$ 1,500）
+ */
+const NTD_PER_BUYER_POINT_AT_80_PCT = 0.199 * 0.8;
+const EST_WEEKLY_POINTS_PER_FULL_SUB: Record<string, number> = {
+  gemini: 2400,
+  openai: 2200,
+  xai: 2000,
+  anthropic: 2200,
+  openrouter: 1500,
+};
+
+function estimateNodePayoutNtd(source: SourceStatus): {
+  allocatablePct: number;
+  estWeeklyRemNtd: number;
+  estMonthlyCapNtd: number;
+} {
+  const fullWeeklyPts = EST_WEEKLY_POINTS_PER_FULL_SUB[source.provider] ?? 2200;
+  const used = source.quota?.primaryUsedPercent ?? 0;
+  // 本週在夥伴設定的 shareLimitPct 內還能被平台調度的淨百分比
+  const allocatablePct = Math.max(0, Math.min(source.quota?.primaryRemainingPercent ?? source.shareLimitPct, source.shareLimitPct - used));
+  const estWeeklyRemNtd = Math.round((allocatablePct / 100) * fullWeeklyPts * NTD_PER_BUYER_POINT_AT_80_PCT);
+  const estMonthlyCapNtd = Math.round((source.shareLimitPct / 100) * fullWeeklyPts * 4.3 * NTD_PER_BUYER_POINT_AT_80_PCT);
+  return { allocatablePct, estWeeklyRemNtd, estMonthlyCapNtd };
+}
 
 interface SupplierUsageRow {
   createdAt: number;
@@ -72,89 +102,12 @@ interface SupplierUsage {
   rows: SupplierUsageRow[];
 }
 
-function SupplierLedger() {
-  const [data, setData] = useState<SupplierUsage[]>([]);
-  useEffect(() => {
-    const load = () =>
-      fetch("/api/supplier-usage")
-        .then((r) => r.json())
-        .then(setData)
-        .catch(() => {});
-    load();
-    const t = setInterval(load, 5000);
-    return () => clearInterval(t);
-  }, []);
-
-  if (data.length === 0) return null;
-  return (
-    <div className="card" style={{ borderColor: "var(--warn)" }}>
-      <h3 style={{ marginTop: 0 }}>供給者用量明細：平台實際用掉你多少 Google 額度</h3>
-      <p className="muted" style={{ marginTop: 0, fontSize: 13, lineHeight: 1.6 }}>
-        每則對話前後都向 Google 讀一次該模型的剩餘額度，差值就是這一則實際扣掉你的量。這些扣在
-        <strong> Antigravity 訂閱額度</strong>（例如 Gemini 4 Argon 週額度）；
-        <strong>gemini.google.com 網頁後台不會顯示這個池</strong>，請以這裡或 Antigravity 的 /usage 為準。
-      </p>
-      {data.map((s) => (
-        <div key={s.sourceId} style={{ marginBottom: 16 }}>
-          <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline" }}>
-            <strong>{s.label}</strong>
-            <span>
-              近 7 天平台共用掉 <strong style={{ color: "var(--warn)", fontSize: 18 }}>{s.totalUsedPct.toFixed(3)}%</strong>
-              ・{s.messages} 則・買家付 {s.chargedPoints.toFixed(2)} 點
-            </span>
-          </div>
-          {s.quota && (
-            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              Google 直接回報本週已用（含你自己在 Antigravity 的使用）：
-              {s.quota.windows
-                .filter((w) => /週/.test(w.label) && !/即時/.test(w.label))
-                .map((w) => `${w.label} ${w.usedPercent.toFixed(2)}%`)
-                .join("、")}
-            </div>
-          )}
-          {s.rows.length > 0 && (
-            <table style={{ marginTop: 8, fontSize: 12 }}>
-              <thead>
-                <tr>
-                  <th>時間</th>
-                  <th>模型（Google 確認）</th>
-                  <th>額度池</th>
-                  <th>這則扣掉</th>
-                  <th>剩餘（前 → 後）</th>
-                  <th>Token 入／出</th>
-                </tr>
-              </thead>
-              <tbody>
-                {s.rows.slice(0, 20).map((r) => (
-                  <tr key={r.createdAt}>
-                    <td>{new Date(r.createdAt).toLocaleTimeString("zh-TW")}</td>
-                    <td>{r.upstreamModelVersion ?? r.model}</td>
-                    <td>{r.quotaLabel ?? "—"}</td>
-                    <td>{r.quotaUsedPct != null ? `${r.quotaUsedPct.toFixed(3)}%` : "（未記錄）"}</td>
-                    <td>
-                      {r.quotaBeforePct != null && r.quotaAfterPct != null
-                        ? `${r.quotaBeforePct.toFixed(2)}% → ${r.quotaAfterPct.toFixed(2)}%`
-                        : "—"}
-                    </td>
-                    <td>
-                      {r.inputTokens ?? 0} / {r.outputTokens ?? 0}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export default function SourcesPage() {
   const [sources, setSources] = useState<SourceStatus[]>([]);
+  const [ledgerData, setLedgerData] = useState<SupplierUsage[]>([]);
   const [localCli, setLocalCli] = useState<{ provider: "gemini" | "openai" | "xai"; path: string; hint: string }[]>([]);
 
-  // OAuth 訂閱綁定狀態
+  // 串接新模型狀態
   const [subLabel, setSubLabel] = useState("");
   const [shareLimitPct, setShareLimitPct] = useState(80);
   const [activeOAuthState, setActiveOAuthState] = useState<string | null>(null);
@@ -169,16 +122,22 @@ export default function SourcesPage() {
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
 
-  // 進階：直接貼 OAuth Token 測試
+  // 單一節點即時滑桿草稿（拖動時即時換算金額，放開寫入後端）
+  const [draftLimits, setDraftLimits] = useState<Record<string, number>>({});
+  const [draftCaps, setDraftCaps] = useState<Record<string, number>>({});
+  const [claudeQuickOpen, setClaudeQuickOpen] = useState(false);
+  const [claudeQuickKey, setClaudeQuickKey] = useState("");
+  const [claudeQuickCap, setClaudeQuickCap] = useState(2000);
+
+  // 進階 Token / API Key
   const [rawProvider, setRawProvider] = useState<"gemini" | "openai" | "xai">("gemini");
   const [rawAccess, setRawAccess] = useState("");
   const [rawRefresh, setRawRefresh] = useState("");
   const [rawExtraId, setRawExtraId] = useState("");
 
-  // 傳統 API Key 表單
   const [form, setForm] = useState({
     label: "",
-    kind: "platform" as "supplier" | "platform",
+    kind: "supplier" as "supplier" | "platform",
     provider: "gemini" as "gemini" | "openai" | "anthropic" | "xai" | "openrouter",
     apiKey: "",
     priority: "",
@@ -188,8 +147,22 @@ export default function SourcesPage() {
   const [keyMsg, setKeyMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
   const refresh = useCallback(async () => {
-    const list = await (await fetch("/api/sources")).json();
-    setSources(list);
+    try {
+      const [srcRes, ledRes] = await Promise.all([
+        fetch("/api/sources", { cache: "no-store" }),
+        fetch("/api/supplier-usage", { cache: "no-store" }),
+      ]);
+      if (srcRes.ok) {
+        const list = (await srcRes.json()) as SourceStatus[];
+        setSources(Array.isArray(list) ? list : []);
+      }
+      if (ledRes.ok) {
+        const led = (await ledRes.json()) as SupplierUsage[];
+        setLedgerData(Array.isArray(led) ? led : []);
+      }
+    } catch {
+      // ignore
+    }
   }, []);
 
   const syncAndRefresh = useCallback(async () => {
@@ -212,9 +185,9 @@ export default function SourcesPage() {
       .then((r) => r.json())
       .then((d) => setLocalCli(d.localCli ?? []))
       .catch(() => {});
-    const t = setInterval(() => void syncAndRefresh(), 30_000);
+    const t = setInterval(() => void refresh(), 10_000);
     return () => clearInterval(t);
-  }, [syncAndRefresh]);
+  }, [syncAndRefresh, refresh]);
 
   // 輪詢 ChatGPT／Grok 裝置碼驗證狀態
   useEffect(() => {
@@ -224,6 +197,7 @@ export default function SourcesPage() {
         const action = deviceFlow.kind === "grok" ? "poll_grok_device" : "poll_chatgpt_device";
         const res = await fetch("/api/oauth", {
           method: "POST",
+          headers: { "content-type": "application/json" },
           body: JSON.stringify({ action, state: deviceFlow.state }),
         });
         const data = await res.json();
@@ -233,10 +207,10 @@ export default function SourcesPage() {
             ok: true,
             text:
               deviceFlow.kind === "grok"
-                ? "✓ Grok／SuperGrok 訂閱連結成功！已自動讀取剩餘容量"
-                : "✓ ChatGPT Plus/Pro 訂閱連結成功！已自動讀取剩餘容量",
+                ? "✓ Grok 模組串接成功！已自動讀取剩餘容量並納入分配試算"
+                : "✓ ChatGPT 模組串接成功！已自動讀取剩餘容量並納入分配試算",
           });
-          refresh();
+          void refresh();
         } else if (data.error) {
           setOauthMsg({ ok: false, text: data.error });
           setDeviceFlow(null);
@@ -253,6 +227,7 @@ export default function SourcesPage() {
     setDeviceFlow(null);
     const res = await fetch("/api/oauth", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ action, label: subLabel, shareLimitPct }),
     });
     const data = await res.json();
@@ -270,6 +245,7 @@ export default function SourcesPage() {
     setActiveAuthUrl(null);
     const res = await fetch("/api/oauth", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "start_chatgpt_device", label: subLabel, shareLimitPct }),
     });
     const data = await res.json();
@@ -286,6 +262,7 @@ export default function SourcesPage() {
     setActiveAuthUrl(null);
     const res = await fetch("/api/oauth", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "start_grok_device", label: subLabel, shareLimitPct }),
     });
     const data = await res.json();
@@ -303,6 +280,7 @@ export default function SourcesPage() {
     setOauthMsg(null);
     const res = await fetch("/api/oauth", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
         action: "complete_code",
         codeOrUrl: callbackInput.trim(),
@@ -316,17 +294,18 @@ export default function SourcesPage() {
       setOauthMsg({ ok: false, text: data.error });
       return;
     }
-    setOauthMsg({ ok: true, text: "✓ 訂閱帳號綁定成功！已同步剩餘容量" });
+    setOauthMsg({ ok: true, text: "✓ 新模型節點綁定成功！已同步剩餘容量" });
     setCallbackInput("");
     setActiveAuthUrl(null);
     setSubLabel("");
-    refresh();
+    void refresh();
   }
 
   async function importCli(provider: "gemini" | "openai" | "xai") {
     setOauthMsg(null);
     const res = await fetch("/api/oauth", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "import_local_cli", provider, label: subLabel, shareLimitPct }),
     });
     const data = await res.json();
@@ -334,8 +313,8 @@ export default function SourcesPage() {
       setOauthMsg({ ok: false, text: data.error });
       return;
     }
-    setOauthMsg({ ok: true, text: "✓ 已匯入本機訂閱帳號並同步剩餘容量" });
-    refresh();
+    setOauthMsg({ ok: true, text: "✓ 已匯入本機登入節點並同步容量" });
+    void refresh();
   }
 
   async function submitRawToken() {
@@ -343,6 +322,7 @@ export default function SourcesPage() {
     setOauthMsg(null);
     const res = await fetch("/api/oauth", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
         action: "import_raw_token",
         provider: rawProvider,
@@ -359,17 +339,18 @@ export default function SourcesPage() {
       setOauthMsg({ ok: false, text: data.error });
       return;
     }
-    setOauthMsg({ ok: true, text: "✓ 訂閱 Token 已加入並同步剩餘容量！" });
+    setOauthMsg({ ok: true, text: "✓ OAuth Token 已加入並同步容量！" });
     setRawAccess("");
     setRawRefresh("");
     setRawExtraId("");
-    refresh();
+    void refresh();
   }
 
   async function syncQuotas(sourceId?: string) {
     setSyncing(true);
     await fetch("/api/oauth", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ action: "sync_quota", sourceId }),
     });
     await refresh();
@@ -381,6 +362,7 @@ export default function SourcesPage() {
     setKeyMsg(null);
     const res = await fetch("/api/sources", {
       method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
         label: form.label,
         kind: form.kind,
@@ -396,83 +378,476 @@ export default function SourcesPage() {
       setKeyMsg({ ok: false, text: data.error });
       return;
     }
-    setKeyMsg({ ok: true, text: "已驗證並加入 API Key" });
+    setKeyMsg({ ok: true, text: "✓ 已驗證並加入 API Key 節點" });
     setForm((f) => ({ ...f, label: "", apiKey: "" }));
-    refresh();
+    void refresh();
   }
 
   async function patch(id: string, body: Record<string, unknown>) {
-    await fetch(`/api/sources/${id}`, { method: "PATCH", body: JSON.stringify(body) });
-    refresh();
+    await fetch(`/api/sources/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    void refresh();
   }
 
   async function remove(id: string) {
-    if (!confirm("確定移除這個貨源？")) return;
+    if (!confirm("確定移除這個算力節點？")) return;
     await fetch(`/api/sources/${id}`, { method: "DELETE" });
-    refresh();
+    void refresh();
   }
 
-  const [isAdmin, setIsAdmin] = useState(false);
-  useEffect(() => {
-    fetch("/api/auth/me")
-      .then((r) => r.json())
-      .then((d) => {
-        setIsAdmin(Boolean(d.user?.isAdmin));
-      })
-      .catch(() => {});
-  }, []);
+  const oauthSources = useMemo(() => sources.filter((s) => s.authType === "oauth_sub"), [sources]);
+
+  // 統計 7 天實際已產生分潤 & 全節點預估可領金額（含 OAuth 訂閱池與 Claude / API 分配池）
+  const summaryStats = useMemo(() => {
+    const weekBuyerPoints = ledgerData.reduce((acc, s) => acc + (s.chargedPoints ?? 0), 0);
+    const weekMessages = ledgerData.reduce((acc, s) => acc + (s.messages ?? 0), 0);
+    const weekEarnedNtd = Math.round(weekBuyerPoints * NTD_PER_BUYER_POINT_AT_80_PCT);
+
+    let estWeeklyRemTotal = 0;
+    let estMonthlyCapTotal = 0;
+    for (const s of sources) {
+      if (!s.enabled) continue;
+      if (s.authType === "oauth_sub") {
+        const effectivePct = draftLimits[s.id] ?? s.shareLimitPct;
+        const calc = estimateNodePayoutNtd({ ...s, shareLimitPct: effectivePct });
+        estWeeklyRemTotal += calc.estWeeklyRemNtd;
+        estMonthlyCapTotal += calc.estMonthlyCapNtd;
+      } else {
+        const cap = draftCaps[s.id] ?? s.monthlyCapPoints ?? 2000;
+        const remPts = Math.max(0, cap - s.usedThisMonthPoints);
+        estWeeklyRemTotal += Math.round((remPts / 4.3) * NTD_PER_BUYER_POINT_AT_80_PCT);
+        estMonthlyCapTotal += Math.round(cap * NTD_PER_BUYER_POINT_AT_80_PCT);
+      }
+    }
+    return {
+      weekBuyerPoints,
+      weekMessages,
+      weekEarnedNtd,
+      estWeeklyRemTotal,
+      estMonthlyCapTotal,
+    };
+  }, [ledgerData, sources, draftLimits, draftCaps]);
+
+  // 新增模組試算（拉上方新增區滑桿時的即時預估）
+  const newNodeEstMonthlyNtd = Math.round(
+    (shareLimitPct / 100) * 2300 * 4.3 * NTD_PER_BUYER_POINT_AT_80_PCT,
+  );
 
   return (
     <div className="page">
-      <div className="row" style={{ justifyContent: "space-between" }}>
-        <h1>供給者 · 訂閱貨源</h1>
-        <div className="row" style={{ gap: 12, alignItems: "center" }}>
-          {isAdmin && <Link href="/admin">管理後台</Link>}
-          {isAdmin && <Link href="/nodes">Node Agent</Link>}
-          {isAdmin && <Link href="/">買家聊天</Link>}
-          <button
-            type="button"
-            onClick={async () => {
-              await fetch("/api/auth/logout", { method: "POST" });
-              window.location.href = "/";
-            }}
-          >
-            登出
+      <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div className="points-badge badge-brand" style={{ marginBottom: 6 }}>
+            算力節點夥伴控制台（Node Partner）
+          </div>
+          <h1 style={{ margin: 0 }}>分配用量設定・80% 創作者分潤試算・多模型串接</h1>
+        </div>
+        <div className="row" style={{ gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button type="button" onClick={() => void syncQuotas()} disabled={syncing}>
+            {syncing ? "同步中…" : "🔄 同步最新節點容量"}
           </button>
+          <Link href="/vendor">夥伴條款說明（/vendor）</Link>
+          <Link href="/">← 返回雲端工作台（聊天首頁）</Link>
         </div>
       </div>
-      <p className="muted">
-        在此綁定你的 Gemini／ChatGPT／Grok 訂閱或 API Key，釋出閒置額度給平台買家水庫。
-        Node Agent 為可選加強；未啟動時平台仍可依 C=1 規則調度你的訂閱貨源。
+
+      <p className="muted" style={{ lineHeight: 1.6 }}>
+        在此自由調整各個已授權節點的<strong>託管分配比例</strong>，即時查看預估可領回的{" "}
+        <strong>AI 工作流／Agent 創作者上架分潤（80% 回饋）</strong>；同時可繼續串接{" "}
+        <strong>Google Gemini、OpenAI ChatGPT、xAI Grok、Anthropic Claude</strong> 四大模型模組，參與多節點智慧路由託管與負載平衡測試。
       </p>
 
-      <SupplierLedger />
-
-      {/* === 做法 1：OAuth 訂閱帳號連結（Gemini AI Pro + ChatGPT Plus/Pro） === */}
-      <div className="card" style={{ borderColor: "var(--ok)" }}>
-        <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
-          <h3 style={{ margin: 0, color: "var(--ok)" }}>
-            ★ 做法 1：連結供給者月費訂閱帳號（OAuth 免外掛，支援手機與多帳號接力）
-          </h3>
-          <button onClick={() => syncQuotas()} disabled={syncing}>
-            {syncing ? "同步中…" : "🔄 立即同步所有訂閱剩餘容量"}
-          </button>
+      {/* === 1. 總覽指標卡：已產出回饋 + 本週剩餘可轉化回饋 + 滿載月估 === */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+          gap: 12,
+          marginBottom: 16,
+        }}
+      >
+        <div className="card" style={{ marginBottom: 0, borderColor: "var(--ok)" }}>
+          <div className="muted" style={{ fontSize: 12 }}>
+            近 7 天已累計創作者分潤（80% 回饋）
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: "var(--ok)", margin: "6px 0 4px" }}>
+            NT$ {summaryStats.weekEarnedNtd.toLocaleString("zh-TW")}
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            共完成 {summaryStats.weekMessages} 筆工作流任務（對應 {summaryStats.weekBuyerPoints.toFixed(1)} 工作台額度）
+          </div>
         </div>
-        <p className="muted" style={{ marginTop: 4 }}>
-          可同時綁定 <strong>1 個 Gemini AI Pro + 1 個 ChatGPT Plus/Pro</strong>，或 <strong>2 個以上 Gemini AI Pro 帳號</strong>。當第 1 個帳號達到你設定的釋出上限或 5 小時冷卻時，系統會自動無縫切換到第 2 個帳號繼續回答。
+
+        <div className="card" style={{ marginBottom: 0 }}>
+          <div className="muted" style={{ fontSize: 12 }}>
+            已啟用節點・本週剩餘可分配預估回饋
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, margin: "6px 0 4px" }}>
+            約 NT$ {summaryStats.estWeeklyRemTotal.toLocaleString("zh-TW")}
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            依各節點剩餘容量 × 您設定的分配上限換算
+          </div>
+        </div>
+
+        <div className="card" style={{ marginBottom: 0 }}>
+          <div className="muted" style={{ fontSize: 12 }}>
+            目前配置・滿載每月預估可領回（參考值）
+          </div>
+          <div style={{ fontSize: 28, fontWeight: 800, color: "var(--accent)", margin: "6px 0 4px" }}>
+            約 NT$ {summaryStats.estMonthlyCapTotal.toLocaleString("zh-TW")} / 月
+          </div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            串接越多組模型節點，智慧路由派發優先度與累計回饋越高
+          </div>
+        </div>
+      </div>
+
+      {/* === 2. 已接入節點：拉滑桿設定分配比例 + 即時換算多少錢回來 === */}
+      <div className="card" style={{ borderColor: "var(--accent)" }}>
+        <div className="row" style={{ justifyContent: "space-between", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
+          <h3 style={{ margin: 0 }}>步驟 A：設定已串接節點的分配用量＆回饋金額換算（{sources.length} 組）</h3>
+          <span className="muted" style={{ fontSize: 12 }}>
+            拖動滑桿即刻試算金額，放開自動儲存；達設定上限時系統自動停止派發，保留您的自用容量
+          </span>
+        </div>
+
+        {sources.length === 0 ? (
+          <div
+            style={{
+              padding: "18px 16px",
+              borderRadius: 10,
+              background: "var(--panel-2)",
+              border: "1px dashed var(--border)",
+            }}
+          >
+            <strong>尚未偵測到已綁定的算力節點。</strong>
+            <p className="muted" style={{ margin: "6px 0 0", fontSize: 13 }}>
+              請從下方「步驟 B：串接其他模型模組」點選 Google Gemini、ChatGPT 或 Grok 完成授權，節點就會出現在這裡讓您拉動分配比例並換算回饋金額！
+            </p>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gap: 14 }}>
+            {[...sources]
+              .sort((a, b) => {
+                if (a.authType !== b.authType) return a.authType === "oauth_sub" ? -1 : 1;
+                return a.priority - b.priority;
+              })
+              .map((s) => {
+                const currentLimit = draftLimits[s.id] ?? s.shareLimitPct;
+                const est = estimateNodePayoutNtd({ ...s, shareLimitPct: currentLimit });
+                return (
+                  <div
+                    key={s.id}
+                    style={{
+                      padding: 16,
+                      borderRadius: 12,
+                      border: "1px solid var(--border)",
+                      background: "var(--panel-2)",
+                    }}
+                  >
+                    <div className="row" style={{ justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+                      <div>
+                        <div className="row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <strong style={{ fontSize: 16 }}>{s.label}</strong>
+                          <span className={`tag ${s.kind}`}>
+                            {PROVIDER_LABEL[s.provider] ?? s.provider}
+                          </span>
+                          {!s.enabled ? (
+                            <span className="muted">（已暫停派發）</span>
+                          ) : s.cooldownUntil ? (
+                            <span className="notice">冷卻保護中（{Math.ceil((s.cooldownUntil - Date.now()) / 1000)}s）</span>
+                          ) : (
+                            <span style={{ color: "var(--ok)", fontSize: 12, fontWeight: 600 }}>● 智慧路由待命／派發中</span>
+                          )}
+                        </div>
+                        <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+                          {s.quota?.email ? `${s.quota.email} · ` : ""}識別：{s.keyHint}
+                        </div>
+                      </div>
+
+                      {!s.fromEnv && (
+                        <div className="row" style={{ gap: 8 }}>
+                          {s.authType === "oauth_sub" && (
+                            <button type="button" onClick={() => void syncQuotas(s.id)} disabled={syncing}>
+                              重抓容量
+                            </button>
+                          )}
+                          <button type="button" onClick={() => void patch(s.id, { enabled: !s.enabled })}>
+                            {s.enabled ? "暫停託管" : "恢復託管"}
+                          </button>
+                          <button type="button" onClick={() => void remove(s.id)}>
+                            移除
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {s.authType === "oauth_sub" ? (
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                          gap: 16,
+                          marginTop: 14,
+                          alignItems: "center",
+                        }}
+                      >
+                        {/* 左：官方即時各模型池剩餘 % */}
+                        <div>
+                          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+                            官方即時剩餘容量（對齊 Models &amp; Usage）：
+                          </div>
+                          {s.quota ? (
+                            <div style={{ display: "grid", gap: 6 }}>
+                              {s.quota.windows.map((w, i) => {
+                                const isClaudePool = /claude/i.test(w.label);
+                                return (
+                                  <div key={i}>
+                                    <div className="row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+                                      <span>
+                                        {isClaudePool ? <strong>◈ {w.label}（Claude 分配池）</strong> : w.label}
+                                      </span>
+                                      <span>
+                                        剩餘 <strong>{w.uiRemainingPercent ?? Math.round(w.remainingPercent)}%</strong>
+                                        <span className="muted">（已用 {w.usedPercent.toFixed(1)}%）</span>
+                                      </span>
+                                    </div>
+                                    <div
+                                      style={{
+                                        height: 7,
+                                        background: "var(--bg)",
+                                        borderRadius: 4,
+                                        overflow: "hidden",
+                                        marginTop: 2,
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          width: `${Math.min(100, w.remainingPercent)}%`,
+                                          height: "100%",
+                                          background:
+                                            w.usedPercent >= currentLimit
+                                              ? "var(--warn)"
+                                              : w.remainingPercent > 30
+                                                ? "var(--ok)"
+                                                : "var(--danger)",
+                                        }}
+                                      />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <span className="muted" style={{ fontSize: 12 }}>尚無容量快照，請點「重抓容量」</span>
+                          )}
+                        </div>
+
+                        {/* 右：分配比例拉桿 + 即時換算台幣回饋 */}
+                        <div
+                          style={{
+                            padding: "12px 14px",
+                            borderRadius: 10,
+                            background: "var(--panel)",
+                            border: "1px solid var(--border)",
+                          }}
+                        >
+                          <div className="row" style={{ justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+                            <span>
+                              願意分配託管上限：<strong>{currentLimit}%</strong>
+                            </span>
+                            <span className="muted">為自己保留 {100 - currentLimit}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min={10}
+                            max={100}
+                            step={5}
+                            value={currentLimit}
+                            style={{ width: "100%" }}
+                            onChange={(e) => {
+                              const v = Number(e.target.value);
+                              setDraftLimits((prev) => ({ ...prev, [s.id]: v }));
+                            }}
+                            onMouseUp={() => {
+                              const v = draftLimits[s.id];
+                              if (v !== undefined && v !== s.shareLimitPct) {
+                                void patch(s.id, { shareLimitPct: v });
+                              }
+                            }}
+                            onTouchEnd={() => {
+                              const v = draftLimits[s.id];
+                              if (v !== undefined && v !== s.shareLimitPct) {
+                                void patch(s.id, { shareLimitPct: v });
+                              }
+                            }}
+                          />
+                          <div
+                            style={{
+                              marginTop: 8,
+                              paddingTop: 8,
+                              borderTop: "1px solid var(--border)",
+                              display: "flex",
+                              justifyContent: "space-between",
+                              flexWrap: "wrap",
+                              gap: 8,
+                              fontSize: 13,
+                            }}
+                          >
+                            <div>
+                              本週剩餘可轉化（{est.allocatablePct.toFixed(0)}%）：{" "}
+                              <strong style={{ color: "var(--ok)", fontSize: 15 }}>
+                                約 NT$ {est.estWeeklyRemNtd.toLocaleString("zh-TW")}
+                              </strong>
+                            </div>
+                            <div className="muted">
+                              滿載月估：<strong style={{ color: "var(--text)" }}>NT$ {est.estMonthlyCapNtd.toLocaleString("zh-TW")} / 月</strong>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      (() => {
+                        const cap = draftCaps[s.id] ?? s.monthlyCapPoints ?? 2000;
+                        const remPts = Math.max(0, cap - s.usedThisMonthPoints);
+                        const estMonthNtd = Math.round(cap * NTD_PER_BUYER_POINT_AT_80_PCT);
+                        const estRemNtd = Math.round(remPts * NTD_PER_BUYER_POINT_AT_80_PCT);
+                        return (
+                          <div
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+                              gap: 16,
+                              marginTop: 14,
+                              alignItems: "center",
+                            }}
+                          >
+                            <div>
+                              <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+                                {s.provider === "anthropic" ? "◈ Claude 模組分配額度使用狀況：" : "API 模組分配額度使用狀況："}
+                              </div>
+                              <div className="row" style={{ justifyContent: "space-between", fontSize: 12 }}>
+                                <span>本月已調度 {s.usedThisMonthPoints.toFixed(1)} 額度</span>
+                                <span>
+                                  剩餘可分配 <strong>{remPts.toFixed(0)}</strong> / {cap.toLocaleString("zh-TW")} 額度
+                                </span>
+                              </div>
+                              <div
+                                style={{
+                                  height: 7,
+                                  background: "var(--bg)",
+                                  borderRadius: 4,
+                                  overflow: "hidden",
+                                  marginTop: 4,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    width: `${Math.min(100, (100 * remPts) / Math.max(1, cap))}%`,
+                                    height: "100%",
+                                    background: remPts > cap * 0.2 ? "var(--ok)" : "var(--warn)",
+                                  }}
+                                />
+                              </div>
+                            </div>
+
+                            {!s.fromEnv && (
+                              <div
+                                style={{
+                                  padding: "12px 14px",
+                                  borderRadius: 10,
+                                  background: "var(--panel)",
+                                  border: "1px solid var(--border)",
+                                }}
+                              >
+                                <div className="row" style={{ justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
+                                  <span>
+                                    每月分配額度上限：<strong>{cap.toLocaleString("zh-TW")} 額度</strong>
+                                  </span>
+                                </div>
+                                <input
+                                  type="range"
+                                  min={500}
+                                  max={10000}
+                                  step={500}
+                                  value={cap}
+                                  style={{ width: "100%" }}
+                                  onChange={(e) => {
+                                    const v = Number(e.target.value);
+                                    setDraftCaps((prev) => ({ ...prev, [s.id]: v }));
+                                  }}
+                                  onMouseUp={() => {
+                                    const v = draftCaps[s.id];
+                                    if (v !== undefined && v !== s.monthlyCapPoints) {
+                                      void patch(s.id, { monthlyCapPoints: v });
+                                    }
+                                  }}
+                                  onTouchEnd={() => {
+                                    const v = draftCaps[s.id];
+                                    if (v !== undefined && v !== s.monthlyCapPoints) {
+                                      void patch(s.id, { monthlyCapPoints: v });
+                                    }
+                                  }}
+                                />
+                                <div
+                                  style={{
+                                    marginTop: 8,
+                                    paddingTop: 8,
+                                    borderTop: "1px solid var(--border)",
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    flexWrap: "wrap",
+                                    gap: 8,
+                                    fontSize: 13,
+                                  }}
+                                >
+                                  <div>
+                                    剩餘可轉化分潤：{" "}
+                                    <strong style={{ color: "var(--ok)", fontSize: 15 }}>
+                                      約 NT$ {estRemNtd.toLocaleString("zh-TW")}
+                                    </strong>
+                                  </div>
+                                  <div className="muted">
+                                    滿載月估：<strong style={{ color: "var(--text)" }}>NT$ {estMonthNtd.toLocaleString("zh-TW")} / 月</strong>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()
+                    )}
+                  </div>
+                );
+              })}
+          </div>
+        )}
+      </div>
+
+      {/* === 3. 串接其他模型模組（Gemini / ChatGPT / Grok / API Key） === */}
+      <div className="card" style={{ borderColor: "var(--ok)" }}>
+        <h3 style={{ marginTop: 0, color: "var(--ok)" }}>
+          步驟 B：繼續串接其他 AI 模型模組（擴大算力池與 80% 創作者分潤）
+        </h3>
+        <p className="muted" style={{ marginTop: 4, lineHeight: 1.6 }}>
+          您可以同時串接 <strong>Google Gemini + OpenAI ChatGPT + xAI Grok</strong>，或綁定第 2 個同廠牌帳號無縫接力。當第 1 個節點達到您設定的分配上限時，智慧路由會自動切換下一個節點繼續賺取分潤。
         </p>
 
         <div className="form-grid" style={{ marginBottom: 14 }}>
           <label>
-            帳號別名（選填，方便分辨第 1 / 第 2 個帳號）
+            新節點別名（選填，方便分辨多組帳號）
             <input
               value={subLabel}
-              placeholder="例如：我的 Gemini AI Pro #1"
+              placeholder="例如：我的 ChatGPT Plus #1 或 Grok 節點"
               onChange={(e) => setSubLabel(e.target.value)}
             />
           </label>
           <label>
-            願意釋出的最大容量比例：{shareLimitPct}%（保留 {100 - shareLimitPct}% 給自己）
+            預設託管分配比例：{shareLimitPct}%（滿載月估回饋約 NT$ {newNodeEstMonthlyNtd.toLocaleString("zh-TW")}）
             <input
               type="range"
               min={20}
@@ -484,21 +859,133 @@ export default function SourcesPage() {
           </label>
         </div>
 
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(215px, 1fr))",
+            gap: 10,
+            marginBottom: 12,
+          }}
+        >
+          <button
+            type="button"
+            className="primary"
+            style={{ padding: "12px 14px", textAlign: "left" }}
+            onClick={() => void startBrowserOAuth("start_gemini")}
+          >
+            <div style={{ fontWeight: 700 }}>✦ Google Gemini 模組（AI Pro / Ultra）</div>
+            <div style={{ fontSize: 12, opacity: 0.9, marginTop: 3 }}>一鍵 Google OAuth 授權 · 讀取剩餘 %</div>
+          </button>
+
+          <button
+            type="button"
+            className="primary"
+            style={{ padding: "12px 14px", textAlign: "left" }}
+            onClick={() => void startChatGptDevice()}
+          >
+            <div style={{ fontWeight: 700 }}>◎ OpenAI ChatGPT 模組（Plus / Pro）</div>
+            <div style={{ fontSize: 12, opacity: 0.9, marginTop: 3 }}>網頁／手機裝置碼 OAuth · 自動輪詢</div>
+          </button>
+
+          <button
+            type="button"
+            className="primary"
+            style={{ padding: "12px 14px", textAlign: "left" }}
+            onClick={() => void startGrokDevice()}
+          >
+            <div style={{ fontWeight: 700 }}>𝕏 xAI Grok 模組（SuperGrok）</div>
+            <div style={{ fontSize: 12, opacity: 0.9, marginTop: 3 }}>網頁／手機裝置碼 OAuth · 自動輪詢</div>
+          </button>
+
+          <button
+            type="button"
+            className="primary"
+            style={{ padding: "12px 14px", textAlign: "left" }}
+            onClick={() => setClaudeQuickOpen((v) => !v)}
+          >
+            <div style={{ fontWeight: 700 }}>◈ Anthropic Claude 模組（Sonnet / Opus）</div>
+            <div style={{ fontSize: 12, opacity: 0.9, marginTop: 3 }}>Google OAuth 同步 Claude 池 或 API Key</div>
+          </button>
+        </div>
+
+        {claudeQuickOpen && (
+          <div className="card" style={{ marginTop: 10, marginBottom: 12, background: "var(--panel-2)" }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>◈ 串接 Anthropic Claude 分配額度</div>
+            <p className="muted" style={{ margin: "0 0 10px", fontSize: 12, lineHeight: 1.5 }}>
+              方式 A：若您的 Claude 額度來自 Google AI Pro / Ultra（Antigravity 訂閱內含獨立 Claude 5.5 池），直接點{" "}
+              <button type="button" onClick={() => void startBrowserOAuth("start_gemini")}>
+                Google OAuth 同步 Claude 池
+              </button>{" "}
+              即可自動帶入剩餘 %。
+              <br />
+              方式 B：直接綁定 Anthropic 官方 API Key 並設定每月願意分配的額度上限：
+            </p>
+            <div className="form-grid">
+              <label>
+                Anthropic Claude API Key
+                <input
+                  type="password"
+                  placeholder="sk-ant-..."
+                  value={claudeQuickKey}
+                  onChange={(e) => setClaudeQuickKey(e.target.value)}
+                />
+              </label>
+              <label>
+                每月分配額度上限：{claudeQuickCap.toLocaleString("zh-TW")} 額度（預估分潤約 NT${" "}
+                {Math.round(claudeQuickCap * NTD_PER_BUYER_POINT_AT_80_PCT).toLocaleString("zh-TW")} / 月）
+                <input
+                  type="range"
+                  min={500}
+                  max={10000}
+                  step={500}
+                  value={claudeQuickCap}
+                  onChange={(e) => setClaudeQuickCap(Number(e.target.value))}
+                />
+              </label>
+              <div className="full">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={savingKey || !claudeQuickKey.trim()}
+                  onClick={async () => {
+                    setSavingKey(true);
+                    setOauthMsg(null);
+                    const res = await fetch("/api/sources", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      body: JSON.stringify({
+                        label: subLabel.trim() || "Claude 算力節點",
+                        kind: "supplier",
+                        provider: "anthropic",
+                        apiKey: claudeQuickKey.trim(),
+                        monthlyCapPoints: claudeQuickCap,
+                      }),
+                    });
+                    const data = await res.json();
+                    setSavingKey(false);
+                    if (!res.ok) {
+                      setOauthMsg({ ok: false, text: data.error || "Claude Key 驗證失敗" });
+                      return;
+                    }
+                    setClaudeQuickKey("");
+                    setClaudeQuickOpen(false);
+                    setOauthMsg({ ok: true, text: "✓ Claude 算力模組已加入上方分配額度清單！" });
+                    void refresh();
+                  }}
+                >
+                  {savingKey ? "驗證中…" : "驗證並加入 Claude 分配額度"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="row" style={{ flexWrap: "wrap", gap: 10 }}>
-          <button className="primary" onClick={() => startBrowserOAuth("start_gemini")}>
-            🔗 連結 Google Gemini AI Pro / Ultra（OAuth 登入）
-          </button>
-          <button className="primary" onClick={startChatGptDevice}>
-            📱 連結 ChatGPT Plus / Pro（手機 / 網頁裝置碼，最推薦）
-          </button>
-          <button onClick={() => startBrowserOAuth("start_chatgpt_browser")}>
-            💻 連結 ChatGPT Plus / Pro（本機瀏覽器 OAuth）
-          </button>
-          <button className="primary" onClick={startGrokDevice}>
-            📱 連結 Grok／SuperGrok（手機 / 網頁裝置碼）
+          <button type="button" onClick={() => void startBrowserOAuth("start_chatgpt_browser")}>
+            💻 ChatGPT 本機瀏覽器 OAuth（備選）
           </button>
           {localCli.map((c) => (
-            <button key={c.path} onClick={() => importCli(c.provider)}>
+            <button type="button" key={c.path} onClick={() => void importCli(c.provider)}>
               ⚡ 一鍵匯入本機已登入{" "}
               {c.provider === "gemini" ? "Gemini" : c.provider === "xai" ? "Grok" : "ChatGPT"} ({c.hint})
             </button>
@@ -507,43 +994,40 @@ export default function SourcesPage() {
 
         {deviceFlow && (
           <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
-            <div>
-              請在開啟的 {deviceFlow.kind === "grok" ? "xAI／Grok" : "OpenAI"} 官方頁面（或用手機打開{" "}
+            <div style={{ fontSize: 13 }}>
+              請在開啟的 {deviceFlow.kind === "grok" ? "xAI／Grok" : "OpenAI"} 官方授權頁（
               <a href={deviceFlow.verifyUrl} target="_blank" rel="noreferrer">
                 {deviceFlow.verifyUrl}
               </a>
-              ）輸入以下裝置碼（代碼在本頁，不是終端機）：
+              ）輸入以下驗證碼：
             </div>
             <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: 3, margin: "10px 0", color: "var(--ok)" }}>
               {deviceFlow.userCode}
             </div>
-            <div className="muted">
-              輸入並按允許後，這裡會自動偵測完成並讀取你的{" "}
-              {deviceFlow.kind === "grok" ? "Grok" : "ChatGPT"} 訂閱剩餘容量…
+            <div className="muted" style={{ fontSize: 12 }}>
+              在官方頁面按下允許後，本頁將自動偵測完成並加入上方分配清單…
             </div>
           </div>
         )}
 
         {activeAuthUrl && (
           <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
-            <div style={{ marginBottom: 8 }}>
-              <strong>本機登入：</strong>在彈出視窗登入同意後，本機監聽器會自動完成綁定。
-              <br />
-              <strong>手機或跨裝置登入：</strong>若在手機打開{" "}
+            <div style={{ marginBottom: 8, fontSize: 13, lineHeight: 1.6 }}>
+              在新開的{" "}
               <a href={activeAuthUrl} target="_blank" rel="noreferrer">
-                授權連結
+                官方 OAuth 視窗
               </a>{" "}
-              登入後跳轉到 <code>localhost</code> 顯示無法連線，直接複製網址列整串 <code>http://localhost...</code> 貼在下方即可：
+              完成同意後，若於雲端環境網址列跳轉至 <code>http://localhost...</code>，請複製整串網址貼於下方完成串接：
             </div>
-            <div className="row">
+            <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <input
-                style={{ flex: 1 }}
+                style={{ flex: 1, minWidth: 220 }}
                 value={callbackInput}
-                placeholder="貼上 http://localhost:51121/oauth-callback?code=... 或 code"
+                placeholder="貼上 http://localhost:51121/oauth-callback?code=... 整串網址"
                 onChange={(e) => setCallbackInput(e.target.value)}
               />
-              <button className="primary" onClick={submitCallbackUrl}>
-                完成綁定
+              <button type="button" className="primary" onClick={() => void submitCallbackUrl()}>
+                完成串接
               </button>
             </div>
           </div>
@@ -551,11 +1035,11 @@ export default function SourcesPage() {
 
         <details style={{ marginTop: 12 }}>
           <summary className="muted" style={{ cursor: "pointer", fontSize: 13 }}>
-            進階：直接貼上已有 OAuth Access / Refresh Token 綁定
+            進階：直接貼上 OAuth Access / Refresh Token 或串接傳統 API Key
           </summary>
           <div className="form-grid" style={{ marginTop: 10 }}>
             <label>
-              訂閱平台
+              OAuth 平台
               <select
                 value={rawProvider}
                 onChange={(e) => setRawProvider(e.target.value as "gemini" | "openai" | "xai")}
@@ -566,7 +1050,7 @@ export default function SourcesPage() {
               </select>
             </label>
             <label>
-              {rawProvider === "gemini" ? "Project ID（選填，留空自動取得）" : "ChatGPT Account ID（選填）"}
+              {rawProvider === "gemini" ? "Project ID（選填）" : "ChatGPT Account ID（選填）"}
               <input value={rawExtraId} onChange={(e) => setRawExtraId(e.target.value)} />
             </label>
             <label>
@@ -574,256 +1058,136 @@ export default function SourcesPage() {
               <input type="password" value={rawAccess} onChange={(e) => setRawAccess(e.target.value)} />
             </label>
             <label>
-              OAuth Refresh Token（選填，用於自動續期）
+              OAuth Refresh Token（選填，自動續期）
               <input type="password" value={rawRefresh} onChange={(e) => setRawRefresh(e.target.value)} />
             </label>
             <div className="full">
-              <button onClick={submitRawToken} disabled={!rawAccess.trim()}>
-                加入訂閱 Token 並讀取容量
+              <button type="button" onClick={() => void submitRawToken()} disabled={!rawAccess.trim()}>
+                加入 OAuth Token 節點
               </button>
+            </div>
+          </div>
+
+          <hr style={{ borderColor: "var(--border)", margin: "16px 0" }} />
+
+          <div className="form-grid">
+            <label>
+              API Key 類型
+              <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as "supplier" | "platform" })}>
+                <option value="supplier">夥伴託管 API Key</option>
+                <option value="platform">平台保底 API Key</option>
+              </select>
+            </label>
+            <label>
+              模型商
+              <select
+                value={form.provider}
+                onChange={(e) =>
+                  setForm({
+                    ...form,
+                    provider: e.target.value as "gemini" | "openai" | "anthropic" | "xai" | "openrouter",
+                  })
+                }
+              >
+                <option value="gemini">Google Gemini API</option>
+                <option value="openai">OpenAI API</option>
+                <option value="anthropic">Anthropic Claude API</option>
+                <option value="xai">xAI Grok API</option>
+                <option value="openrouter">OpenRouter（全模型）</option>
+              </select>
+            </label>
+            <label>
+              節點名稱
+              <input value={form.label} placeholder="例如：Anthropic Claude 備援節點" onChange={(e) => setForm({ ...form, label: e.target.value })} />
+            </label>
+            <label>
+              API Key
+              <input
+                type="password"
+                value={form.apiKey}
+                placeholder="AIza... 或 sk-..."
+                autoComplete="off"
+                onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
+              />
+            </label>
+            <div className="full row">
+              <button type="button" onClick={() => void addApiKey()} disabled={savingKey || !form.apiKey.trim()}>
+                {savingKey ? "驗證中…" : "驗證並加入 API Key"}
+              </button>
+              {keyMsg && <span className={keyMsg.ok ? "" : "error"}>{keyMsg.text}</span>}
             </div>
           </div>
         </details>
 
         {oauthMsg && (
-          <div style={{ marginTop: 10, color: oauthMsg.ok ? "var(--ok)" : "var(--danger)" }}>{oauthMsg.text}</div>
+          <div style={{ marginTop: 10, fontWeight: 600, color: oauthMsg.ok ? "var(--ok)" : "var(--danger)" }}>
+            {oauthMsg.text}
+          </div>
         )}
       </div>
 
-      <div className="card" style={{ borderColor: "var(--ok)" }}>
-        <h2 style={{ marginTop: 0 }}>買家任務請用 Node Agent</h2>
-        <p className="muted" style={{ marginTop: 0, lineHeight: 1.6 }}>
-          舊版「平台領 Token 再代發」已退役。供給者在本機執行 Agent（Long Poll），平台只派
-          model＋messages；OAuth／API Key 留在供給者電腦。
-        </p>
-        <p style={{ marginBottom: 0 }}>
-          <Link href="/nodes">前往 Node Agent 狀態頁 →</Link>
-          <span className="muted">　指令：</span>
-          <code>npm run node-agent -- register</code>
-          <span className="muted"> → </span>
-          <code>npm run node-agent -- start</code>
-        </p>
-      </div>
-
-      {/* === 目前貨源與即時訂閱剩餘容量表 === */}
-      <div className="card">
-        <h3 style={{ marginTop: 0 }}>目前貨源與訂閱剩餘容量（依實際派發順序）</h3>
-        <p className="muted" style={{ marginTop: 0, fontSize: 13, lineHeight: 1.5 }}>
-          以下數字只讀 Antigravity Hub（daily-cloudcode-pa），對齊官方 <strong>Models &amp; Usage</strong>：
-          <strong>Gemini 總額</strong>、<strong>Gemini 4 Argon</strong>、以及
-          <strong>Claude and GPT models</strong>（顯示為 Claude／GPT 第三方）。
-          不再 fallback 到 Gemini CLI 池，避免跟官方 95%／96% 脫鉤。點「立即同步」可重抓。
-        </p>
-        <table>
-          <thead>
-            <tr>
-              <th>名稱 / 帳號</th>
-              <th>模式</th>
-              <th>模型商</th>
-              <th>Antigravity 訂閱即時剩餘（對齊官方 Models &amp; Usage）</th>
-              <th>釋出上限</th>
-              <th>優先序</th>
-              <th>狀態</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {[...sources]
-              .sort((a, b) => {
-                if (a.kind !== b.kind) return a.kind === "supplier" ? -1 : 1;
-                if (a.authType !== b.authType) return a.authType === "oauth_sub" ? -1 : 1;
-                return a.priority - b.priority;
-              })
-              .map((s) => (
-                <tr key={s.id}>
-                  <td>
-                    <div>{s.label}</div>
-                    <div className="muted" style={{ fontSize: 12 }}>
-                      {s.keyHint}
-                    </div>
-                  </td>
-                  <td>
-                    <span className={`tag ${s.kind}`}>
-                      {s.authType === "oauth_sub"
-                        ? "供給者 OAuth 訂閱"
-                        : s.kind === "supplier"
-                          ? "供給者 API Key"
-                          : "平台直連 API"}
-                    </span>
-                  </td>
-                  <td>{PROVIDER_LABEL[s.provider] ?? s.provider}</td>
-                  <td style={{ minWidth: 250 }}>
-                    {s.authType === "oauth_sub" && s.quota ? (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                        {s.quota.windows.map((w, i) => (
-                          <div key={i}>
-                            <div className="row" style={{ justifyContent: "space-between", fontSize: 12 }}>
-                              <span>{w.label}</span>
-                              <span>
-                                剩餘{" "}
-                                <strong>{w.uiRemainingPercent ?? Math.round(w.remainingPercent)}%</strong>
-                                <span className="muted">（精確 {w.remainingPercent.toFixed(2)}%，已用 {w.usedPercent.toFixed(2)}%）</span>
-                              </span>
-                            </div>
-                            <div
-                              style={{
-                                height: 7,
-                                background: "var(--panel-2)",
-                                borderRadius: 4,
-                                overflow: "hidden",
-                                marginTop: 2,
-                              }}
-                            >
-                              <div
-                                style={{
-                                  width: `${Math.min(100, w.remainingPercent)}%`,
-                                  height: "100%",
-                                  background:
-                                    w.usedPercent >= s.shareLimitPct
-                                      ? "var(--warn)"
-                                      : w.remainingPercent > 30
-                                        ? "var(--ok)"
-                                        : "var(--danger)",
-                                }}
-                              />
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <span className="muted">
-                        本月已用 {s.usedThisMonthPoints.toFixed(2)} / {s.monthlyCapPoints ?? "不限"} 點
-                      </span>
-                    )}
-                  </td>
-                  <td>
-                    {s.authType === "oauth_sub" ? (
-                      <select
-                        value={s.shareLimitPct}
-                        onChange={(e) => patch(s.id, { shareLimitPct: Number(e.target.value) })}
-                      >
-                        {[20, 40, 60, 80, 90, 100].map((pct) => (
-                          <option key={pct} value={pct}>
-                            最多用 {pct}%
-                          </option>
-                        ))}
-                      </select>
-                    ) : (
-                      <span className="muted">—</span>
-                    )}
-                  </td>
-                  <td>
-                    {s.fromEnv ? (
-                      s.priority
-                    ) : (
-                      <input
-                        style={{ width: 64 }}
-                        defaultValue={s.priority}
-                        onBlur={(e) =>
-                          Number(e.target.value) !== s.priority && patch(s.id, { priority: Number(e.target.value) })
-                        }
-                      />
-                    )}
-                  </td>
-                  <td>
-                    {!s.enabled ? (
-                      <span className="muted">已暫停</span>
-                    ) : s.cooldownUntil ? (
-                      <span className="notice" title={s.lastError ?? ""}>
-                        冷卻中（{Math.ceil((s.cooldownUntil - Date.now()) / 1000)} 秒）
-                      </span>
-                    ) : s.authType === "oauth_sub" && s.quota && s.quota.primaryUsedPercent >= s.shareLimitPct ? (
-                      <span className="notice">已達釋出上限（保護自用額度中）</span>
-                    ) : (
-                      <span style={{ color: "var(--ok)" }}>可用</span>
-                    )}
-                    {s.lastError && !s.cooldownUntil && (
-                      <div className="muted" style={{ fontSize: 12 }} title={s.lastError}>
-                        上次錯誤：{s.lastError.slice(0, 36)}
-                      </div>
-                    )}
-                  </td>
-                  <td>
-                    {s.fromEnv ? (
-                      <span className="muted" style={{ fontSize: 12 }}>
-                        來自環境變數
-                      </span>
-                    ) : (
-                      <div className="row">
-                        {s.authType === "oauth_sub" && (
-                          <button onClick={() => syncQuotas(s.id)} disabled={syncing}>
-                            同步
-                          </button>
-                        )}
-                        <button onClick={() => patch(s.id, { enabled: !s.enabled })}>{s.enabled ? "暫停" : "啟用"}</button>
-                        <button onClick={() => remove(s.id)}>移除</button>
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            {sources.length === 0 && (
-              <tr>
-                <td colSpan={8} className="muted">
-                  還沒有任何貨源，請從上方連結你的 Gemini AI Pro 或 ChatGPT Plus/Pro 訂閱帳號
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {/* === 備援：平台直連大廠 API Key === */}
-      <div className="card">
-        <h3 style={{ marginTop: 0 }}>新增大廠 API Key（當所有供給者訂閱額度滿載時的保底通道）</h3>
-        <div className="form-grid">
-          <label>
-            類型
-            <select value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as "supplier" | "platform" })}>
-              <option value="platform">平台直連保底</option>
-              <option value="supplier">供給者 API Key</option>
-            </select>
-          </label>
-          <label>
-            模型商
-            <select
-              value={form.provider}
-              onChange={(e) =>
-                setForm({
-                  ...form,
-                  provider: e.target.value as "gemini" | "openai" | "anthropic" | "xai" | "openrouter",
-                })
-              }
-            >
-              <option value="gemini">Google Gemini API</option>
-              <option value="openai">OpenAI API</option>
-              <option value="anthropic">Anthropic API</option>
-              <option value="xai">xAI Grok API</option>
-              <option value="openrouter">OpenRouter（全模型備援）</option>
-            </select>
-          </label>
-          <label>
-            名稱
-            <input value={form.label} placeholder="例如：平台保底 Gemini Key" onChange={(e) => setForm({ ...form, label: e.target.value })} />
-          </label>
-          <label>
-            API Key
-            <input
-              type="password"
-              value={form.apiKey}
-              placeholder="AIza... 或 sk-..."
-              autoComplete="off"
-              onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
-            />
-          </label>
-          <div className="full row">
-            <button onClick={addApiKey} disabled={savingKey || !form.apiKey.trim()}>
-              {savingKey ? "驗證中…" : "驗證並加入 API Key"}
-            </button>
-            {keyMsg && <span className={keyMsg.ok ? "" : "error"}>{keyMsg.text}</span>}
-          </div>
+      {/* === 4. 每筆任務透明扣量與分潤對帳明細 === */}
+      {ledgerData.length > 0 && (
+        <div className="card" style={{ borderColor: "var(--warn)" }}>
+          <h3 style={{ marginTop: 0 }}>節點任務與 80% 創作者分潤對帳明細（近 7 天）</h3>
+          <p className="muted" style={{ marginTop: 0, fontSize: 13, lineHeight: 1.6 }}>
+            每筆工作流任務前後皆讀取官方即時剩餘容量，透明記錄實際使用比例與對應之 <strong>80% 創作者上架分潤</strong>。
+          </p>
+          {ledgerData.map((s) => {
+            const nodeNtd = Math.round((s.chargedPoints ?? 0) * NTD_PER_BUYER_POINT_AT_80_PCT);
+            return (
+              <div key={s.sourceId} style={{ marginBottom: 16 }}>
+                <div className="row" style={{ justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
+                  <strong>{s.label}</strong>
+                  <span>
+                    近 7 天調度 <strong style={{ color: "var(--warn)" }}>{s.totalUsedPct.toFixed(3)}%</strong>
+                    ・{s.messages} 筆任務・累計 80% 分潤{" "}
+                    <strong style={{ color: "var(--ok)", fontSize: 16 }}>NT$ {nodeNtd.toLocaleString("zh-TW")}</strong>
+                    <span className="muted">（對應 {s.chargedPoints.toFixed(2)} 額度）</span>
+                  </span>
+                </div>
+                {s.rows.length > 0 && (
+                  <table style={{ marginTop: 8, fontSize: 12 }}>
+                    <thead>
+                      <tr>
+                        <th>時間</th>
+                        <th>執行模型</th>
+                        <th>容量池</th>
+                        <th>本筆耗用容量</th>
+                        <th>80% 創作者分潤</th>
+                        <th>Token (進/出)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {s.rows.slice(0, 20).map((r, i) => {
+                        const rowNtd = (r.chargedPoints ?? 0) * NTD_PER_BUYER_POINT_AT_80_PCT;
+                        return (
+                          <tr key={i}>
+                            <td className="muted">{new Date(r.createdAt).toLocaleTimeString("zh-TW")}</td>
+                            <td>
+                              <code>{r.upstreamModelVersion || r.model}</code>
+                            </td>
+                            <td>{r.quotaLabel ?? "—"}</td>
+                            <td style={{ color: "var(--warn)", fontWeight: 600 }}>
+                              {r.quotaUsedPct != null ? `-${r.quotaUsedPct.toFixed(3)}%` : "—"}
+                            </td>
+                            <td style={{ color: "var(--ok)", fontWeight: 600 }}>
+                              +NT$ {rowNtd.toFixed(2)}
+                            </td>
+                            <td className="muted">
+                              {r.inputTokens ?? 0} / {r.outputTokens ?? 0}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            );
+          })}
         </div>
-      </div>
+      )}
     </div>
   );
 }

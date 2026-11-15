@@ -1,81 +1,55 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
-
-interface QuotaWindow {
-  label: string;
-  usedPercent: number;
-  remainingPercent: number;
-  uiRemainingPercent?: number;
-  resetAt: string | null;
-}
-
-interface SubscriptionQuota {
-  planType: string;
-  email?: string;
-  windows: QuotaWindow[];
-  primaryRemainingPercent: number;
-  fetchedAt: number;
-}
-
-interface SourceStatus {
-  id: string;
-  label: string;
-  kind: "supplier" | "platform";
-  provider: "gemini" | "openai" | "anthropic" | "xai" | "openrouter";
-  authType: "oauth_sub" | "api_key";
-  shareLimitPct: number;
-  quota: SubscriptionQuota | null;
-  enabled: boolean;
-}
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 
 const TERMS_NAME = "《AI 工作流託管與開源評測合作條款》";
 
 const FRAMEWORK_ROWS: { role: string; value: string; note: string }[] = [
   {
-    role: "夥伴身分",
+    role: "供給者身分",
     value: "算力節點夥伴（Node Partner）或 AI 工作流創作者",
-    note: "以創作者與節點託管夥伴身分參與平台，自訂安全托管比例。",
+    note: "以創作者與節點託管夥伴身分參與平台，完成授權後於 /sources 自訂分配用量。",
   },
   {
-    role: "夥伴分潤（80% 回饋）",
+    role: "供給者分潤（80% 回饋）",
     value: "AI 工作流／Agent 創作者上架分潤 或 開源模型評測獎勵金",
-    note: "依節點實際完成之智慧路由任務結算，享有 80% 創作者回饋。",
+    note: "依節點實際完成之智慧路由任務結算，回饋比例 80%，控制台即時換算回饋金額。",
   },
   {
-    role: "買家方案（199 / 299 / 399）",
+    role: "買家付費（199 / 299 / 399）",
     value: "雲端工作台軟體服務費（SaaS 平台技術服務費）",
     note: "使用者開通雲端工作台軟體服務之平台技術服務費。",
   },
   {
-    role: "調度機制",
+    role: "額度調度行為",
     value: "多節點智慧路由託管與負載平衡測試",
-    note: "於多個已授權節點間自動進行容量保護、智慧路由與負載平衡測試。",
+    note: "於 Gemini、Claude、ChatGPT、Grok 多節點間自動進行容量保護與負載平衡測試。",
   },
   {
-    role: "平台條款",
+    role: "平台條款名稱",
     value: TERMS_NAME,
-    note: "授權接入前請詳閱；點擊右側按鈕可展開條款重點摘要。",
+    note: "授權接入前請勾選同意；可點擊展開閱讀條款重點摘要。",
   },
 ];
 
 const TERMS_SUMMARY: { title: string; body: string }[] = [
   {
     title: "一、合作定位",
-    body: "夥伴以 AI 工作流創作者與算力節點夥伴身分，將具合法授權之模型工作流接入平台節點，參與多節點智慧路由託管與負載平衡測試。",
+    body: "夥伴以 AI 工作流創作者與算力節點夥伴身分，選擇模型模組完成授權接入，參與多節點智慧路由託管與負載平衡測試。",
   },
   {
-    title: "二、安全托管門檻",
-    body: "夥伴可自訂願意託管之容量比例（預設 80%，保留 20% 自用）；達到門檻時系統自動停止派發任務，保障夥伴自用權益。",
+    title: "二、自訂分配比例與容量保護",
+    body: "完成模組授權後自動進入節點控制台（/sources），可針對 Gemini、Claude、ChatGPT、Grok 設定願意分配之容量上限，達上限自動停止派發。",
   },
   {
-    title: "三、80% 創作者上架分潤",
-    body: "依節點實際完成之託管評測與工作流任務，結算 AI 工作流／Agent 創作者上架分潤（80% 回饋）或開源模型評測獎勵金。",
+    title: "三、80% 創作者上架分潤與試算",
+    body: "依節點實際完成之託管任務，結算 AI 工作流／Agent 創作者上架分潤（80% 回饋）或開源模型評測獎勵金，並於控制台即時換算新台幣回饋。",
   },
   {
-    title: "四、隨時啟停與撤銷",
-    body: "夥伴可隨時於節點清單一鍵暫停派發或移除授權，立即生效。",
+    title: "四、多模型擴充與隨時撤銷",
+    body: "進入控制台後可隨時增綁其他模型模組，亦可一鍵暫停或移除授權。",
   },
 ];
 
@@ -83,27 +57,31 @@ const VALUE_CARDS: { icon: string; title: string; body: string }[] = [
   {
     icon: "🛰️",
     title: "選模組即刻 OAuth 接入",
-    body: "無需註冊額外帳號密碼，直接選擇模型模組完成 Google OAuth 或官方裝置碼授權，系統即自動同步剩餘容量。",
+    body: "免註冊網站帳密，直接選擇 Gemini、ChatGPT、Grok 或 Claude 模組完成授權，完成後自動跳轉 /sources 控制台。",
   },
   {
-    icon: "🛡️",
-    title: "多節點智慧路由託管",
-    body: "自訂安全託管上限（如釋出 80%、保留 20%），參與多節點智慧路由託管與負載平衡測試，達上限自動保護停派。",
+    icon: "🎛️",
+    title: "自訂分配用量＆換算回饋",
+    body: "在 /sources 自由拉動 Gemini、Claude、ChatGPT、Grok 的分配比例，即時換算可領回多少 80% 創作者分潤金額。",
   },
   {
-    icon: "💰",
-    title: "80% 創作者上架分潤",
-    body: "依實際完成之工作流任務，領取 AI 工作流／Agent 創作者上架分潤（80% 回饋）或開源模型評測獎勵金。",
+    icon: "🔌",
+    title: "四大模型池智慧接力",
+    body: "可同時串接多組模型節點，參與多節點智慧路由託管與負載平衡測試，單一池達上限自動無縫切換。",
   },
 ];
 
-type ModuleKind = "gemini" | "chatgpt" | "grok";
+type ModuleKind = "gemini" | "chatgpt" | "grok" | "claude";
 
 export default function VendorPage() {
+  const router = useRouter();
   const [agreed, setAgreed] = useState(true);
   const [termsOpen, setTermsOpen] = useState(false);
 
   const [selectedModule, setSelectedModule] = useState<ModuleKind>("gemini");
+  const [claudeMode, setClaudeMode] = useState<"oauth_pool" | "api_key">("oauth_pool");
+  const [claudeKey, setClaudeKey] = useState("");
+  const [claudeCapPoints, setClaudeCapPoints] = useState(2000);
   const [subLabel, setSubLabel] = useState("");
   const [shareLimitPct, setShareLimitPct] = useState(80);
 
@@ -118,27 +96,37 @@ export default function VendorPage() {
   } | null>(null);
   const [busy, setBusy] = useState(false);
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const initialCountRef = useRef<number | null>(null);
 
-  const [sources, setSources] = useState<SourceStatus[]>([]);
-  const [syncing, setSyncing] = useState(false);
-
-  const refreshSources = useCallback(async () => {
-    try {
-      const res = await fetch("/api/sources", { cache: "no-store" });
-      if (res.ok) {
-        const list = (await res.json()) as SourceStatus[];
-        setSources(Array.isArray(list) ? list.filter((s) => s.authType === "oauth_sub") : []);
-      }
-    } catch {
-      // ignore
-    }
+  // 記錄初始節點數；本機監聽器自動完成 Google OAuth 時自動跳轉 /sources
+  useEffect(() => {
+    fetch("/api/sources", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((list) => {
+        if (Array.isArray(list)) {
+          initialCountRef.current = list.length;
+        }
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
-    void refreshSources();
-  }, [refreshSources]);
+    if (!activeAuthUrl) return;
+    const t = setInterval(async () => {
+      try {
+        const res = await fetch("/api/sources", { cache: "no-store" });
+        const list = await res.json();
+        if (Array.isArray(list) && initialCountRef.current !== null && list.length > initialCountRef.current) {
+          router.push("/sources");
+        }
+      } catch {
+        // ignore
+      }
+    }, 2500);
+    return () => clearInterval(t);
+  }, [activeAuthUrl, router]);
 
-  // 輪詢 ChatGPT / Grok 裝置碼狀態，授權成功立即自動啟用
+  // 輪詢 ChatGPT / Grok 裝置碼狀態，完成後自動跳轉 /sources
   useEffect(() => {
     if (!deviceFlow) return;
     const timer = setInterval(async () => {
@@ -156,10 +144,10 @@ export default function VendorPage() {
             ok: true,
             text:
               deviceFlow.kind === "grok"
-                ? "✓ Grok 模組 OAuth 連結成功！已自動讀取剩餘容量並加入智慧路由池"
-                : "✓ ChatGPT 模組 OAuth 連結成功！已自動讀取剩餘容量並加入智慧路由池",
+                ? "✓ Grok 模組 OAuth 授權完成！正在導向 /sources 設定分配用量…"
+                : "✓ ChatGPT 模組 OAuth 授權完成！正在導向 /sources 設定分配用量…",
           });
-          void refreshSources();
+          router.push("/sources");
         } else if (data.error) {
           setOauthMsg({ ok: false, text: data.error });
           setDeviceFlow(null);
@@ -169,9 +157,9 @@ export default function VendorPage() {
       }
     }, 3000);
     return () => clearInterval(timer);
-  }, [deviceFlow, refreshSources]);
+  }, [deviceFlow, router]);
 
-  async function startModuleOAuth() {
+  async function startModuleAuth() {
     if (!agreed) {
       setOauthMsg({ ok: false, text: `請先勾選同意${TERMS_NAME}` });
       return;
@@ -181,11 +169,13 @@ export default function VendorPage() {
     setActiveAuthUrl(null);
     setBusy(true);
     try {
-      if (selectedModule === "gemini") {
+      if (selectedModule === "gemini" || (selectedModule === "claude" && claudeMode === "oauth_pool")) {
+        const defaultLabel =
+          subLabel.trim() || (selectedModule === "claude" ? "Claude & Gemini 訂閱池" : "");
         const res = await fetch("/api/oauth", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ action: "start_gemini", label: subLabel, shareLimitPct }),
+          body: JSON.stringify({ action: "start_gemini", label: defaultLabel, shareLimitPct }),
         });
         const data = await res.json();
         if (!res.ok) {
@@ -195,6 +185,29 @@ export default function VendorPage() {
         setActiveOAuthState(data.state);
         setActiveAuthUrl(data.authUrl);
         window.open(data.authUrl, "_blank", "noopener,noreferrer");
+      } else if (selectedModule === "claude" && claudeMode === "api_key") {
+        if (!claudeKey.trim()) {
+          setOauthMsg({ ok: false, text: "請輸入 Anthropic Claude API Key（sk-ant-...）" });
+          return;
+        }
+        const res = await fetch("/api/sources", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            label: subLabel.trim() || "Claude 算力節點",
+            kind: "supplier",
+            provider: "anthropic",
+            apiKey: claudeKey.trim(),
+            monthlyCapPoints: claudeCapPoints,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setOauthMsg({ ok: false, text: data.error || "Claude API Key 驗證失敗" });
+          return;
+        }
+        setOauthMsg({ ok: true, text: "✓ Claude 算力節點接入成功！正在前往 /sources…" });
+        router.push("/sources");
       } else if (selectedModule === "chatgpt") {
         const res = await fetch("/api/oauth", {
           method: "POST",
@@ -203,7 +216,7 @@ export default function VendorPage() {
         });
         const data = await res.json();
         if (!res.ok) {
-          setOauthMsg({ ok: false, text: data.error || "啟動 ChatGPT OAuth 失敗" });
+          setOauthMsg({ ok: false, text: data.error || "啟動 ChatGPT 裝置碼授權失敗" });
           return;
         }
         setDeviceFlow({ kind: "chatgpt", state: data.state, userCode: data.userCode, verifyUrl: data.verifyUrl });
@@ -216,7 +229,7 @@ export default function VendorPage() {
         });
         const data = await res.json();
         if (!res.ok) {
-          setOauthMsg({ ok: false, text: data.error || "啟動 Grok OAuth 失敗" });
+          setOauthMsg({ ok: false, text: data.error || "啟動 Grok 裝置碼授權失敗" });
           return;
         }
         const verifyUrl = data.verifyUrlComplete || data.verifyUrl;
@@ -240,61 +253,47 @@ export default function VendorPage() {
           action: "complete_code",
           codeOrUrl: callbackInput.trim(),
           state: activeOAuthState ?? undefined,
-          label: subLabel,
+          label: subLabel.trim() || (selectedModule === "claude" ? "Claude & Gemini 訂閱池" : undefined),
           shareLimitPct,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setOauthMsg({ ok: false, text: data.error || "完成授權失敗" });
+        setOauthMsg({ ok: false, text: data.error || "授權驗證失敗，請確認貼上完整回呼網址" });
         return;
       }
-      setOauthMsg({ ok: true, text: "✓ Google OAuth 授權連結成功！已自動同步剩餘容量並投入多節點智慧路由" });
-      setCallbackInput("");
-      setActiveAuthUrl(null);
-      setSubLabel("");
-      await refreshSources();
+      setOauthMsg({ ok: true, text: "✓ Google OAuth 綁定完成並讀取剩餘 %！正在跳轉至 /sources…" });
+      router.push("/sources");
     } finally {
       setBusy(false);
     }
   }
 
-  async function syncAllQuotas() {
-    setSyncing(true);
-    try {
-      await fetch("/api/oauth", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "sync_quota" }),
-      });
-      await refreshSources();
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  async function toggleEnabled(s: SourceStatus) {
-    await fetch(`/api/sources/${s.id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ enabled: !s.enabled }),
-    });
-    void refreshSources();
-  }
+  const cardStyle = (active: boolean) => ({
+    textAlign: "left" as const,
+    padding: "15px 16px",
+    borderRadius: 12,
+    border: active ? "2px solid var(--accent)" : "1px solid var(--border)",
+    background: active ? "rgba(91, 140, 255, 0.14)" : "var(--panel-2)",
+    cursor: "pointer",
+    display: "flex",
+    flexDirection: "column" as const,
+    gap: 6,
+  });
 
   return (
     <div className="vendor-page">
       <header className="vendor-header">
         <div className="vendor-brand">
           <span className="vendor-badge">NODE PARTNER</span>
-          <strong>算力節點夥伴專區</strong>
+          <strong>算力節點夥伴入口</strong>
         </div>
         <div className="row" style={{ gap: 12 }}>
           <Link href="/sources" className="vendor-back">
-            進階節點明細 →
+            已綁定節點？直接進 /sources 控制台 →
           </Link>
           <Link href="/" className="vendor-back">
-            ← 返回雲端工作台（聊天首頁）
+            ← 雲端工作台（聊天首頁 /）
           </Link>
         </div>
       </header>
@@ -303,104 +302,137 @@ export default function VendorPage() {
         <section className="vendor-hero">
           <h1>成為算力節點夥伴・參與 AI 工作流創作者計畫</h1>
           <p className="vendor-lead">
-            選擇您要託管的 AI 模組並透過官方 <strong>OAuth 授權登入</strong>（免註冊網站帳號密碼），即可參與
-            <strong>多節點智慧路由託管與負載平衡測試</strong>，並領取
-            <strong> 80% AI 工作流／Agent 創作者上架分潤（開源模型評測獎勵金）</strong>。
+            選擇您要託管的 AI 模型模組並完成 <strong>OAuth 授權登入</strong>，系統即自動讀取剩餘容量並導向{" "}
+            <strong>/sources 控制台</strong>，讓您自由設定分配額度、即時換算{" "}
+            <strong>80% AI 工作流／Agent 創作者上架分潤（開源模型評測獎勵金）</strong>。
           </p>
         </section>
 
-        {/* === 核心：選模組 → 直接 Google / 官方 OAuth 授權接入 === */}
+        {/* === 核心：直接顯示模組選擇卡片 → OAuth 授權完成自動跳 /sources === */}
         <section className="card vendor-card vendor-auth" id="join" style={{ borderColor: "var(--ok)" }}>
-          <div className="vendor-card-head">
-            <div>
-              <h2 style={{ margin: 0 }}>步驟 1：選擇託管模組並進行 OAuth 授權</h2>
-              <p className="muted" style={{ margin: "4px 0 0", fontSize: 13 }}>
-                免填帳號密碼——選好模組後直接以 Google OAuth 或官方裝置碼登入，授權完成即刻同步可用容量。
-              </p>
-            </div>
-          </div>
+          <h2 style={{ marginTop: 0, marginBottom: 4 }}>選擇算力模組並啟動 OAuth 授權</h2>
+          <p className="muted" style={{ marginTop: 0, marginBottom: 14, fontSize: 13 }}>
+            免申請網站帳號密碼——點選下方任一模組完成官方授權後，立即跳轉至 <code>/sources</code> 設定分配用量與查看回饋金額換算。
+          </p>
 
-          {/* 模組選擇卡片 */}
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
               gap: 12,
-              margin: "16px 0",
+              marginBottom: 16,
             }}
           >
-            <button
-              type="button"
-              onClick={() => setSelectedModule("gemini")}
-              style={{
-                textAlign: "left",
-                padding: "14px 16px",
-                borderRadius: 12,
-                border: selectedModule === "gemini" ? "2px solid var(--accent)" : "1px solid var(--border)",
-                background: selectedModule === "gemini" ? "rgba(91, 140, 255, 0.14)" : "var(--panel-2)",
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
-                ✦ Google Gemini 模組 {selectedModule === "gemini" ? "（已選）" : ""}
+            {/* 1. Google Gemini */}
+            <button type="button" onClick={() => setSelectedModule("gemini")} style={cardStyle(selectedModule === "gemini")}>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>
+                ✦ Google Gemini 模組（AI Pro / Ultra）
               </div>
               <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
-                Gemini AI Pro / Ultra（含 Gemini、Claude、GPT-OSS 多模型池）· <strong>Google OAuth 直接登入</strong>
+                一鍵開啟 <strong>Google OAuth 授權</strong>（雲端跳轉完貼回網址列即自動綁定並讀取剩餘 %；本機自動監聽完成）
               </div>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setSelectedModule("chatgpt")}
-              style={{
-                textAlign: "left",
-                padding: "14px 16px",
-                borderRadius: 12,
-                border: selectedModule === "chatgpt" ? "2px solid var(--accent)" : "1px solid var(--border)",
-                background: selectedModule === "chatgpt" ? "rgba(91, 140, 255, 0.14)" : "var(--panel-2)",
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
-                ◎ OpenAI ChatGPT 模組 {selectedModule === "chatgpt" ? "（已選）" : ""}
+            {/* 2. OpenAI ChatGPT */}
+            <button type="button" onClick={() => setSelectedModule("chatgpt")} style={cardStyle(selectedModule === "chatgpt")}>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>
+                ◎ OpenAI ChatGPT 模組（Plus / Pro）
               </div>
               <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
-                ChatGPT Plus / Pro（GPT-6 / 5.6 全系列）· <strong>官方 OAuth 裝置碼登入</strong>
+                網頁／手機<strong>裝置碼 OAuth 授權</strong>（輸入代碼按允許後自動輪詢完成並讀取剩餘容量）
               </div>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setSelectedModule("grok")}
-              style={{
-                textAlign: "left",
-                padding: "14px 16px",
-                borderRadius: 12,
-                border: selectedModule === "grok" ? "2px solid var(--accent)" : "1px solid var(--border)",
-                background: selectedModule === "grok" ? "rgba(91, 140, 255, 0.14)" : "var(--panel-2)",
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
-                𝕏 xAI Grok 模組 {selectedModule === "grok" ? "（已選）" : ""}
+            {/* 3. xAI Grok */}
+            <button type="button" onClick={() => setSelectedModule("grok")} style={cardStyle(selectedModule === "grok")}>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>
+                𝕏 xAI Grok 模組（SuperGrok）
               </div>
               <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
-                Grok / SuperGrok（Grok 4.7 / 4.6 / 4.5）· <strong>官方 OAuth 裝置碼登入</strong>
+                網頁／手機<strong>裝置碼 OAuth 授權</strong>（輸入代碼按允許後自動輪詢完成並讀取剩餘容量）
+              </div>
+            </button>
+
+            {/* 4. Anthropic Claude */}
+            <button type="button" onClick={() => setSelectedModule("claude")} style={cardStyle(selectedModule === "claude")}>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>
+                ◈ Anthropic Claude 模組（Sonnet / Opus）
+              </div>
+              <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
+                支援 <strong>Google OAuth（同步獨立 Claude 模型池 %）</strong> 或 <strong>Anthropic API Key</strong> 納入分配額度
               </div>
             </button>
           </div>
 
+          {/* Claude 子模式切換 */}
+          {selectedModule === "claude" && (
+            <div
+              style={{
+                padding: 12,
+                borderRadius: 10,
+                background: "var(--panel-2)",
+                border: "1px solid var(--border)",
+                marginBottom: 14,
+              }}
+            >
+              <div className="row" style={{ gap: 8, marginBottom: claudeMode === "api_key" ? 12 : 4, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className={claudeMode === "oauth_pool" ? "primary" : ""}
+                  onClick={() => setClaudeMode("oauth_pool")}
+                >
+                  方式 1：Google Antigravity OAuth（含 Claude 5.5 訂閱額度池）
+                </button>
+                <button
+                  type="button"
+                  className={claudeMode === "api_key" ? "primary" : ""}
+                  onClick={() => setClaudeMode("api_key")}
+                >
+                  方式 2：Anthropic Claude API Key 分配額度
+                </button>
+              </div>
+              {claudeMode === "oauth_pool" ? (
+                <p className="muted" style={{ margin: "6px 0 0", fontSize: 12 }}>
+                  透過 Google OAuth 登入後，系統會自動讀取帳號內的獨立「Claude &amp; GPT 模型池」剩餘 % 並進入 /sources 獨立管理分配。
+                </p>
+              ) : (
+                <div className="form-grid" style={{ marginTop: 8 }}>
+                  <label>
+                    Anthropic API Key
+                    <input
+                      type="password"
+                      placeholder="sk-ant-..."
+                      value={claudeKey}
+                      onChange={(e) => setClaudeKey(e.target.value)}
+                    />
+                  </label>
+                  <label>
+                    每月願意分配額度上限：{claudeCapPoints.toLocaleString("zh-TW")} 額度
+                    <input
+                      type="range"
+                      min={500}
+                      max={10000}
+                      step={500}
+                      value={claudeCapPoints}
+                      onChange={(e) => setClaudeCapPoints(Number(e.target.value))}
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="form-grid" style={{ marginBottom: 14 }}>
             <label>
-              節點別名（選填，方便辨識多組節點）
+              節點名稱（選填，之後可在 /sources 修改）
               <input
                 value={subLabel}
-                placeholder="例如：我的主力 Gemini 節點 #1"
+                placeholder={`例如：我的 ${selectedModule.toUpperCase()} 算力節點 #1`}
                 onChange={(e) => setSubLabel(e.target.value)}
               />
             </label>
             <label>
-              託管容量上限：{shareLimitPct}%（自動為您保留 {100 - shareLimitPct}% 自用緩衝）
+              初始分配比例：{shareLimitPct}%（保留 {100 - shareLimitPct}% 自用，進入 /sources 可隨時微調並試算回饋）
               <input
                 type="range"
                 min={20}
@@ -427,9 +459,9 @@ export default function VendorPage() {
             className="vendor-google"
             style={{ width: "100%", justifyContent: "center", cursor: agreed && !busy ? "pointer" : "not-allowed" }}
             disabled={!agreed || busy}
-            onClick={() => void startModuleOAuth()}
+            onClick={() => void startModuleAuth()}
           >
-            {selectedModule === "gemini" ? (
+            {selectedModule === "gemini" || (selectedModule === "claude" && claudeMode === "oauth_pool") ? (
               <>
                 <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden>
                   <path
@@ -449,27 +481,34 @@ export default function VendorPage() {
                     d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
                   />
                 </svg>
-                {busy ? "正在開啟 Google OAuth…" : "使用 Google OAuth 登入並接入 Gemini 算力節點"}
+                {busy
+                  ? "正在開啟 Google OAuth…"
+                  : selectedModule === "claude"
+                    ? "一鍵開啟 Google OAuth 授權（同步 Claude 額度池）→ 前往 /sources"
+                    : "一鍵開啟 Google OAuth 授權（Gemini AI Pro / Ultra）→ 前往 /sources"}
               </>
+            ) : selectedModule === "claude" ? (
+              <>{busy ? "正在驗證 Claude Key…" : "驗證並綁定 Claude 模組 → 前往 /sources 設定分配"}</>
             ) : selectedModule === "chatgpt" ? (
-              <>{busy ? "正在產生授權碼…" : "開啟 OpenAI OAuth 授權並接入 ChatGPT 算力節點"}</>
+              <>{busy ? "正在產生裝置碼…" : "開啟 OpenAI ChatGPT 裝置碼 OAuth 授權 → 前往 /sources"}</>
             ) : (
-              <>{busy ? "正在產生授權碼…" : "開啟 xAI OAuth 授權並接入 Grok 算力節點"}</>
+              <>{busy ? "正在產生裝置碼…" : "開啟 xAI Grok 裝置碼 OAuth 授權 → 前往 /sources"}</>
             )}
           </button>
 
-          {/* Google OAuth 回呼網址貼上區（雲端環境完成 Google 登入後貼回網址即綁定） */}
+          {/* Google OAuth 雲端貼回網址列 */}
           {activeAuthUrl && (
             <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
               <div style={{ marginBottom: 8, lineHeight: 1.6, fontSize: 13 }}>
-                <strong>完成 Google OAuth 最後一步：</strong>
+                <strong>Google OAuth 授權確認：</strong>
                 <br />
-                在新開的{" "}
+                ・<strong>本機環境</strong>：在彈出視窗按允許後，本機監聽器會自動完成並跳轉 <code>/sources</code>。
+                <br />
+                ・<strong>雲端／手機環境</strong>：在{" "}
                 <a href={activeAuthUrl} target="_blank" rel="noreferrer">
-                  Google 官方授權視窗
+                  Google 授權視窗
                 </a>{" "}
-                點選允許後，瀏覽器網址列會跳轉至 <code>http://localhost:51121/oauth-callback?code=...</code>
-                （顯示無法連上此網站屬正常現象）。請<strong>整串複製該網址列的網址</strong>貼在下方，即可立即啟用節點：
+                按允許後，網址列會跳到 <code>http://localhost:51121/oauth-callback?code=...</code>，請<strong>整串複製網址列</strong>貼在下方，即自動綁定讀取剩餘 % 並進入 <code>/sources</code>：
               </div>
               <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
                 <input
@@ -478,28 +517,33 @@ export default function VendorPage() {
                   placeholder="貼上 http://localhost:51121/oauth-callback?code=... 整串網址"
                   onChange={(e) => setCallbackInput(e.target.value)}
                 />
-                <button type="button" className="primary" disabled={busy || !callbackInput.trim()} onClick={() => void submitCallbackUrl()}>
-                  {busy ? "驗證同步中…" : "完成綁定並啟用"}
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy || !callbackInput.trim()}
+                  onClick={() => void submitCallbackUrl()}
+                >
+                  {busy ? "綁定讀取中…" : "完成綁定並進入 /sources →"}
                 </button>
               </div>
             </div>
           )}
 
-          {/* ChatGPT / Grok 裝置碼顯示區 */}
+          {/* ChatGPT / Grok 裝置碼自動輪詢區 */}
           {deviceFlow && (
             <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
               <div style={{ fontSize: 13, lineHeight: 1.6 }}>
                 請在開啟的{" "}
                 <a href={deviceFlow.verifyUrl} target="_blank" rel="noreferrer">
-                  {deviceFlow.kind === "grok" ? "xAI 官方授權頁" : "OpenAI 官方授權頁"}
+                  {deviceFlow.kind === "grok" ? "xAI Grok 官方授權頁" : "OpenAI ChatGPT 官方授權頁"}
                 </a>{" "}
-                輸入以下驗證碼：
+                輸入以下裝置碼：
               </div>
               <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: 3, margin: "10px 0", color: "var(--ok)" }}>
                 {deviceFlow.userCode}
               </div>
               <div className="muted" style={{ fontSize: 12 }}>
-                在官方頁面按下允許後，本頁每 3 秒自動偵測並讀取剩餘容量，無需手動重新整理…
+                按下允許後系統每 3 秒自動輪詢，完成後立即讀取剩餘容量並自動跳轉至 <code>/sources</code>…
               </div>
             </div>
           )}
@@ -510,61 +554,6 @@ export default function VendorPage() {
             </div>
           )}
         </section>
-
-        {/* === 已接入的算力節點與即時可用容量 === */}
-        {sources.length > 0 && (
-          <section className="card vendor-card">
-            <div className="vendor-card-head">
-              <h2 style={{ margin: 0 }}>目前運作中的算力節點（{sources.length}）</h2>
-              <button type="button" onClick={() => void syncAllQuotas()} disabled={syncing}>
-                {syncing ? "同步中…" : "🔄 同步最新容量"}
-              </button>
-            </div>
-            <div className="vendor-table-wrap" style={{ marginTop: 10 }}>
-              <table className="vendor-table">
-                <thead>
-                  <tr>
-                    <th>節點名稱</th>
-                    <th>模組</th>
-                    <th>即時剩餘容量</th>
-                    <th>託管上限</th>
-                    <th>狀態</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sources.map((s) => (
-                    <tr key={s.id}>
-                      <td>
-                        <strong>{s.label}</strong>
-                        {s.quota?.email && <div className="muted" style={{ fontSize: 12 }}>{s.quota.email}</div>}
-                      </td>
-                      <td>{s.provider.toUpperCase()}</td>
-                      <td>
-                        {s.quota ? (
-                          <div style={{ display: "grid", gap: 4 }}>
-                            {s.quota.windows.slice(0, 3).map((w) => (
-                              <span key={w.label} style={{ fontSize: 12 }}>
-                                {w.label}：<strong>{Math.round(w.uiRemainingPercent ?? w.remainingPercent)}%</strong>
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="muted">待同步</span>
-                        )}
-                      </td>
-                      <td>{s.shareLimitPct}%</td>
-                      <td>
-                        <button type="button" onClick={() => void toggleEnabled(s)}>
-                          {s.enabled ? "🟢 託管派發中（點此暫停）" : "⏸ 已暫停（點此啟用）"}
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
 
         <section className="vendor-values">
           {VALUE_CARDS.map((c) => (
@@ -578,23 +567,23 @@ export default function VendorPage() {
           ))}
         </section>
 
-        {/* === 雙邊角色與金流合規正式名目一覽 === */}
+        {/* === 雙邊角色與金流合規名目一覽 === */}
         <section className="card vendor-card" id="compliance">
           <div className="vendor-card-head">
-            <h2>雙邊角色與金流合規正式名目</h2>
+            <h2>雙邊角色與金流合規正式名目一覽</h2>
             <button type="button" onClick={() => setTermsOpen(true)}>
               閱讀合作條款摘要
             </button>
           </div>
           <p className="muted vendor-compliance-intro">
-            本平台嚴格遵循軟體服務與創作者工作流託管規範，所有節點調度、回饋結算與雲端工作台服務均採用以下正式合規名目：
+            平台所有節點託管、智慧路由負載平衡測試與創作者分潤結算，均嚴格依據以下正式合規名目運作：
           </p>
           <div className="vendor-table-wrap">
             <table className="vendor-table">
               <thead>
                 <tr>
                   <th>實質項目</th>
-                  <th>平台正式合規名目</th>
+                  <th>✅ 平台正式合規名目</th>
                   <th>運作說明</th>
                 </tr>
               </thead>
