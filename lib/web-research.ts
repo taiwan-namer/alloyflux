@@ -690,16 +690,62 @@ export function shouldSkipLiveResearch(text: string): boolean {
   if (/```|寫一個|幫我寫|refactor|debug|typescript|javascript|python|sql|regex|編譯|報錯|typeerror|syntax/i.test(q)) {
     return true;
   }
-  // 純翻譯／潤飾／改寫
-  if (/^请?(幫我)?(翻譯|润色|潤飾|改寫|纠错|糾錯|摘要一下這段)/i.test(q) || /translate|proofread/i.test(q)) {
+  // 純翻譯／潤飾／改寫（繁簡皆可）
+  if (
+    /^(请|請)?(幫我)?(翻譯|翻译|润色|潤飾|改寫|改写|纠错|糾錯|摘要一下這段)/i.test(q) ||
+    /translate|proofread/i.test(q)
+  ) {
     return true;
   }
   return false;
 }
 
 /**
- * 完整查證包：搜尋（層1）＋讀原文（層2）。
- * prefer：若呼叫端已持有 Antigravity 憑證（Claude via Google），優先用同一把。
+ * 僅層 1：Flash／API Key + Google Search grounding。
+ * 不抓頁、不做 700 字 brief 截斷——給 Research V2 Collector 用原始 evidence。
+ * 注意：brief 仍受 Flash 自身輸出長度限制；URI／title 以 grounding 為準（非完整 SERP）。
+ */
+export async function fetchLiveResearchSearchHit(
+  query: string,
+  opts?: {
+    prefer?: { sourceId: string; creds: OAuthCredentials };
+    signal?: AbortSignal;
+  },
+): Promise<{ brief: string; sources: ResearchSource[]; queries: string[]; provider: string } | null> {
+  const q = query.trim();
+  if (!q) return null;
+  if (shouldSkipLiveResearch(q)) return null;
+
+  const searchQuery = needsWebResearch(q)
+    ? `【必須使用 Google Search，禁止回覆 NO_SEARCH】\n${q}\n【優先】官方新聞室、投資人公告、路透／美聯社／BBC／大型報紙；排除維基百科與 YouTube。`
+    : `${q}\n【查證時優先官方與主流媒體新聞，排除維基百科與 YouTube。】`;
+
+  let hit: { brief: string; sources: ResearchSource[]; queries: string[] } | null = null;
+  let provider = "unknown";
+
+  if (opts?.prefer) {
+    hit = await searchViaAntigravity(opts.prefer.creds, opts.prefer.sourceId, searchQuery, opts.signal);
+    if (hit) provider = "antigravity_prefer";
+  }
+  if (!hit) {
+    const ch = await resolveResearchChannel();
+    if (!ch) return null;
+    if (ch.kind === "antigravity") {
+      hit = await searchViaAntigravity(ch.creds, ch.sourceId, searchQuery, opts?.signal);
+      provider = "antigravity_pool";
+    } else {
+      hit = await searchViaGeminiApiKey(ch.apiKey, searchQuery, opts?.signal);
+      provider = "gemini_api_key";
+    }
+  }
+  if (!hit) return null;
+  if (/^NO_SEARCH\b/i.test(hit.brief) && !hit.sources.length) return null;
+  return { ...hit, provider };
+}
+
+/**
+ * 完整查證包（V1 相容）：搜尋（層1）＋讀原文（層2，最多 MAX_RESEARCH_PAGES）。
+ * Research V2 請改用 fetchLiveResearchSearchHit + 自行控制 maxPages。
  */
 export async function runLiveResearch(
   query: string,
@@ -708,34 +754,10 @@ export async function runLiveResearch(
     signal?: AbortSignal;
   },
 ): Promise<ResearchBundle | null> {
-  const q = query.trim();
-  if (!q) return null;
-  if (shouldSkipLiveResearch(q)) return null;
-
-  // 強制搜尋＋導向官方／主流媒體（避免維基／影音主導）
-  const searchQuery = needsWebResearch(q)
-    ? `【必須使用 Google Search，禁止回覆 NO_SEARCH】\n${q}\n【優先】官方新聞室、投資人公告、路透／美聯社／BBC／大型報紙；排除維基百科與 YouTube。`
-    : `${q}\n【查證時優先官方與主流媒體新聞，排除維基百科與 YouTube。】`;
-
-  let hit: { brief: string; sources: ResearchSource[]; queries: string[] } | null = null;
-
-  if (opts?.prefer) {
-    hit = await searchViaAntigravity(opts.prefer.creds, opts.prefer.sourceId, searchQuery, opts.signal);
-  }
-  if (!hit) {
-    const ch = await resolveResearchChannel();
-    if (!ch) return null;
-    if (ch.kind === "antigravity") {
-      hit = await searchViaAntigravity(ch.creds, ch.sourceId, searchQuery, opts?.signal);
-    } else {
-      hit = await searchViaGeminiApiKey(ch.apiKey, searchQuery, opts?.signal);
-    }
-  }
+  const hit = await fetchLiveResearchSearchHit(query, opts);
   if (!hit) return null;
-  if (/^NO_SEARCH\b/i.test(hit.brief) && !hit.sources.length) return null;
 
   const pages = await fetchPagesForSources(hit.sources, opts?.signal, MAX_RESEARCH_PAGES);
-  // 若 grounding 沒給 URI，仍可能只有 brief——保留 brief
   return {
     brief: hit.brief,
     sources: hit.sources,

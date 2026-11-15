@@ -67,7 +67,22 @@ export async function POST(req: Request) {
       return Response.json({ error: "訊息不能是空的" }, { status: 400 });
     }
 
-    const userBal = sessionUser ? await balance(sessionUser.id) : 0;
+    const upstreamContent = trimmed || "（見附圖）";
+    const dbContent = images.length
+      ? `[已上傳 ${images.length} 張圖片]\n${upstreamContent}`
+      : upstreamContent;
+
+    let convId = body.conversationId;
+    const [userBal, convRow, priorRows] = await Promise.all([
+      sessionUser ? balance(sessionUser.id) : Promise.resolve(0),
+      convId ? getConversation(userId, convId) : Promise.resolve(null),
+      convId ? listMessages(convId) : Promise.resolve([]),
+    ]);
+    if (convId && !convRow) {
+      convId = undefined;
+    }
+    const prior = convId ? priorRows : [];
+
     const hasPaidAccess = Boolean(sessionUser && (sessionUser.isAdmin || userBal > 0));
     const freeMode = !hasPaidAccess;
 
@@ -101,19 +116,10 @@ export async function POST(req: Request) {
       }
     }
 
-    const upstreamContent = trimmed || "（見附圖）";
-    const dbContent = images.length
-      ? `[已上傳 ${images.length} 張圖片]\n${upstreamContent}`
-      : upstreamContent;
-
-    let convId = body.conversationId;
-    if (convId && !(await getConversation(userId, convId))) convId = undefined;
-
     let model: ModelInfo;
     let autoDecision: AutoDecision | null = null;
     let autoInput: Parameters<typeof resolveAutoModel>[0] | null = null;
     if (isAuto) {
-      const prior = convId ? await listMessages(convId) : [];
       const lastAssistant = [...prior].reverse().find((m) => m.role === "assistant");
       autoInput = {
         text: upstreamContent,
@@ -142,14 +148,14 @@ export async function POST(req: Request) {
     const userModelTag = isAuto ? AUTO_MODEL_ID : model.id;
     if (!convId) convId = await createConversation(userId, dbContent.slice(0, 30), userModelTag);
     await addUserMessage(convId, dbContent, userModelTag);
-    if (sessionUser) {
-      await maybeRememberFromUserMessage(userId, upstreamContent);
-    }
 
-    const fullHistory: ChatMessage[] = (await listMessages(convId))
-      .filter((m) => m.content.trim())
-      .slice(-DB_HISTORY_READ)
-      .map((m) => ({ role: m.role, content: m.content }));
+    // 不再重讀 DB：用先前訊息＋本輪 user 組歷史
+    const fullHistory: ChatMessage[] = [
+      ...prior
+        .filter((m) => m.content.trim())
+        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+      { role: "user" as const, content: dbContent },
+    ].slice(-DB_HISTORY_READ);
     const history = slideMessagesForUpstream(fullHistory);
 
     if (images.length && history.length) {
@@ -163,9 +169,12 @@ export async function POST(req: Request) {
       }
     }
 
-    const extraSystemContext = sessionUser
-      ? (await buildUserMemoryContext(userId, convId)) || undefined
-      : undefined;
+    const [, extraSystemContext] = await Promise.all([
+      sessionUser ? maybeRememberFromUserMessage(userId, upstreamContent) : Promise.resolve(),
+      sessionUser
+        ? buildUserMemoryContext(userId, convId).then((s) => s || undefined)
+        : Promise.resolve(undefined),
+    ]);
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({

@@ -21,10 +21,11 @@ import {
 } from "@/lib/cloud-api";
 import {
   addOAuthSubscriptionSource,
+  assertSourceOwnedBy,
   syncAllSubscriptionQuotas,
   syncSourceQuotaById,
 } from "@/lib/sources";
-import { jsonError } from "@/lib/auth";
+import { jsonError, requireSupplier, type User } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -42,22 +43,26 @@ async function saveOAuthSource(
     creds: OAuthCredentials;
     label?: string;
     shareLimitPct?: number;
+    ownerUserId?: string | null;
   },
 ): Promise<Record<string, unknown>> {
   if (shouldProxyOAuthPersist(req)) {
-    return persistOAuthViaCloud({
-      action: "import_raw_token",
-      provider: input.creds.provider,
-      accessToken: input.creds.accessToken,
-      refreshToken: input.creds.refreshToken,
-      accountId: input.creds.accountId,
-      projectId: input.creds.projectId,
-      email: input.creds.email,
-      planType: input.creds.planType,
-      expiresAt: input.creds.expiresAt,
-      label: input.label,
-      shareLimitPct: input.shareLimitPct,
-    });
+    return persistOAuthViaCloud(
+      {
+        action: "import_raw_token",
+        provider: input.creds.provider,
+        accessToken: input.creds.accessToken,
+        refreshToken: input.creds.refreshToken,
+        accountId: input.creds.accountId,
+        projectId: input.creds.projectId,
+        email: input.creds.email,
+        planType: input.creds.planType,
+        expiresAt: input.creds.expiresAt,
+        label: input.label,
+        shareLimitPct: input.shareLimitPct,
+      },
+      req,
+    );
   }
   return addOAuthSubscriptionSource(input);
 }
@@ -69,6 +74,7 @@ async function completeCodeAndSave(
     state?: string;
     label?: string;
     shareLimitPct?: number;
+    ownerUserId?: string | null;
   },
 ): Promise<Record<string, unknown>> {
   // 一律在「啟動授權的同一環境」兌換 code（client_id/secret/PKCE 必須一致）。
@@ -78,24 +84,28 @@ async function completeCodeAndSave(
     state: input.state,
   });
   if (shouldProxyOAuthPersist(req)) {
-    return persistOAuthViaCloud({
-      action: "import_raw_token",
-      provider: creds.provider,
-      accessToken: creds.accessToken,
-      refreshToken: creds.refreshToken,
-      accountId: creds.accountId,
-      projectId: creds.projectId,
-      email: creds.email,
-      planType: creds.planType,
-      expiresAt: creds.expiresAt,
-      label: input.label || label,
-      shareLimitPct: input.shareLimitPct ?? shareLimitPct,
-    });
+    return persistOAuthViaCloud(
+      {
+        action: "import_raw_token",
+        provider: creds.provider,
+        accessToken: creds.accessToken,
+        refreshToken: creds.refreshToken,
+        accountId: creds.accountId,
+        projectId: creds.projectId,
+        email: creds.email,
+        planType: creds.planType,
+        expiresAt: creds.expiresAt,
+        label: input.label || label,
+        shareLimitPct: input.shareLimitPct ?? shareLimitPct,
+      },
+      req,
+    );
   }
   const added = await addOAuthSubscriptionSource({
     creds,
     label: input.label || label,
     shareLimitPct: input.shareLimitPct ?? shareLimitPct,
+    ownerUserId: input.ownerUserId,
   });
   return { ok: true, ...added };
 }
@@ -168,6 +178,7 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
+    const user: User = await requireSupplier(req);
     const body = (await req.json()) as {
       action:
         | "start_gemini"
@@ -235,6 +246,7 @@ export async function POST(req: Request) {
           creds: r.creds,
           label: r.label,
           shareLimitPct: r.shareLimitPct,
+          ownerUserId: user.id,
         });
         return Response.json({ status: "completed", ...added });
       }
@@ -250,6 +262,7 @@ export async function POST(req: Request) {
           creds: r.creds,
           label: r.label,
           shareLimitPct: r.shareLimitPct,
+          ownerUserId: user.id,
         });
         return Response.json({ status: "completed", ...added });
       }
@@ -260,6 +273,7 @@ export async function POST(req: Request) {
           state: body.state,
           label: body.label,
           shareLimitPct: body.shareLimitPct,
+          ownerUserId: user.id,
         });
         return Response.json({ ok: true, ...added });
       }
@@ -270,6 +284,7 @@ export async function POST(req: Request) {
           creds,
           label: body.label,
           shareLimitPct: body.shareLimitPct,
+          ownerUserId: user.id,
         });
         return Response.json({ ok: true, ...added });
       }
@@ -306,20 +321,30 @@ export async function POST(req: Request) {
           creds,
           label: body.label,
           shareLimitPct: body.shareLimitPct,
+          ownerUserId: user.id,
         });
         return Response.json({ ok: true, ...added });
       }
       case "sync_quota": {
+        if (body.sourceId && !user.isAdmin) {
+          await assertSourceOwnedBy(body.sourceId, user);
+        }
         if (shouldProxyOAuthPersist(req)) {
-          const data = await persistOAuthViaCloud({
-            action: "sync_quota",
-            sourceId: body.sourceId,
-          });
+          const data = await persistOAuthViaCloud(
+            {
+              action: "sync_quota",
+              sourceId: body.sourceId,
+            },
+            req,
+          );
           return Response.json(data);
         }
         if (body.sourceId) {
           const quota = await syncSourceQuotaById(body.sourceId);
           return Response.json({ ok: true, quota });
+        }
+        if (!user.isAdmin) {
+          return Response.json({ error: "僅管理員可同步全部額度" }, { status: 403 });
         }
         await syncAllSubscriptionQuotas();
         return Response.json({ ok: true });

@@ -14,6 +14,13 @@ import { enqueueInferenceJob, streamJobResult } from "./inference-jobs";
 import { listOnlineNodesForModel } from "./node-registry";
 import { releaseSourceLock, tryAcquireSourceLock } from "./source-lock";
 import { slideMessagesForUpstream } from "./context-window";
+import {
+  attachResearchToDone,
+  modelNeedsPlatformResearch,
+  preparePlatformResearch,
+  withPlatformResearchScope,
+  type ResearchVerdict,
+} from "./research-v2";
 
 /** 停止後立刻再問：短暫重試拿鎖，等上一輪 abort 釋放（避免誤判 busy／亂接力） */
 async function tryAcquireSourceLockBriefly(
@@ -125,13 +132,16 @@ async function* streamViaNodeAgent(
     sourceId: `node:${done?.assignedNodeId ?? job.assignedNodeId ?? "unknown"}`,
     jobId: job.id,
     upstreamModelId: route.upstreamModel,
+    groundingSources: usage.groundingSources,
+    webSearchQueries: usage.webSearchQueries,
   };
 }
 
 /**
  * 混合算力水庫：
- * 1) 有對應 Node Agent → 優先派工
- * 2) 否則／failover → oauth_sub（C=1 鎖）+ api_key + OpenRouter
+ * 1) 平台先跑一次 Research V2（Node／local 共用，failover 不重跑）
+ * 2) 有對應 Node Agent → 優先派工（注入相同查證）
+ * 3) 否則／failover → oauth_sub（C=1 鎖）+ api_key + OpenRouter
  */
 export async function* routeChat(
   model: ModelInfo,
@@ -149,17 +159,58 @@ export async function* routeChat(
   const nodeAvailable =
     route && (await listOnlineNodesForModel(route.providerKey, route.upstreamModel)).length > 0;
 
-  if (model.category === "node-agent" || nodeAvailable) {
-    try {
-      yield* streamViaNodeAgent(model, upstreamMessages, userId, signal, ctx, customSys);
-      return;
-    } catch (e) {
-      const err = e instanceof UpstreamError ? e : new UpstreamError(0, e instanceof Error ? e.message : String(e));
-      if (model.category === "node-agent" || !err.retryable) throw err;
-      yield { type: "failover", from: "Node Agent", reason: `${err.status}` };
+  const supplyPath = nodeAvailable || model.category === "node-agent" ? "node" : "local";
+  const prepared = modelNeedsPlatformResearch(model)
+    ? await preparePlatformResearch({
+        messages: upstreamMessages.map((m) => ({ role: m.role, content: m.content })),
+        supplyPath,
+        signal,
+      })
+    : null;
+
+  // Node 進程無平台 ALS：把同一份 injection 併入 extraSystemContext
+  const ctxWithResearch =
+    prepared?.injectionText
+      ? [ctx, prepared.injectionText].filter(Boolean).join("\n\n")
+      : ctx;
+
+  async function* routeBody(): AsyncGenerator<GatewayEvent> {
+    if (model.category === "node-agent" || nodeAvailable) {
+      try {
+        for await (const ev of streamViaNodeAgent(
+          model,
+          upstreamMessages,
+          userId,
+          signal,
+          ctxWithResearch,
+          customSys,
+        )) {
+          yield attachResearchToDone(ev, prepared);
+        }
+        return;
+      } catch (e) {
+        const err =
+          e instanceof UpstreamError ? e : new UpstreamError(0, e instanceof Error ? e.message : String(e));
+        if (model.category === "node-agent" || !err.retryable) throw err;
+        yield { type: "failover", from: "Node Agent", reason: `${err.status}` };
+      }
     }
+
+    yield* routeLocalCandidates(model, upstreamMessages, userId, signal, ctxWithResearch, customSys, prepared);
   }
 
+  yield* withPlatformResearchScope(prepared, supplyPath, routeBody());
+}
+
+async function* routeLocalCandidates(
+  model: ModelInfo,
+  upstreamMessages: ChatMessage[],
+  userId: string,
+  signal: AbortSignal | undefined,
+  ctx: string | undefined,
+  customSys: string | undefined,
+  prepared: ResearchVerdict | null,
+): AsyncGenerator<GatewayEvent> {
   // 混合水庫：含 oauth_sub；candidatesFor 已過濾 share_limit / cooldown
   const allCandidates = await candidatesFor(model);
   if (allCandidates.length === 0) {
@@ -203,18 +254,21 @@ export async function* routeChat(
       markSuccess(c.source.id);
       const u = usage ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
       const bill = chargePointsFromUsd(officialCostUsd(model, u), model.tier, model.effort);
-      yield {
-        type: "done",
-        usage: u,
-        officialCostPoints: bill.officialCostPoints,
-        chargedPoints: bill.chargedPoints,
-        sourceId: c.source.id,
-        upstreamModelId: u.upstreamModelId,
-        upstreamModelVersion: u.upstreamModelVersion,
-        viaDailyBypass: u.viaDailyBypass,
-        groundingSources: u.groundingSources,
-        webSearchQueries: u.webSearchQueries,
-      };
+      yield attachResearchToDone(
+        {
+          type: "done",
+          usage: u,
+          officialCostPoints: bill.officialCostPoints,
+          chargedPoints: bill.chargedPoints,
+          sourceId: c.source.id,
+          upstreamModelId: u.upstreamModelId,
+          upstreamModelVersion: u.upstreamModelVersion,
+          viaDailyBypass: u.viaDailyBypass,
+          groundingSources: u.groundingSources,
+          webSearchQueries: u.webSearchQueries,
+        },
+        prepared,
+      );
       return;
     } catch (e) {
       // 買家停止／斷線：釋放鎖即可，絕對不要 markFailure 把帳號打進冷卻

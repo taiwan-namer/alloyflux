@@ -46,8 +46,11 @@ CREATE TABLE IF NOT EXISTS sources (
   quota_json TEXT,
   quota_updated_at BIGINT,
   enabled INTEGER NOT NULL DEFAULT 1,
-  created_at BIGINT NOT NULL
+  created_at BIGINT NOT NULL,
+  -- 綁定此貨源的平台使用者（供給者／管理員）；派發仍用全部 enabled 貨源
+  owner_user_id TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_sources_owner ON sources(owner_user_id);
 
 CREATE TABLE IF NOT EXISTS ledger (
   id TEXT PRIMARY KEY,

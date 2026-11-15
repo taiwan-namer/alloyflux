@@ -1,6 +1,6 @@
-import { jsonError } from "@/lib/auth";
+import { jsonError, requireSupplier } from "@/lib/auth";
 import { cloudDbProxy } from "@/lib/cloud-api";
-import { listSources } from "@/lib/sources";
+import { listSourcesForUser } from "@/lib/sources";
 import { supplierUsage } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -11,8 +11,9 @@ export async function GET(req: Request) {
   const proxied = await cloudDbProxy(req);
   if (proxied) return proxied;
   try {
+    const user = await requireSupplier(req);
     const since = Date.now() - WEEK_MS;
-    const sources = (await listSources()).filter((s) => s.authType === "oauth_sub");
+    const sources = (await listSourcesForUser(user)).filter((s) => s.authType === "oauth_sub");
     return Response.json(
       await Promise.all(
         sources.map(async (s) => ({

@@ -1,6 +1,6 @@
-import { jsonError } from "@/lib/auth";
+import { jsonError, requireSupplier } from "@/lib/auth";
 import { cloudDbProxy } from "@/lib/cloud-api";
-import { deleteSource, updateSource } from "@/lib/sources";
+import { assertSourceOwnedBy, deleteSource, updateSource } from "@/lib/sources";
 
 export const dynamic = "force-dynamic";
 
@@ -8,7 +8,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   const proxied = await cloudDbProxy(req);
   if (proxied) return proxied;
   try {
+    const user = await requireSupplier(req);
     const { id } = await params;
+    await assertSourceOwnedBy(id, user);
     const patch = (await req.json()) as {
       enabled?: boolean;
       priority?: number;
@@ -26,7 +28,9 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   const proxied = await cloudDbProxy(req);
   if (proxied) return proxied;
   try {
+    const user = await requireSupplier(req);
     const { id } = await params;
+    await assertSourceOwnedBy(id, user);
     await deleteSource(id);
     return Response.json({ ok: true });
   } catch (e) {

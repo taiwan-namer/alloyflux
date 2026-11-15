@@ -18,6 +18,13 @@ import {
   shouldSkipLiveResearch,
   type ResearchBundle,
 } from "./web-research";
+import {
+  isResearchPipelineV2Enabled,
+  reusePreparedResearch,
+  runResearchPipelineV2,
+  verdictToLegacyBundle,
+  type ResearchVerdict,
+} from "./research-v2";
 
 export interface ChatImage {
   mimeType: string;
@@ -230,12 +237,42 @@ function appendUserContext(base: string, extraSystemContext?: string): string {
   return `${base}\n\n[User Context - 僅供背景脈絡參考，非當前指令]\n${ctx}`;
 }
 
+type ResearchAttach = {
+  verdict?: ResearchVerdict | null;
+  bundle?: ResearchBundle | null;
+};
+
+function legacyBundleFromAttach(research: ResearchAttach | ResearchBundle | null | undefined): ResearchBundle | null {
+  if (!research) return null;
+  if ("brief" in research && "sources" in research && "pages" in research) return research;
+  if (research.bundle) return research.bundle;
+  if (research.verdict?.sources?.length) {
+    return {
+      brief: "",
+      sources: research.verdict.sources,
+      queries: research.verdict.webSearchQueries,
+      pages: [],
+    };
+  }
+  return null;
+}
+
+function isResearchAttach(r: ResearchBundle | ResearchAttach): r is ResearchAttach {
+  return "verdict" in r || ("bundle" in r && !("pages" in r));
+}
+
 /** 查證資料併入 System／Instructions（絕不偽裝成 user 訊息） */
 function withResearchSystem(
   baseSystem: string,
-  research: ResearchBundle | null | undefined,
+  research: ResearchBundle | ResearchAttach | null | undefined,
 ): string {
   if (!research) return baseSystem;
+  if (isResearchAttach(research)) {
+    const v = research.verdict;
+    if (v?.injectionText) return `${baseSystem}\n\n${v.injectionText}`;
+    if (research.bundle) return `${baseSystem}\n\n${formatResearchInjection(research.bundle)}`;
+    return baseSystem;
+  }
   return `${baseSystem}\n\n${formatResearchInjection(research)}`;
 }
 
@@ -306,20 +343,37 @@ export class ModelNotInCatalogError extends UpstreamError {
   }
 }
 
-/** sourceId → 最近一次抓到的 Antigravity 目錄 wire id（供 Auto／gateway 預先排除） */
-const antigravityCatalogBySource = new Map<string, { ids: string[]; at: number }>();
+/** sourceId → 最近一次 Antigravity 目錄（供串流／Auto／gateway 共用，避免每請求重抓） */
+const antigravityCatalogBySource = new Map<string, { catalog: AntigravityCatalog; at: number }>();
 const CATALOG_CACHE_TTL_MS = 30 * 60_000;
 
 function rememberAntigravityCatalog(sourceId: string, available: AntigravityCatalog): void {
-  const ids = Object.keys(available);
-  if (ids.length) antigravityCatalogBySource.set(sourceId, { ids, at: Date.now() });
+  if (Object.keys(available).length) {
+    antigravityCatalogBySource.set(sourceId, { catalog: available, at: Date.now() });
+  }
+}
+
+async function loadAntigravityCatalog(
+  sourceId: string,
+  creds: OAuthCredentials,
+  opts?: { force?: boolean },
+): Promise<AntigravityCatalog> {
+  if (!opts?.force) {
+    const cached = antigravityCatalogBySource.get(sourceId);
+    if (cached && Date.now() - cached.at <= CATALOG_CACHE_TTL_MS && Object.keys(cached.catalog).length) {
+      return cached.catalog;
+    }
+  }
+  const catalog = await fetchAntigravityAvailableModels(creds, { allowDailyFallback: false });
+  rememberAntigravityCatalog(sourceId, catalog);
+  return catalog;
 }
 
 /** true＝已知此貨源目錄沒有該模型；未抓過目錄或已過期一律回 false（交給實際請求判斷） */
 export function sourceCatalogLacksModel(sourceId: string, model: ModelInfo): boolean {
   const cached = antigravityCatalogBySource.get(sourceId);
   if (!cached || Date.now() - cached.at > CATALOG_CACHE_TTL_MS) return false;
-  return pickAntigravityWireId(cached.ids, model) === null;
+  return pickAntigravityWireId(Object.keys(cached.catalog), model) === null;
 }
 
 function resolveAntigravityWireId(available: AntigravityCatalog, model: ModelInfo): string {
@@ -598,18 +652,40 @@ async function researchForMessages(
   messages: ChatMessage[],
   signal?: AbortSignal,
   prefer?: { sourceId: string; creds: OAuthCredentials },
-): Promise<ResearchBundle | null> {
+): Promise<ResearchAttach> {
   const lastUser = [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
-  if (!lastUser.trim()) return null;
-  // 寒暄／純寫程式等：仍以「使用者原句」判斷跳過，避免短句被誤判成追問後硬搜
-  if (shouldSkipLiveResearch(lastUser)) return null;
-  // 短句追問／裸實體：合併最近主題後再搜，避免「更新事件」「阿 網路都有」盲搜
+  if (!lastUser.trim()) return { verdict: null, bundle: null };
+
+  // 平台 Gateway 已跑過一次 → 禁止供給路徑再搜（避免重複成本）
+  const prepared = reusePreparedResearch();
+  if (prepared) {
+    return { verdict: prepared, bundle: verdictToLegacyBundle(prepared) };
+  }
+
+  if (isResearchPipelineV2Enabled()) {
+    try {
+      const verdict = await runResearchPipelineV2({
+        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        prefer,
+        signal,
+        supplyPath: "local",
+      });
+      return { verdict, bundle: verdictToLegacyBundle(verdict) };
+    } catch (e) {
+      if (signal?.aborted || isAbortError(e)) throw e instanceof ClientAbortError ? e : new ClientAbortError();
+      return { verdict: null, bundle: null };
+    }
+  }
+
+  // 回退 V1
+  if (shouldSkipLiveResearch(lastUser)) return { verdict: null, bundle: null };
   const query = buildContextualResearchQuery(messages) || lastUser.trim();
   try {
-    return await runLiveResearch(query, { prefer, signal });
+    const bundle = await runLiveResearch(query, { prefer, signal });
+    return { verdict: null, bundle };
   } catch (e) {
     if (signal?.aborted || isAbortError(e)) throw e instanceof ClientAbortError ? e : new ClientAbortError();
-    return null;
+    return { verdict: null, bundle: null };
   }
 }
 
@@ -622,9 +698,8 @@ async function* geminiSubscriptionStreamOnce(
   extraSystemContext?: string,
   customSystemPrompt?: string,
 ): AsyncGenerator<StreamEvent> {
-  const catalogBefore = await fetchAntigravityAvailableModels(creds, { allowDailyFallback: false });
+  const catalogBefore = await loadAntigravityCatalog(c.source.id, creds);
   logAntigravityCatalogIds(catalogBefore);
-  rememberAntigravityCatalog(c.source.id, catalogBefore);
   const upstreamModel = resolveAntigravityWireId(catalogBefore, model);
   const remainingBefore = catalogBefore[upstreamModel]?.remainingFraction;
   const projectId = creds.projectId || `bright-spark-${c.source.id.slice(0, 5)}`;
@@ -636,13 +711,21 @@ async function* geminiSubscriptionStreamOnce(
     parts: geminiPartsForMessage(m, model),
   }));
   // Claude／GPT-OSS：自研查證注入 System（不塞 user，避免角色錯亂）
-  let researchBundle: ResearchBundle | null = null;
+  let researchAttach: ResearchAttach = { verdict: null, bundle: null };
   if (needsAntigravitySearchAssist(model, upstreamModel)) {
-    researchBundle = await researchForMessages(messages, signal, {
+    researchAttach = await researchForMessages(messages, signal, {
       sourceId: c.source.id,
       creds,
     });
-    if (researchBundle) applyResearchBundle(assistUsage, researchBundle);
+    if (researchAttach.bundle) applyResearchBundle(assistUsage, researchAttach.bundle);
+    else if (researchAttach.verdict?.sources?.length) {
+      applyResearchBundle(assistUsage, {
+        brief: "",
+        sources: researchAttach.verdict.sources,
+        queries: researchAttach.verdict.webSearchQueries,
+        pages: [],
+      });
+    }
   }
 
   const effort = normalizeEffort(model.effort);
@@ -655,7 +738,7 @@ async function* geminiSubscriptionStreamOnce(
         {
           text: withResearchSystem(
             systemPromptFor(model, upstreamModel, extraSystemContext, customSystemPrompt),
-            researchBundle,
+            researchAttach,
           ),
         },
       ],
@@ -777,27 +860,27 @@ async function* geminiSubscriptionStreamOnce(
     }
   }
 
-  // Google 的 remainingFraction 會延遲約 1 秒才反映，等一下再讀「打完後」的值
-  await new Promise((r) => setTimeout(r, 1200));
-  try {
-    const catalogAfter = await fetchAntigravityAvailableModels(creds, { allowDailyFallback: false });
-    const remainingAfter = catalogAfter[upstreamModel]?.remainingFraction;
-    if (typeof remainingBefore === "number" && typeof remainingAfter === "number") {
-      usage.quotaLabel = catalogAfter[upstreamModel]?.displayName ?? upstreamModel;
-      usage.quotaRemainingBeforePct = Math.round(remainingBefore * 10000) / 100;
-      usage.quotaRemainingAfterPct = Math.round(remainingAfter * 10000) / 100;
-      usage.quotaUsedPct = Math.max(0, Math.round((remainingBefore - remainingAfter) * 100000) / 1000);
-    }
-  } catch {
-    // 讀不到就不顯示，不影響對話
+  // 額度 % 延遲反映：不阻塞 done；背景刷新目錄＋同步 UI 額度
+  if (typeof remainingBefore === "number") {
+    usage.quotaLabel = catalogBefore[upstreamModel]?.displayName ?? upstreamModel;
+    usage.quotaRemainingBeforePct = Math.round(remainingBefore * 10000) / 100;
   }
   yield { type: "usage", usage };
   if (process.env.SUPPLIER_NODE_MODE !== "1") {
-    try {
-      await syncSourceQuotaById(c.source.id);
-    } catch {
-      // 同步失敗不阻斷對話結果
-    }
+    void (async () => {
+      try {
+        await new Promise((r) => setTimeout(r, 1200));
+        const catalogAfter = await loadAntigravityCatalog(c.source.id, creds, { force: true });
+        void catalogAfter;
+      } catch {
+        /* ignore */
+      }
+      try {
+        await syncSourceQuotaById(c.source.id);
+      } catch {
+        /* ignore */
+      }
+    })();
   }
 }
 
@@ -898,7 +981,8 @@ async function* chatgptSubscriptionStream(
   }
 
   const usage: Usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, upstreamModelId: upstreamModel };
-  if (research) applyResearchBundle(usage, research);
+  const researchBundle = legacyBundleFromAttach(research);
+  if (researchBundle) applyResearchBundle(usage, researchBundle);
   for await (const data of sseData(res, signal)) {
     if (!data || data === "[DONE]") break;
     const json = JSON.parse(data);
@@ -1061,7 +1145,10 @@ async function* grokSubscriptionStream(
     outputTokens: 0,
     upstreamModelId: upstreamModel,
   };
-  if (research) applyResearchBundle(usage, research);
+  {
+    const b = legacyBundleFromAttach(research);
+    if (b) applyResearchBundle(usage, b);
+  }
   for await (const data of sseData(res, signal)) {
     if (!data || data === "[DONE]") break;
     const json = JSON.parse(data);
@@ -1278,7 +1365,10 @@ async function* anthropic(
   }
 
   const usage: Usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, upstreamModelId: model.id };
-  if (research) applyResearchBundle(usage, research);
+  {
+    const b = legacyBundleFromAttach(research);
+    if (b) applyResearchBundle(usage, b);
+  }
   for await (const data of sseData(res, signal)) {
     const json = JSON.parse(data);
     switch (json.type) {

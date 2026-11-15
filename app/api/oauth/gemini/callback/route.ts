@@ -1,7 +1,7 @@
 import { completeOAuthByCode } from "@/lib/oauth";
 import { publicAppUrl } from "@/lib/cloud-site";
 import { addOAuthSubscriptionSource } from "@/lib/sources";
-import { jsonError } from "@/lib/auth";
+import { getSessionUser, jsonError } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -51,6 +51,15 @@ export async function GET(req: Request) {
   }
 
   try {
+    const session = await getSessionUser(req);
+    if (!session?.isSupplier) {
+      return htmlPage({
+        ok: false,
+        title: "請先以供給者帳號登入",
+        body: "授權回呼需要已登入的供給者工作階段，請回到 /sources 登入後再綁定。",
+        nextHref: sourcesHref,
+      });
+    }
     const fullUrl = url.toString();
     const { creds, label, shareLimitPct } = await completeOAuthByCode({
       codeOrUrl: fullUrl,
@@ -60,6 +69,7 @@ export async function GET(req: Request) {
       creds,
       label,
       shareLimitPct,
+      ownerUserId: session.id,
     });
     return htmlPage({
       ok: true,

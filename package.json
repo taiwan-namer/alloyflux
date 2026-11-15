@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start -H 127.0.0.1 -p 3000",
     "typecheck": "tsc --noEmit",
+    "test": "tsx --test \"lib/research-v2/**/*.test.ts\"",
     "node-agent": "tsx apps/node-agent/src/index.ts",
     "supplier-node": "node -e \"console.error('已改為 npm run node-agent'); process.exit(1)\""
   },

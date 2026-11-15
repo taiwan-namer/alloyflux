@@ -31,6 +31,8 @@ export interface Source {
   quotaUpdatedAt: number | null;
   enabled: boolean;
   fromEnv: boolean;
+  /** 綁定此貨源的平台使用者 id；派發路由不依此過濾 */
+  ownerUserId: string | null;
   /** OAuth Token 已遷到供給者節點本機 */
   delegatedToNode?: boolean;
 }
@@ -71,6 +73,30 @@ interface SourceRow {
   quota_json: string | null;
   quota_updated_at: number | null;
   enabled: number;
+  owner_user_id?: string | null;
+}
+
+const globalForOwnerCol = globalThis as unknown as { __sourcesOwnerColReady?: boolean };
+
+/** 補欄位＋依 OAuth email 認領尚無主人的舊貨源 */
+async function ensureSourcesOwnerColumn(): Promise<void> {
+  if (globalForOwnerCol.__sourcesOwnerColReady) return;
+  await db().exec("ALTER TABLE sources ADD COLUMN IF NOT EXISTS owner_user_id TEXT");
+  await db().exec("CREATE INDEX IF NOT EXISTS idx_sources_owner ON sources(owner_user_id)");
+  try {
+    // 舊 oauth 列：key_hint 形如 `email@x.com (Plan)` → 對應 users.email 認領
+    await db().exec(`
+      UPDATE sources s
+      SET owner_user_id = u.id
+      FROM users u
+      WHERE s.owner_user_id IS NULL
+        AND s.auth_type = 'oauth_sub'
+        AND LOWER(s.key_hint) LIKE LOWER(u.email) || ' (%'
+    `);
+  } catch {
+    // users 表尚未就緒時略過認領
+  }
+  globalForOwnerCol.__sourcesOwnerColReady = true;
 }
 
 function rowToSource(r: SourceRow): Source {
@@ -105,6 +131,7 @@ function rowToSource(r: SourceRow): Source {
     quotaUpdatedAt: r.quota_updated_at,
     enabled: r.enabled === 1,
     fromEnv: false,
+    ownerUserId: r.owner_user_id ?? null,
     delegatedToNode,
   };
 }
@@ -128,6 +155,7 @@ function envSources(): (Source & { secret: string })[] {
         quotaUpdatedAt: null,
         enabled: true,
         fromEnv: true,
+        ownerUserId: null,
         secret: apiKey,
       },
     ];
@@ -135,6 +163,7 @@ function envSources(): (Source & { secret: string })[] {
 }
 
 async function dbSources(): Promise<(Source & { resolveSecret: () => string })[]> {
+  await ensureSourcesOwnerColumn();
   const rows = (await db()
     .prepare("SELECT * FROM sources ORDER BY priority, created_at")
     .all()) as unknown as SourceRow[];
@@ -182,6 +211,31 @@ export async function listSources(): Promise<SourceStatus[]> {
   });
 }
 
+/** 供給者後台：僅自己的貨源；管理員看全部（含 env） */
+export async function listSourcesForUser(user: {
+  id: string;
+  isAdmin: boolean;
+}): Promise<SourceStatus[]> {
+  const all = await listSources();
+  if (user.isAdmin) return all;
+  return all.filter((s) => !s.fromEnv && s.ownerUserId === user.id);
+}
+
+export async function assertSourceOwnedBy(
+  sourceId: string,
+  user: { id: string; isAdmin: boolean },
+): Promise<void> {
+  await ensureSourcesOwnerColumn();
+  const row = (await db()
+    .prepare("SELECT owner_user_id FROM sources WHERE id = ?")
+    .get(sourceId)) as { owner_user_id: string | null } | undefined;
+  if (!row) throw Object.assign(new Error("找不到貨源"), { status: 404 });
+  if (user.isAdmin) return;
+  if (row.owner_user_id !== user.id) {
+    throw Object.assign(new Error("無權操作此貨源"), { status: 403 });
+  }
+}
+
 export async function addSource(input: {
   label: string;
   kind: SourceKind;
@@ -189,13 +243,15 @@ export async function addSource(input: {
   apiKey: string;
   priority?: number;
   monthlyCapPoints?: number | null;
+  ownerUserId?: string | null;
 }): Promise<string> {
+  await ensureSourcesOwnerColumn();
   const apiKey = input.apiKey.trim();
   const id = newId();
   await db()
     .prepare(
-      `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, enabled, created_at)
-       VALUES (?, ?, ?, ?, 'api_key', ?, ?, ?, ?, 100, 1, ?)`,
+      `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, enabled, created_at, owner_user_id)
+       VALUES (?, ?, ?, ?, 'api_key', ?, ?, ?, ?, 100, 1, ?, ?)`,
     )
     .run(
       id,
@@ -207,6 +263,7 @@ export async function addSource(input: {
       input.priority ?? (input.kind === "supplier" ? 200 : 1000),
       input.monthlyCapPoints ?? null,
       Date.now(),
+      input.ownerUserId ?? null,
     );
   return id;
 }
@@ -216,7 +273,9 @@ export async function addOAuthSubscriptionSource(input: {
   creds: OAuthCredentials;
   shareLimitPct?: number;
   priority?: number;
+  ownerUserId?: string | null;
 }): Promise<{ id: string; quota: SubscriptionQuota }> {
+  await ensureSourcesOwnerColumn();
   const quota = await fetchSubscriptionQuota(input.creds);
   const now = Date.now();
   const displayHint = input.creds.email
@@ -230,46 +289,71 @@ export async function addOAuthSubscriptionSource(input: {
         ? `Grok 訂閱 ${input.creds.email ?? ""}`.trim()
         : `ChatGPT 訂閱 ${input.creds.email ?? ""}`.trim());
 
-  // 同平台＋同帳號 email 重綁時直接覆寫（例如先前誤用自建 Web client 導致「暫未能讀取」，改貼官方 token 後立即原地修復）
+  // 同平台＋同帳號 email 重綁：優先覆寫「同一主人」或「尚無主人」的列，不搶別人的
   if (input.creds.email) {
     const emailPrefix = `${input.creds.email.toLowerCase()} (`;
     const existing = (await db()
       .prepare(
-        `SELECT id, label, share_limit_pct FROM sources
+        `SELECT id, label, share_limit_pct, owner_user_id FROM sources
          WHERE auth_type = 'oauth_sub' AND provider = ? AND LOWER(key_hint) LIKE ?
-         ORDER BY created_at DESC LIMIT 1`,
+           AND (
+             owner_user_id IS NULL
+             OR owner_user_id = ?
+             OR ? IS NULL
+           )
+         ORDER BY
+           CASE WHEN owner_user_id = ? THEN 0 WHEN owner_user_id IS NULL THEN 1 ELSE 2 END,
+           created_at DESC
+         LIMIT 1`,
       )
-      .get(input.creds.provider, `${emailPrefix}%`)) as
-      | { id: string; label: string; share_limit_pct: number | null }
+      .get(
+        input.creds.provider,
+        `${emailPrefix}%`,
+        input.ownerUserId ?? null,
+        input.ownerUserId ?? null,
+        input.ownerUserId ?? null,
+      )) as
+      | { id: string; label: string; share_limit_pct: number | null; owner_user_id: string | null }
       | undefined;
 
     if (existing) {
-      await db()
-        .prepare(
-          `UPDATE sources
-           SET label = ?, encrypted_key = ?, key_hint = ?, share_limit_pct = ?,
-               quota_json = ?, quota_updated_at = ?, enabled = 1
-           WHERE id = ?`,
-        )
-        .run(
-          input.label?.trim() || existing.label || defaultLabel,
-          encrypt(JSON.stringify(input.creds)),
-          displayHint,
-          input.shareLimitPct ?? existing.share_limit_pct ?? 80,
-          JSON.stringify(quota),
-          now,
-          existing.id,
-        );
-      health.delete(existing.id);
-      return { id: existing.id, quota };
+      // 若已有主人且不是目前使用者，略過覆寫（理論上 WHERE 已擋；雙重保險）
+      if (
+        existing.owner_user_id &&
+        input.ownerUserId &&
+        existing.owner_user_id !== input.ownerUserId
+      ) {
+        // fall through to insert
+      } else {
+        await db()
+          .prepare(
+            `UPDATE sources
+             SET label = ?, encrypted_key = ?, key_hint = ?, share_limit_pct = ?,
+                 quota_json = ?, quota_updated_at = ?, enabled = 1,
+                 owner_user_id = COALESCE(?, owner_user_id)
+             WHERE id = ?`,
+          )
+          .run(
+            input.label?.trim() || existing.label || defaultLabel,
+            encrypt(JSON.stringify(input.creds)),
+            displayHint,
+            input.shareLimitPct ?? existing.share_limit_pct ?? 80,
+            JSON.stringify(quota),
+            now,
+            input.ownerUserId ?? null,
+            existing.id,
+          );
+        health.delete(existing.id);
+        return { id: existing.id, quota };
+      }
     }
   }
 
   const id = newId();
   await db()
     .prepare(
-      `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, quota_json, quota_updated_at, enabled, created_at)
-       VALUES (?, ?, 'supplier', ?, 'oauth_sub', ?, ?, ?, NULL, ?, ?, ?, 1, ?)`,
+      `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, quota_json, quota_updated_at, enabled, created_at, owner_user_id)
+       VALUES (?, ?, 'supplier', ?, 'oauth_sub', ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?)`,
     )
     .run(
       id,
@@ -282,6 +366,7 @@ export async function addOAuthSubscriptionSource(input: {
       JSON.stringify(quota),
       now,
       now,
+      input.ownerUserId ?? null,
     );
   health.delete(id);
   return { id, quota };

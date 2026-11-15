@@ -1,16 +1,22 @@
-import { jsonError } from "@/lib/auth";
+import { jsonError, requireSupplier } from "@/lib/auth";
 import { cloudDbProxy } from "@/lib/cloud-api";
 import { BASE_URL } from "@/lib/providers";
-import { addSource, listSources, type SourceKind, type SourceProvider } from "@/lib/sources";
+import {
+  addSource,
+  listSourcesForUser,
+  type SourceKind,
+  type SourceProvider,
+} from "@/lib/sources";
 
 export const dynamic = "force-dynamic";
 
-/** 供給者／管理員：綁訂閱與 API Key 貨源 */
+/** 供給者／管理員：綁訂閱與 API Key 貨源（供給者僅見自己的） */
 export async function GET(req: Request) {
   const proxied = await cloudDbProxy(req);
   if (proxied) return proxied;
   try {
-    return Response.json(await listSources());
+    const user = await requireSupplier(req);
+    return Response.json(await listSourcesForUser(user));
   } catch (e) {
     return jsonError(e);
   }
@@ -20,6 +26,7 @@ export async function POST(req: Request) {
   const proxied = await cloudDbProxy(req);
   if (proxied) return proxied;
   try {
+    const user = await requireSupplier(req);
     const body = (await req.json()) as {
       label?: string;
       kind: SourceKind;
@@ -29,6 +36,9 @@ export async function POST(req: Request) {
       monthlyCapPoints?: number | null;
     };
     if (!["supplier", "platform"].includes(body.kind)) return Response.json({ error: "kind 不正確" }, { status: 400 });
+    if (!user.isAdmin && body.kind === "platform") {
+      return Response.json({ error: "僅管理員可新增平台貨源" }, { status: 403 });
+    }
     if (!["gemini", "openai", "anthropic", "xai", "openrouter"].includes(body.provider))
       return Response.json({ error: "provider 不正確" }, { status: 400 });
     if (!body.apiKey?.trim()) return Response.json({ error: "請填入 API Key" }, { status: 400 });
@@ -43,6 +53,7 @@ export async function POST(req: Request) {
       apiKey: body.apiKey,
       priority: body.priority,
       monthlyCapPoints: body.monthlyCapPoints ?? null,
+      ownerUserId: user.id,
     });
     return Response.json({ ok: true });
   } catch (e) {

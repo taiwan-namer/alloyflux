@@ -42,16 +42,19 @@ export function shouldProxyOAuthPersist(req?: Request): boolean {
 
 type JsonBody = Record<string, unknown> & { action?: string };
 
-/** OAuth 寫入專用：POST JSON 到雲端 /api/oauth */
-export async function persistOAuthViaCloud(body: JsonBody): Promise<Record<string, unknown>> {
+/** OAuth 寫入專用：POST JSON 到雲端 /api/oauth（轉發 cookie 以綁定擁有者） */
+export async function persistOAuthViaCloud(body: JsonBody, req?: Request): Promise<Record<string, unknown>> {
   const url = `${cloudApiBase()}/api/oauth`;
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    [CLOUD_DB_PROXY_HEADER]: "1",
+    "x-oauth-no-proxy": "1",
+  };
+  const cookie = req?.headers.get("cookie");
+  if (cookie) headers.cookie = cookie;
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      [CLOUD_DB_PROXY_HEADER]: "1",
-      "x-oauth-no-proxy": "1",
-    },
+    headers,
     body: JSON.stringify(body),
   });
   let data: Record<string, unknown> = {};
