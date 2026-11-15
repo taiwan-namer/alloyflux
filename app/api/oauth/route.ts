@@ -198,8 +198,8 @@ export async function POST(req: Request) {
     switch (body.action) {
       case "start_gemini": {
         const res = startGeminiOAuth({ label: body.label, shareLimitPct: body.shareLimitPct });
-        // 僅 CLI 內建 client（loopback）才需本機 51121；正式網域 Web OAuth 由 /api/oauth/gemini/callback 接手
-        if (res.mode === "loopback") {
+        // 只有本機開發才開 51121 自動接 callback；線上（Vercel）走「複製 localhost 網址貼回」流程
+        if (!process.env.VERCEL) {
           ensureLocalCallbackListener(51121, "/oauth-callback");
         }
         return Response.json({

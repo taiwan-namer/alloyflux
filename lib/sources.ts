@@ -218,7 +218,7 @@ export async function addOAuthSubscriptionSource(input: {
   priority?: number;
 }): Promise<{ id: string; quota: SubscriptionQuota }> {
   const quota = await fetchSubscriptionQuota(input.creds);
-  const id = newId();
+  const now = Date.now();
   const displayHint = input.creds.email
     ? `${input.creds.email} (${quota.planType})`
     : `${input.creds.provider.toUpperCase()} (${quota.planType})`;
@@ -230,6 +230,42 @@ export async function addOAuthSubscriptionSource(input: {
         ? `Grok 訂閱 ${input.creds.email ?? ""}`.trim()
         : `ChatGPT 訂閱 ${input.creds.email ?? ""}`.trim());
 
+  // 同平台＋同帳號 email 重綁時直接覆寫（例如先前誤用自建 Web client 導致「暫未能讀取」，改貼官方 token 後立即原地修復）
+  if (input.creds.email) {
+    const emailPrefix = `${input.creds.email.toLowerCase()} (`;
+    const existing = (await db()
+      .prepare(
+        `SELECT id, label, share_limit_pct FROM sources
+         WHERE auth_type = 'oauth_sub' AND provider = ? AND LOWER(key_hint) LIKE ?
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(input.creds.provider, `${emailPrefix}%`)) as
+      | { id: string; label: string; share_limit_pct: number | null }
+      | undefined;
+
+    if (existing) {
+      await db()
+        .prepare(
+          `UPDATE sources
+           SET label = ?, encrypted_key = ?, key_hint = ?, share_limit_pct = ?,
+               quota_json = ?, quota_updated_at = ?, enabled = 1
+           WHERE id = ?`,
+        )
+        .run(
+          input.label?.trim() || existing.label || defaultLabel,
+          encrypt(JSON.stringify(input.creds)),
+          displayHint,
+          input.shareLimitPct ?? existing.share_limit_pct ?? 80,
+          JSON.stringify(quota),
+          now,
+          existing.id,
+        );
+      health.delete(existing.id);
+      return { id: existing.id, quota };
+    }
+  }
+
+  const id = newId();
   await db()
     .prepare(
       `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, quota_json, quota_updated_at, enabled, created_at)
@@ -244,8 +280,8 @@ export async function addOAuthSubscriptionSource(input: {
       input.priority ?? 50,
       input.shareLimitPct ?? 80,
       JSON.stringify(quota),
-      Date.now(),
-      Date.now(),
+      now,
+      now,
     );
   health.delete(id);
   return { id, quota };

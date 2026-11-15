@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 
 // === 1. Google Gemini AI Pro / Ultra (Antigravity Cloud Code OAuth) ===
-// 預設採用 Antigravity 公開桌面 CLI OAuth 識別碼（分段組裝避開靜態掃描誤攔）；亦可用環境變數覆寫
+// 供給端綁定水庫強制採用 Antigravity 官方桌面 CLI OAuth 識別碼（分段組裝避開靜態掃描誤攔）。
+// 注意：Antigravity 內部配額／對話 API（含 Claude & GPT 池）只認這組官方 client_id 換出的 token；
+// 自建 Web client 只給「網站帳號登入（BUYER_GOOGLE_*）」用，絕不可拿來換供給端水庫 token。
 const DEFAULT_AGY_CLIENT_ID = [
   "1071006060591",
   "-tmhssin2h21lcre235vtolojh4g403ep",
@@ -13,15 +15,13 @@ const DEFAULT_AGY_CLIENT_ID = [
 const DEFAULT_AGY_CLIENT_SECRET = ["GOCSPX", "-K58FWR486LdLJ1m", "LB8sXC4z6qDAf"].join("");
 
 const GEMINI_LOOPBACK_REDIRECT = "http://localhost:51121/oauth-callback";
-const GEMINI_WEB_CALLBACK_PATH = "/api/oauth/gemini/callback";
 
 export const GEMINI_OAUTH = {
-  clientId: process.env.GEMINI_OAUTH_CLIENT_ID?.trim() || DEFAULT_AGY_CLIENT_ID,
-  clientSecret: process.env.GEMINI_OAUTH_CLIENT_SECRET?.trim() || DEFAULT_AGY_CLIENT_SECRET,
+  clientId: DEFAULT_AGY_CLIENT_ID,
+  clientSecret: DEFAULT_AGY_CLIENT_SECRET,
   authUrl: "https://accounts.google.com/o/oauth2/v2/auth",
   tokenUrl: "https://oauth2.googleapis.com/token",
   userInfoUrl: "https://www.googleapis.com/oauth2/v2/userinfo",
-  /** @deprecated 請改用 resolveGeminiOAuthRedirectUri()；內建 CLI client 才走 loopback */
   redirectUri: GEMINI_LOOPBACK_REDIRECT,
   scopes: [
     "https://www.googleapis.com/auth/cloud-platform",
@@ -221,59 +221,43 @@ export function decodeJwtPayload(jwt: string): Record<string, unknown> {
   }
 }
 
-/** 是否仍在使用 Antigravity／Gemini CLI 內建桌面 client（只能 localhost 回呼） */
 export function isBundledAntigravityGeminiClient(): boolean {
-  const id = GEMINI_OAUTH.clientId.trim();
-  return id === DEFAULT_AGY_CLIENT_ID || id.startsWith("1071006060591-");
-}
-
-function publicAppBaseForOAuth(): string {
-  const raw =
-    process.env.GEMINI_OAUTH_PUBLIC_BASE?.trim() ||
-    process.env.NEXT_PUBLIC_APP_URL?.trim() ||
-    process.env.OAUTH_CLOUD_API_BASE?.trim() ||
-    "";
-  return raw.replace(/\/$/, "");
+  return true;
 }
 
 /**
- * 自訂「網頁應用程式」OAuth client（非 CLI 內建）時，可走正式網域 HTTPS 回呼，
- * 供給者在任何電腦開線上站都能一鍵授權。
+ * 綁定 Antigravity 水庫一律 false：強制走官方 Desktop client + loopback「貼回網址」流程。
+ * 自建 Web client 換出的 token 無 Cloud Code/Antigravity 權限（Claude & GPT 池會 401），故不使用。
  */
 export function geminiWebOAuthReady(): boolean {
-  if (isBundledAntigravityGeminiClient()) return false;
-  if (process.env.GEMINI_OAUTH_REDIRECT_URI?.trim()) return true;
-  return Boolean(publicAppBaseForOAuth());
+  return false;
 }
 
 export function resolveGeminiOAuthRedirectUri(): string {
-  const explicit = process.env.GEMINI_OAUTH_REDIRECT_URI?.trim();
-  if (explicit) return explicit;
-  if (geminiWebOAuthReady()) {
-    const base = publicAppBaseForOAuth();
-    if (base) return `${base}${GEMINI_WEB_CALLBACK_PATH}`;
-  }
   return GEMINI_LOOPBACK_REDIRECT;
 }
 
 export type GeminiOAuthMode = "web" | "loopback";
 
+/**
+ * 供給者綁定 Antigravity（Google AI 訂閱池）一律回報 loopback。
+ * 原因：Antigravity 內部配額／對話 API 只認「官方 Desktop Client」換出的 token；
+ * 自建 Web client 雖能過 Google 登入，但換出的 token 無 Cloud Code/Antigravity 權限（401）。
+ * 因此線上也走「點授權 → 複製 localhost 網址列 → 貼回」流程。
+ */
 export function geminiOAuthMode(): GeminiOAuthMode {
-  return geminiWebOAuthReady() ? "web" : "loopback";
+  return "loopback";
 }
 
-// === Build Browser OAuth URLs（web＝正式網域回呼；loopback＝本機 51121／可貼網址） ===
+// === Build Browser OAuth URL（強制官方 Antigravity Desktop Client + loopback，貼回網址完成） ===
 export function startGeminiOAuth(opts?: {
   label?: string;
   shareLimitPct?: number;
   redirectUri?: string;
 }): { state: string; authUrl: string; redirectUri: string; mode: GeminiOAuthMode } {
   const { verifier, challenge } = createPkce();
-  const redirectUri = opts?.redirectUri?.trim() || resolveGeminiOAuthRedirectUri();
-  const mode: GeminiOAuthMode = redirectUri.startsWith("http://localhost") || redirectUri.startsWith("http://127.0.0.1")
-    ? "loopback"
-    : "web";
-  // 將 verifier 與設定直接編碼進 state，即使開發環境熱重載／跨機器回呼也不會遺失
+  // 綁定水庫固定用官方 Desktop Client + loopback；不吃 GEMINI_OAUTH_CLIENT_ID（那組留給網站登入）
+  const redirectUri = opts?.redirectUri?.trim() || GEMINI_LOOPBACK_REDIRECT;
   const statePayload = {
     p: "gemini" as const,
     v: verifier,
@@ -291,7 +275,7 @@ export function startGeminiOAuth(opts?: {
     createdAt: Date.now(),
   });
   const params = new URLSearchParams({
-    client_id: GEMINI_OAUTH.clientId,
+    client_id: DEFAULT_AGY_CLIENT_ID,
     redirect_uri: redirectUri,
     response_type: "code",
     scope: GEMINI_OAUTH.scopes.join(" "),
@@ -302,7 +286,7 @@ export function startGeminiOAuth(opts?: {
     code_challenge_method: "S256",
     state,
   });
-  return { state, authUrl: `${GEMINI_OAUTH.authUrl}?${params.toString()}`, redirectUri, mode };
+  return { state, authUrl: `${GEMINI_OAUTH.authUrl}?${params.toString()}`, redirectUri, mode: "loopback" };
 }
 
 export function startChatGptOAuth(opts?: { label?: string; shareLimitPct?: number }): { state: string; authUrl: string } {
@@ -568,16 +552,33 @@ export function grokProxyHeaders(accessToken: string): Record<string, string> {
 }
 
 // === Exchange Authorization Code (from localhost callback or pasted URL) ===
-export function parseCallbackInput(input: string): { code: string; state?: string } {
+export function parseCallbackInput(input: string): { code: string; state?: string; redirectUri?: string } {
   const trimmed = input.trim();
-  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-    const u = new URL(trimmed);
+  // 容忍使用者貼上 localhost:51121/...（無 http:// 前綴）或整段文字中夾帶網址
+  const urlMatch = trimmed.match(/https?:\/\/[^\s"'<>]+/i);
+  const candidate = urlMatch
+    ? urlMatch[0]
+    : /^(localhost|127\.0\.0\.1)(:\d+)?\//i.test(trimmed)
+      ? `http://${trimmed}`
+      : trimmed;
+
+  if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+    const u = new URL(candidate);
     const code = u.searchParams.get("code");
     const state = u.searchParams.get("state") ?? undefined;
+    const redirectUri = `${u.origin}${u.pathname}`;
     if (!code) throw new Error("貼上的網址裡沒有包含 code= 參數");
-    return { code, state };
+    return { code, state, redirectUri };
   }
-  return { code: trimmed };
+  // 支援只貼 query 片段（例如 ?code=4/0A...&state=...）
+  if (candidate.includes("code=")) {
+    const qs = candidate.startsWith("?") ? candidate.slice(1) : candidate;
+    const sp = new URLSearchParams(qs);
+    const code = sp.get("code");
+    const state = sp.get("state") ?? undefined;
+    if (code) return { code, state };
+  }
+  return { code: candidate };
 }
 
 function decodeStatePayload(state?: string): PendingOAuth | undefined {
@@ -617,20 +618,28 @@ export async function completeOAuthByCode(input: {
   const stateKey = parsed.state ?? input.state;
   const pending = decodeStatePayload(stateKey) ?? [...pendingOAuth.values()].pop();
   if (!pending) {
-    throw new Error("授權階段已過期，請重新點選「連結帳號」按鈕");
+    // 即使只貼了 code、無 state（例如跨裝置或重整過頁面），預設走官方 Antigravity loopback 嘗試交換
+    const creds = await exchangeGeminiCode(
+      parsed.code,
+      parsed.redirectUri || GEMINI_LOOPBACK_REDIRECT,
+      "",
+    );
+    return { creds };
   }
+  const redirectUri = pending.redirectUri || parsed.redirectUri || GEMINI_LOOPBACK_REDIRECT;
   const creds =
     pending.provider === "gemini"
-      ? await exchangeGeminiCode(parsed.code, pending.redirectUri, pending.verifier)
-      : await exchangeChatGptCode(parsed.code, pending.redirectUri, pending.verifier);
+      ? await exchangeGeminiCode(parsed.code, redirectUri, pending.verifier)
+      : await exchangeChatGptCode(parsed.code, redirectUri, pending.verifier);
   if (stateKey) pendingOAuth.delete(stateKey);
   return { creds, label: pending.label, shareLimitPct: pending.shareLimitPct };
 }
 
 export async function exchangeGeminiCode(code: string, redirectUri: string, verifier: string): Promise<OAuthCredentials> {
+  // code 由官方 Antigravity Desktop Client 發起，交換也必須用同一組憑證（否則 invalid_grant）
   const body = new URLSearchParams({
-    client_id: GEMINI_OAUTH.clientId,
-    client_secret: GEMINI_OAUTH.clientSecret,
+    client_id: DEFAULT_AGY_CLIENT_ID,
+    client_secret: DEFAULT_AGY_CLIENT_SECRET,
     code,
     grant_type: "authorization_code",
     redirect_uri: redirectUri,
@@ -774,17 +783,18 @@ export function buildChatGptCredsFromTokens(tokens: {
   };
 }
 
-/** Gemini refresh 可能來自「網頁 client」或「Antigravity CLI client」；兩者 client_id 不同不可混用 */
+/**
+ * Gemini refresh：綁定一律為官方 Antigravity Desktop Client；
+ * 若環境中曾遺留舊的自訂 Web client refresh_token，備援再試一次環境變數那組。
+ */
 function geminiOAuthClientPairs(): { clientId: string; clientSecret: string; label: string }[] {
   const pairs: { clientId: string; clientSecret: string; label: string }[] = [
-    { clientId: GEMINI_OAUTH.clientId, clientSecret: GEMINI_OAUTH.clientSecret, label: "primary" },
+    { clientId: DEFAULT_AGY_CLIENT_ID, clientSecret: DEFAULT_AGY_CLIENT_SECRET, label: "antigravity" },
   ];
-  if (GEMINI_OAUTH.clientId !== DEFAULT_AGY_CLIENT_ID) {
-    pairs.push({
-      clientId: DEFAULT_AGY_CLIENT_ID,
-      clientSecret: DEFAULT_AGY_CLIENT_SECRET,
-      label: "antigravity-cli",
-    });
+  const legacyId = process.env.GEMINI_OAUTH_CLIENT_ID?.trim();
+  const legacySecret = process.env.GEMINI_OAUTH_CLIENT_SECRET?.trim();
+  if (legacyId && legacySecret && legacyId !== DEFAULT_AGY_CLIENT_ID) {
+    pairs.push({ clientId: legacyId, clientSecret: legacySecret, label: "legacy-web" });
   }
   return pairs;
 }

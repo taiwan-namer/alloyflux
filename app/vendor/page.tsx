@@ -95,7 +95,6 @@ export default function VendorPage() {
   const [activeOAuthState, setActiveOAuthState] = useState<string | null>(null);
   const [activeAuthUrl, setActiveAuthUrl] = useState<string | null>(null);
   const [callbackInput, setCallbackInput] = useState("");
-  const [geminiWebOAuthReady, setGeminiWebOAuthReady] = useState(false);
   const [deviceFlow, setDeviceFlow] = useState<{
     kind: "chatgpt" | "grok";
     state: string;
@@ -119,10 +118,6 @@ export default function VendorPage() {
           }
         }
       })
-      .catch(() => {});
-    fetch("/api/oauth", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d) => setGeminiWebOAuthReady(Boolean(d.geminiWebOAuthReady)))
       .catch(() => {});
   }, [router]);
 
@@ -211,11 +206,6 @@ export default function VendorPage() {
           return;
         }
         setActiveOAuthState(data.state);
-        if (data.mode === "web" && data.authUrl) {
-          setActiveAuthUrl(null);
-          window.location.assign(data.authUrl as string);
-          return;
-        }
         setActiveAuthUrl(data.authUrl);
         window.open(data.authUrl, "_blank", "noopener,noreferrer");
       } else if (selectedModule === "claude" && claudeMode === "api_key") {
@@ -274,8 +264,9 @@ export default function VendorPage() {
     }
   }
 
-  async function submitCallbackUrl() {
-    if (!callbackInput.trim()) return;
+  async function submitCallbackUrl(overrideValue?: string) {
+    const raw = (overrideValue ?? callbackInput).trim();
+    if (!raw || busy) return;
     setBusy(true);
     setOauthMsg(null);
     try {
@@ -284,7 +275,7 @@ export default function VendorPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           action: "complete_code",
-          codeOrUrl: callbackInput.trim(),
+          codeOrUrl: raw,
           state: activeOAuthState ?? undefined,
           label: subLabel.trim() || (selectedModule === "claude" ? "Claude & Gemini 訂閱池" : undefined),
           shareLimitPct,
@@ -295,13 +286,28 @@ export default function VendorPage() {
         setOauthMsg({ ok: false, text: data.error || "授權驗證失敗，請確認貼上完整回呼網址" });
         return;
       }
+      const claudeWin = Array.isArray(data.quota?.windows)
+        ? data.quota.windows.find((w: { label?: string }) => /claude/i.test(w.label ?? ""))
+        : null;
+      const pctNote = claudeWin
+        ? `（Claude & GPT 池剩餘 ${claudeWin.uiRemainingPercent ?? Math.round(claudeWin.remainingPercent)}%）`
+        : typeof data.quota?.primaryRemainingPercent === "number"
+          ? `（主池剩餘 ${data.quota.primaryRemainingPercent}%）`
+          : "";
       setOauthMsg({
         ok: true,
-        text: "✓ Google OAuth 已寫入雲端並讀取剩餘 %！正在跳轉至線上 /sources…",
+        text: `✓ Google 算力節點綁定完成${pctNote}！正在進入 /sources…`,
       });
       goToSourcesAfterBind((href) => router.push(href));
     } finally {
       setBusy(false);
+    }
+  }
+
+  function onCallbackInputChange(val: string) {
+    setCallbackInput(val);
+    if (/[?&]code=[^&\s]{10,}/.test(val)) {
+      void submitCallbackUrl(val);
     }
   }
 
@@ -564,27 +570,51 @@ export default function VendorPage() {
             )}
           </button>
 
-          {/* 僅 loopback 模式才需貼回網址；Web OAuth 會自動導回站台 */}
-          {activeAuthUrl && !geminiWebOAuthReady && (
+          {/* 官方 Antigravity 授權：點授權 → 複製 localhost 網址列 → 貼回（線上免本機、免裝任何程式） */}
+          {activeAuthUrl && (
             <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
-              <div style={{ marginBottom: 8, lineHeight: 1.6, fontSize: 13 }}>
-                <strong>Google OAuth 授權確認（本機回呼模式）：</strong>
-                <br />
-                ・請保持 <code>npm run dev</code> 開著，按允許後監聽 <code>51121</code> 會自動完成。
-                <br />
-                ・若瀏覽器停在無法連線頁，把網址列{" "}
-                <code>http://localhost:51121/oauth-callback?code=...</code> <strong>整串貼下方</strong>：
-                <br />
-                <span className="muted">
-                  線上站一鍵授權需在 Vercel 設定自訂 Google「網頁應用程式」OAuth client（非 CLI 內建 ID）。
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <a
+                  href={activeAuthUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="primary"
+                  style={{
+                    display: "inline-block",
+                    padding: "9px 14px",
+                    borderRadius: 8,
+                    textDecoration: "none",
+                    fontWeight: 700,
+                    fontSize: 13,
+                  }}
+                >
+                  🔗 1. 前往 Google 授權帳號
+                </a>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {typeof window !== "undefined" &&
+                  (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+                    ? "本機開發環境：按允許後會自動完成回呼；若未跳轉也可貼上網址。"
+                    : "已為您開啟新分頁；若被瀏覽器攔截，請點左側按鈕開啟。"}
                 </span>
               </div>
+              <div style={{ marginBottom: 10, lineHeight: 1.7, fontSize: 13 }}>
+                請在彈出視窗登入並點擊允許。完成後瀏覽器會跳轉至 <code>localhost</code> 並顯示『
+                <strong>無法連上這個網站</strong>』——<strong>這是正常現象！請直接複製該頁面上方的『完整網址列』貼回下方。</strong>
+                <br />
+                <span className="muted" style={{ fontSize: 12 }}>
+                  貼上含 <code>code=</code> 的網址後系統會自動交換官方 Antigravity Token，立即讀取 Claude &amp; GPT 池剩餘 %。
+                </span>
+              </div>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+                📋 2. 在此貼上授權後的完整網址（或 code）
+              </label>
               <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
                 <input
                   style={{ flex: 1, minWidth: 220 }}
                   value={callbackInput}
-                  placeholder="貼上 http://localhost:51121/oauth-callback?code=... 整串網址"
-                  onChange={(e) => setCallbackInput(e.target.value)}
+                  disabled={busy}
+                  placeholder="貼上 http://localhost:51121/oauth-callback?code=... 整串網址（貼上即自動綁定）"
+                  onChange={(e) => onCallbackInputChange(e.target.value)}
                 />
                 <button
                   type="button"
@@ -592,7 +622,7 @@ export default function VendorPage() {
                   disabled={busy || !callbackInput.trim()}
                   onClick={() => void submitCallbackUrl()}
                 >
-                  {busy ? "綁定讀取中…" : "完成綁定並進入 /sources →"}
+                  {busy ? "交換 Token 並讀取額度中…" : "完成綁定並進入 /sources →"}
                 </button>
               </div>
             </div>

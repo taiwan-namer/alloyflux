@@ -170,7 +170,7 @@ export default function SourcesPage() {
   } | null>(null);
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [geminiWebOAuthReady, setGeminiWebOAuthReady] = useState(false);
+  const [submittingCode, setSubmittingCode] = useState(false);
 
   // 單一節點即時滑桿草稿（拖動時即時換算金額，放開寫入後端）
   const [draftLimits, setDraftLimits] = useState<Record<string, number>>({});
@@ -235,7 +235,6 @@ export default function SourcesPage() {
       .then((r) => r.json())
       .then((d) => {
         setLocalCli(d.localCli ?? []);
-        setGeminiWebOAuthReady(Boolean(d.geminiWebOAuthReady));
       })
       .catch(() => {});
     if (typeof window !== "undefined") {
@@ -296,12 +295,6 @@ export default function SourcesPage() {
       return;
     }
     setActiveOAuthState(data.state);
-    // 正式網域 Web OAuth：同一分頁導向 Google，同意後回 /api/oauth/gemini/callback → /sources
-    if (action === "start_gemini" && data.mode === "web" && data.authUrl) {
-      setActiveAuthUrl(null);
-      window.location.assign(data.authUrl as string);
-      return;
-    }
     setActiveAuthUrl(data.authUrl);
     window.open(data.authUrl, "_blank", "noopener,noreferrer");
   }
@@ -341,33 +334,55 @@ export default function SourcesPage() {
     window.open(verifyUrl, "_blank", "noopener,noreferrer");
   }
 
-  async function submitCallbackUrl() {
-    if (!callbackInput.trim()) return;
+  async function submitCallbackUrl(overrideValue?: string) {
+    const raw = (overrideValue ?? callbackInput).trim();
+    if (!raw || submittingCode) return;
+    setSubmittingCode(true);
     setOauthMsg(null);
-    const res = await fetch("/api/oauth", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        action: "complete_code",
-        codeOrUrl: callbackInput.trim(),
-        state: activeOAuthState ?? undefined,
-        label: subLabel,
-        shareLimitPct,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setOauthMsg({ ok: false, text: data.error });
-      return;
+    try {
+      const res = await fetch("/api/oauth", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "complete_code",
+          codeOrUrl: raw,
+          state: activeOAuthState ?? undefined,
+          label: subLabel,
+          shareLimitPct,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setOauthMsg({ ok: false, text: data.error });
+        return;
+      }
+      const claudeWin = Array.isArray(data.quota?.windows)
+        ? data.quota.windows.find((w: { label?: string }) => /claude/i.test(w.label ?? ""))
+        : null;
+      const pctNote = claudeWin
+        ? `（Claude & GPT 池剩餘 ${claudeWin.uiRemainingPercent ?? Math.round(claudeWin.remainingPercent)}%）`
+        : typeof data.quota?.primaryRemainingPercent === "number"
+          ? `（主池剩餘 ${data.quota.primaryRemainingPercent}%）`
+          : "";
+      setOauthMsg({ ok: true, text: `✓ Google 算力節點綁定完成！已即時同步容量${pctNote}` });
+      setCallbackInput("");
+      setActiveAuthUrl(null);
+      setSubLabel("");
+      // 本機無 DB 時列表讀不到雲端資料，導向線上 /sources
+      goToSourcesAfterBind(() => {
+        void refresh();
+      });
+    } finally {
+      setSubmittingCode(false);
     }
-    setOauthMsg({ ok: true, text: "✓ 新模型節點已寫入雲端並同步剩餘容量" });
-    setCallbackInput("");
-    setActiveAuthUrl(null);
-    setSubLabel("");
-    // 本機無 DB 時列表讀不到雲端資料，導向線上 /sources
-    goToSourcesAfterBind(() => {
-      void refresh();
-    });
+  }
+
+  function onCallbackInputChange(val: string) {
+    setCallbackInput(val);
+    // 貼上含 code= 的完整回呼網址時自動送出，免多按一次
+    if (/[?&]code=[^&\s]{10,}/.test(val)) {
+      void submitCallbackUrl(val);
+    }
   }
 
   async function importCli(provider: "gemini" | "openai" | "xai") {
@@ -990,11 +1005,9 @@ export default function SourcesPage() {
             style={{ padding: "12px 14px", textAlign: "left" }}
             onClick={() => void startBrowserOAuth("start_gemini")}
           >
-            <div style={{ fontWeight: 700 }}>✦ Google Gemini 模組（AI Pro / Ultra）</div>
+            <div style={{ fontWeight: 700 }}>✦ Google Gemini 模組（AI Pro / Ultra，含 Claude & GPT 池）</div>
             <div style={{ fontSize: 12, opacity: 0.9, marginTop: 3 }}>
-              {geminiWebOAuthReady
-                ? "一鍵 Google OAuth（正式網域回呼）· 讀取剩餘 %"
-                : "一鍵 Google OAuth 授權 · 讀取剩餘 %"}
+              點授權 → 複製 localhost 網址列 → 貼回（免裝程式，30 秒）
             </div>
           </button>
 
@@ -1131,29 +1144,58 @@ export default function SourcesPage() {
           </div>
         )}
 
-        {activeAuthUrl && !geminiWebOAuthReady && (
+        {activeAuthUrl && (
           <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
-            <div style={{ marginBottom: 8, fontSize: 13, lineHeight: 1.6 }}>
-              目前為本機回呼模式。在新開的{" "}
-              <a href={activeAuthUrl} target="_blank" rel="noreferrer">
-                官方 OAuth 視窗
-              </a>{" "}
-              完成同意後，網址列若出現 <code>http://localhost:51121/...</code>，請整串貼下方（寫入走雲端 API，本機不必設 DATABASE_URL）。
-              <br />
-              <span className="muted">
-                若要讓任何電腦都能一鍵完成（不必貼網址），請在 Google Cloud 建立「網頁應用程式」OAuth client，並於 Vercel 設定自訂{" "}
-                <code>GEMINI_OAUTH_CLIENT_ID</code>／<code>SECRET</code>。
+            <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 10 }}>
+              <a
+                href={activeAuthUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="primary"
+                style={{
+                  display: "inline-block",
+                  padding: "9px 14px",
+                  borderRadius: 8,
+                  textDecoration: "none",
+                  fontWeight: 700,
+                  fontSize: 13,
+                }}
+              >
+                🔗 1. 前往 Google 授權帳號
+              </a>
+              <span className="muted" style={{ fontSize: 12 }}>
+                {typeof window !== "undefined" &&
+                (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+                  ? "本機開發環境：按允許後會自動完成回呼；若未跳轉也可貼上網址。"
+                  : "已為您開啟新分頁；若被瀏覽器攔截，請點左側按鈕開啟。"}
               </span>
             </div>
+            <div style={{ marginBottom: 10, fontSize: 13, lineHeight: 1.7 }}>
+              請在彈出視窗登入並點擊允許。完成後瀏覽器會跳轉至 <code>localhost</code> 並顯示『
+              <strong>無法連上這個網站</strong>』——<strong>這是正常現象！請直接複製該頁面上方的『完整網址列』貼回下方。</strong>
+              <br />
+              <span className="muted" style={{ fontSize: 12 }}>
+                貼上含 <code>code=</code> 的網址後系統會自動交換官方 Antigravity Token，立即讀取 Gemini 與 Claude &amp; GPT 池剩餘 %。
+              </span>
+            </div>
+            <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+              📋 2. 在此貼上授權後的完整網址（或 code）
+            </label>
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <input
                 style={{ flex: 1, minWidth: 220 }}
                 value={callbackInput}
-                placeholder="貼上 http://localhost:51121/oauth-callback?code=... 整串網址"
-                onChange={(e) => setCallbackInput(e.target.value)}
+                disabled={submittingCode}
+                placeholder="貼上 http://localhost:51121/oauth-callback?code=... 整串網址（貼上即自動綁定）"
+                onChange={(e) => onCallbackInputChange(e.target.value)}
               />
-              <button type="button" className="primary" onClick={() => void submitCallbackUrl()}>
-                完成串接
+              <button
+                type="button"
+                className="primary"
+                disabled={submittingCode || !callbackInput.trim()}
+                onClick={() => void submitCallbackUrl()}
+              >
+                {submittingCode ? "交換 Token 並讀取額度中…" : "完成綁定"}
               </button>
             </div>
           </div>
