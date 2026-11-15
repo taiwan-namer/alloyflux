@@ -377,11 +377,29 @@ export default function SourcesPage() {
     }
   }
 
+  function looksLikeGoogleAuthCode(val: string): boolean {
+    const t = val.trim();
+    return /[?&]code=[^&\s]{10,}/.test(t) || /^4\/[0-9A-Za-z_-]{20,}$/.test(t);
+  }
+
   function onCallbackInputChange(val: string) {
     setCallbackInput(val);
-    // 貼上含 code= 的完整回呼網址時自動送出，免多按一次
-    if (/[?&]code=[^&\s]{10,}/.test(val)) {
+    if (looksLikeGoogleAuthCode(val)) {
       void submitCallbackUrl(val);
+    }
+  }
+
+  async function pasteFromClipboardAndSubmit() {
+    try {
+      const txt = (await navigator.clipboard.readText()).trim();
+      if (!txt) {
+        setOauthMsg({ ok: false, text: "剪貼簿是空的，請先在 Google 頁面點「Copy to Clipboard」按鈕" });
+        return;
+      }
+      setCallbackInput(txt);
+      await submitCallbackUrl(txt);
+    } catch {
+      setOauthMsg({ ok: false, text: "瀏覽器請允許讀取剪貼簿，或直接在下方框內長按貼上" });
     }
   }
 
@@ -1007,7 +1025,7 @@ export default function SourcesPage() {
           >
             <div style={{ fontWeight: 700 }}>✦ Google Gemini 模組（AI Pro / Ultra，含 Claude & GPT 池）</div>
             <div style={{ fontSize: 12, opacity: 0.9, marginTop: 3 }}>
-              點授權 → 複製 localhost 網址列 → 貼回（免裝程式，30 秒）
+              官方認證頁一鍵複製代碼 · 一鍵貼上完成（免裝程式，15 秒）
             </div>
           </button>
 
@@ -1163,39 +1181,38 @@ export default function SourcesPage() {
               >
                 🔗 1. 前往 Google 授權帳號
               </a>
-              <span className="muted" style={{ fontSize: 12 }}>
-                {typeof window !== "undefined" &&
-                (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
-                  ? "本機開發環境：按允許後會自動完成回呼；若未跳轉也可貼上網址。"
-                  : "已為您開啟新分頁；若被瀏覽器攔截，請點左側按鈕開啟。"}
-              </span>
+              <button
+                type="button"
+                className="primary"
+                disabled={submittingCode}
+                style={{ padding: "9px 14px", fontWeight: 700, fontSize: 13 }}
+                onClick={() => void pasteFromClipboardAndSubmit()}
+              >
+                {submittingCode ? "正在交換 Token 並讀取額度…" : "📋 2. 一鍵從剪貼簿貼上並綁定"}
+              </button>
             </div>
             <div style={{ marginBottom: 10, fontSize: 13, lineHeight: 1.7 }}>
-              請在彈出視窗登入並點擊允許。完成後瀏覽器會跳轉至 <code>localhost</code> 並顯示『
-              <strong>無法連上這個網站</strong>』——<strong>這是正常現象！請直接複製該頁面上方的『完整網址列』貼回下方。</strong>
+              <strong>超簡單 2 個按鈕完成（免打字、免選網址）：</strong>
               <br />
-              <span className="muted" style={{ fontSize: 12 }}>
-                貼上含 <code>code=</code> 的網址後系統會自動交換官方 Antigravity Token，立即讀取 Gemini 與 Claude &amp; GPT 池剩餘 %。
-              </span>
+              ① 在新分頁登入 Google 並按「允許」，畫面會直接跳到 Google 官方認證頁，點頁面中央黑色按鈕{" "}
+              <strong>「Copy to Clipboard」</strong>。
+              <br />
+              ② 回到本頁點上方 <strong>「📋 2. 一鍵從剪貼簿貼上並綁定」</strong>（或在下方框直接貼上）即自動完成，立刻顯示 Claude &amp; GPT 池剩餘 %！
             </div>
-            <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-              📋 2. 在此貼上授權後的完整網址（或 code）
-            </label>
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <input
                 style={{ flex: 1, minWidth: 220 }}
                 value={callbackInput}
                 disabled={submittingCode}
-                placeholder="貼上 http://localhost:51121/oauth-callback?code=... 整串網址（貼上即自動綁定）"
+                placeholder="或在此貼上剛複製的授權碼（4/0A... 貼上即自動綁定）"
                 onChange={(e) => onCallbackInputChange(e.target.value)}
               />
               <button
                 type="button"
-                className="primary"
                 disabled={submittingCode || !callbackInput.trim()}
                 onClick={() => void submitCallbackUrl()}
               >
-                {submittingCode ? "交換 Token 並讀取額度中…" : "完成綁定"}
+                {submittingCode ? "綁定中…" : "手動送出"}
               </button>
             </div>
           </div>

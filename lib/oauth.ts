@@ -15,6 +15,12 @@ const DEFAULT_AGY_CLIENT_ID = [
 const DEFAULT_AGY_CLIENT_SECRET = ["GOCSPX", "-K58FWR486LdLJ1m", "LB8sXC4z6qDAf"].join("");
 
 const GEMINI_LOOPBACK_REDIRECT = "http://localhost:51121/oauth-callback";
+/**
+ * Google Antigravity 官方內建 HTTPS 認證頁！
+ * 同一組官方 Client ID 合法白名單 URI，允許後不會跳去壞掉的 localhost，
+ * 而是直接打開 Google 官方頁面並提供「Copy to Clipboard」一鍵複製按鈕！
+ */
+export const GEMINI_OFFICIAL_HOSTED_REDIRECT = "https://antigravity.google/oauth-callback";
 
 export const GEMINI_OAUTH = {
   clientId: DEFAULT_AGY_CLIENT_ID,
@@ -233,31 +239,36 @@ export function geminiWebOAuthReady(): boolean {
   return false;
 }
 
-export function resolveGeminiOAuthRedirectUri(): string {
-  return GEMINI_LOOPBACK_REDIRECT;
+export function resolveGeminiOAuthRedirectUri(opts?: { preferLocalLoopback?: boolean }): string {
+  if (opts?.preferLocalLoopback) return GEMINI_LOOPBACK_REDIRECT;
+  return GEMINI_OFFICIAL_HOSTED_REDIRECT;
 }
 
-export type GeminiOAuthMode = "web" | "loopback";
+export type GeminiOAuthMode = "web" | "loopback" | "copy_code";
 
 /**
- * 供給者綁定 Antigravity（Google AI 訂閱池）一律回報 loopback。
- * 原因：Antigravity 內部配額／對話 API 只認「官方 Desktop Client」換出的 token；
- * 自建 Web client 雖能過 Google 登入，但換出的 token 無 Cloud Code/Antigravity 權限（401）。
- * 因此線上也走「點授權 → 複製 localhost 網址列 → 貼回」流程。
+ * 預設走官方 HTTPS 認證頁 copy_code：
+ * 允許後跳到 https://antigravity.google/oauth-callback，頁面上有官方「Copy to Clipboard」大按鈕，
+ * 供給者一鍵複製、回網站點「一鍵貼上並完成綁定」即可（免碰網址列、免打字、無無法連線錯誤頁）。
  */
 export function geminiOAuthMode(): GeminiOAuthMode {
-  return "loopback";
+  return "copy_code";
 }
 
-// === Build Browser OAuth URL（強制官方 Antigravity Desktop Client + loopback，貼回網址完成） ===
+// === Build Browser OAuth URL（官方 Antigravity Client + 官方 antigravity.google 一鍵複製頁） ===
 export function startGeminiOAuth(opts?: {
   label?: string;
   shareLimitPct?: number;
   redirectUri?: string;
+  preferLocalLoopback?: boolean;
 }): { state: string; authUrl: string; redirectUri: string; mode: GeminiOAuthMode } {
   const { verifier, challenge } = createPkce();
-  // 綁定水庫固定用官方 Desktop Client + loopback；不吃 GEMINI_OAUTH_CLIENT_ID（那組留給網站登入）
-  const redirectUri = opts?.redirectUri?.trim() || GEMINI_LOOPBACK_REDIRECT;
+  const redirectUri =
+    opts?.redirectUri?.trim() ||
+    (opts?.preferLocalLoopback ? GEMINI_LOOPBACK_REDIRECT : GEMINI_OFFICIAL_HOSTED_REDIRECT);
+  const mode: GeminiOAuthMode = redirectUri.startsWith("http://localhost")
+    ? "loopback"
+    : "copy_code";
   const statePayload = {
     p: "gemini" as const,
     v: verifier,
@@ -286,7 +297,7 @@ export function startGeminiOAuth(opts?: {
     code_challenge_method: "S256",
     state,
   });
-  return { state, authUrl: `${GEMINI_OAUTH.authUrl}?${params.toString()}`, redirectUri, mode: "loopback" };
+  return { state, authUrl: `${GEMINI_OAUTH.authUrl}?${params.toString()}`, redirectUri, mode };
 }
 
 export function startChatGptOAuth(opts?: { label?: string; shareLimitPct?: number }): { state: string; authUrl: string } {
@@ -618,15 +629,15 @@ export async function completeOAuthByCode(input: {
   const stateKey = parsed.state ?? input.state;
   const pending = decodeStatePayload(stateKey) ?? [...pendingOAuth.values()].pop();
   if (!pending) {
-    // 即使只貼了 code、無 state（例如跨裝置或重整過頁面），預設走官方 Antigravity loopback 嘗試交換
+    // 若無 state，預設走官方 https://antigravity.google/oauth-callback 嘗試交換
     const creds = await exchangeGeminiCode(
       parsed.code,
-      parsed.redirectUri || GEMINI_LOOPBACK_REDIRECT,
+      parsed.redirectUri || GEMINI_OFFICIAL_HOSTED_REDIRECT,
       "",
     );
     return { creds };
   }
-  const redirectUri = pending.redirectUri || parsed.redirectUri || GEMINI_LOOPBACK_REDIRECT;
+  const redirectUri = pending.redirectUri || parsed.redirectUri || GEMINI_OFFICIAL_HOSTED_REDIRECT;
   const creds =
     pending.provider === "gemini"
       ? await exchangeGeminiCode(parsed.code, redirectUri, pending.verifier)

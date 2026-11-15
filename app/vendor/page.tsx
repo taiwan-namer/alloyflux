@@ -304,10 +304,29 @@ export default function VendorPage() {
     }
   }
 
+  function looksLikeGoogleAuthCode(val: string): boolean {
+    const t = val.trim();
+    return /[?&]code=[^&\s]{10,}/.test(t) || /^4\/[0-9A-Za-z_-]{20,}$/.test(t);
+  }
+
   function onCallbackInputChange(val: string) {
     setCallbackInput(val);
-    if (/[?&]code=[^&\s]{10,}/.test(val)) {
+    if (looksLikeGoogleAuthCode(val)) {
       void submitCallbackUrl(val);
+    }
+  }
+
+  async function pasteFromClipboardAndSubmit() {
+    try {
+      const txt = (await navigator.clipboard.readText()).trim();
+      if (!txt) {
+        setOauthMsg({ ok: false, text: "剪貼簿是空的，請先在 Google 官方認證頁點「Copy to Clipboard」按鈕" });
+        return;
+      }
+      setCallbackInput(txt);
+      await submitCallbackUrl(txt);
+    } catch {
+      setOauthMsg({ ok: false, text: "瀏覽器請允許讀取剪貼簿，或直接在下方框內貼上" });
     }
   }
 
@@ -570,7 +589,7 @@ export default function VendorPage() {
             )}
           </button>
 
-          {/* 官方 Antigravity 授權：點授權 → 複製 localhost 網址列 → 貼回（線上免本機、免裝任何程式） */}
+          {/* 官方 Antigravity HTTPS 認證頁：點 Copy to Clipboard → 回來點一鍵貼上（免碰網址列、免打字） */}
           {activeAuthUrl && (
             <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 10 }}>
@@ -590,39 +609,38 @@ export default function VendorPage() {
                 >
                   🔗 1. 前往 Google 授權帳號
                 </a>
-                <span className="muted" style={{ fontSize: 12 }}>
-                  {typeof window !== "undefined" &&
-                  (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
-                    ? "本機開發環境：按允許後會自動完成回呼；若未跳轉也可貼上網址。"
-                    : "已為您開啟新分頁；若被瀏覽器攔截，請點左側按鈕開啟。"}
-                </span>
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy}
+                  style={{ padding: "9px 14px", fontWeight: 700, fontSize: 13 }}
+                  onClick={() => void pasteFromClipboardAndSubmit()}
+                >
+                  {busy ? "交換 Token 並讀取額度中…" : "📋 2. 一鍵從剪貼簿貼上並進入 /sources →"}
+                </button>
               </div>
               <div style={{ marginBottom: 10, lineHeight: 1.7, fontSize: 13 }}>
-                請在彈出視窗登入並點擊允許。完成後瀏覽器會跳轉至 <code>localhost</code> 並顯示『
-                <strong>無法連上這個網站</strong>』——<strong>這是正常現象！請直接複製該頁面上方的『完整網址列』貼回下方。</strong>
+                <strong>超簡單 2 個按鈕完成（免打字、免選網址）：</strong>
                 <br />
-                <span className="muted" style={{ fontSize: 12 }}>
-                  貼上含 <code>code=</code> 的網址後系統會自動交換官方 Antigravity Token，立即讀取 Claude &amp; GPT 池剩餘 %。
-                </span>
+                ① 在新分頁登入 Google 按「允許」，畫面會打開 Google 官方認證頁，點頁面中央黑色按鈕{" "}
+                <strong>「Copy to Clipboard」</strong>。
+                <br />
+                ② 回到本頁點上方 <strong>「📋 2. 一鍵從剪貼簿貼上」</strong>（或在下方框貼上）即自動完成並跳轉 <code>/sources</code>！
               </div>
-              <label style={{ display: "block", fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-                📋 2. 在此貼上授權後的完整網址（或 code）
-              </label>
               <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
                 <input
                   style={{ flex: 1, minWidth: 220 }}
                   value={callbackInput}
                   disabled={busy}
-                  placeholder="貼上 http://localhost:51121/oauth-callback?code=... 整串網址（貼上即自動綁定）"
+                  placeholder="或在此貼上剛複製的授權碼（4/0A... 貼上即自動綁定）"
                   onChange={(e) => onCallbackInputChange(e.target.value)}
                 />
                 <button
                   type="button"
-                  className="primary"
                   disabled={busy || !callbackInput.trim()}
                   onClick={() => void submitCallbackUrl()}
                 >
-                  {busy ? "交換 Token 並讀取額度中…" : "完成綁定並進入 /sources →"}
+                  {busy ? "綁定中…" : "手動送出 →"}
                 </button>
               </div>
             </div>

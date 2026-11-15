@@ -197,11 +197,22 @@ export async function POST(req: Request) {
 
     switch (body.action) {
       case "start_gemini": {
-        const res = startGeminiOAuth({ label: body.label, shareLimitPct: body.shareLimitPct });
-        // 只有本機開發才開 51121 自動接 callback；線上（Vercel）走「複製 localhost 網址貼回」流程
-        if (!process.env.VERCEL) {
+        const host = (() => {
+          try {
+            return new URL(req.url).hostname;
+          } catch {
+            return "";
+          }
+        })();
+        const isLocalDev = !process.env.VERCEL && (host === "localhost" || host === "127.0.0.1");
+        if (isLocalDev) {
           ensureLocalCallbackListener(51121, "/oauth-callback");
         }
+        const res = startGeminiOAuth({
+          label: body.label,
+          shareLimitPct: body.shareLimitPct,
+          preferLocalLoopback: isLocalDev,
+        });
         return Response.json({
           ...res,
           persistMode: shouldProxyOAuthPersist(req) ? "cloud" : "local",
