@@ -348,16 +348,32 @@ export async function startChatGptDeviceFlow(opts?: { label?: string; shareLimit
     throw new Error(`無法啟動 ChatGPT 裝置驗證（${res.status}）`);
   }
   const data = (await res.json()) as { user_code: string; device_auth_id: string };
-  const state = randomBytes(16).toString("hex");
+  const redirectUri = "https://auth.openai.com/deviceauth/callback";
+  const createdAt = Date.now();
+  // state 必須自包含 device_auth_id／user_code：Vercel serverless 換實例後記憶體 Map 會空
+  const state = base64Url(
+    Buffer.from(
+      JSON.stringify({
+        p: "openai" as const,
+        r: redirectUri,
+        d: data.device_auth_id,
+        u: data.user_code,
+        l: opts?.label,
+        s: opts?.shareLimitPct,
+        c: createdAt,
+      }),
+      "utf8",
+    ),
+  );
   pendingOAuth.set(state, {
     provider: "openai",
     verifier: "",
-    redirectUri: "https://auth.openai.com/deviceauth/callback",
+    redirectUri,
     label: opts?.label,
     shareLimitPct: opts?.shareLimitPct,
     deviceAuthId: data.device_auth_id,
     userCode: data.user_code,
-    createdAt: Date.now(),
+    createdAt,
   });
   return {
     state,
@@ -370,8 +386,8 @@ export async function pollChatGptDeviceFlow(state: string): Promise<
   | { status: "pending" }
   | { status: "completed"; creds: OAuthCredentials; label?: string; shareLimitPct?: number }
 > {
-  const pending = pendingOAuth.get(state);
-  if (!pending || !pending.deviceAuthId || !pending.userCode) {
+  const pending = decodeStatePayload(state);
+  if (!pending || pending.provider !== "openai" || !pending.deviceAuthId || !pending.userCode) {
     throw new Error("找不到對應的驗證狀態，請重新啟動");
   }
   const res = await fetch(`${CHATGPT_OAUTH.issuer}/api/accounts/deviceauth/token`, {
@@ -433,7 +449,21 @@ export async function startGrokDeviceFlow(opts?: { label?: string; shareLimitPct
   if (!data.device_code || !data.user_code || !data.verification_uri) {
     throw new Error("Grok 裝置驗證回應缺少必要欄位");
   }
-  const state = randomBytes(16).toString("hex");
+  const createdAt = Date.now();
+  const state = base64Url(
+    Buffer.from(
+      JSON.stringify({
+        p: "xai" as const,
+        r: "",
+        d: data.device_code,
+        u: data.user_code,
+        l: opts?.label,
+        s: opts?.shareLimitPct,
+        c: createdAt,
+      }),
+      "utf8",
+    ),
+  );
   pendingOAuth.set(state, {
     provider: "xai",
     verifier: "",
@@ -442,7 +472,7 @@ export async function startGrokDeviceFlow(opts?: { label?: string; shareLimitPct
     shareLimitPct: opts?.shareLimitPct,
     deviceAuthId: data.device_code,
     userCode: data.user_code,
-    createdAt: Date.now(),
+    createdAt,
   });
   return {
     state,
@@ -459,7 +489,7 @@ export async function pollGrokDeviceFlow(state: string): Promise<
   | { status: "completed"; creds: OAuthCredentials; label?: string; shareLimitPct?: number }
   | { status: "slow_down"; interval?: number }
 > {
-  const pending = pendingOAuth.get(state);
+  const pending = decodeStatePayload(state);
   if (!pending || pending.provider !== "xai" || !pending.deviceAuthId) {
     throw new Error("找不到對應的 Grok 驗證狀態，請重新啟動");
   }
@@ -599,20 +629,27 @@ function decodeStatePayload(state?: string): PendingOAuth | undefined {
   try {
     const padded = state.replace(/-/g, "+").replace(/_/g, "/");
     const obj = JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as {
-      p?: "gemini" | "openai";
+      p?: "gemini" | "openai" | "xai";
       v?: string;
       r?: string;
       l?: string;
       s?: number;
+      d?: string;
+      u?: string;
+      c?: number;
     };
-    if (obj.p && obj.r !== undefined) {
+    // 瀏覽器 OAuth：有 redirect；裝置碼：有 deviceAuthId（d）。兩者都要把欄位編進 state，
+    // 才能在 Vercel 多實例間存活（記憶體 Map 會丟）。
+    if (obj.p && (obj.r !== undefined || obj.d)) {
       return {
         provider: obj.p,
         verifier: obj.v ?? "",
-        redirectUri: obj.r,
+        redirectUri: obj.r ?? "",
         label: obj.l,
         shareLimitPct: obj.s,
-        createdAt: Date.now(),
+        deviceAuthId: obj.d,
+        userCode: obj.u,
+        createdAt: obj.c ?? Date.now(),
       };
     }
   } catch {
