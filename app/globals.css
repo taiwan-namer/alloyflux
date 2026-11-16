@@ -1487,11 +1487,13 @@ th {
   overflow-x: auto;
   border: 1px solid var(--border);
   border-radius: 10px;
+  -webkit-overflow-scrolling: touch;
 }
 
 .md-table-wrap table {
   margin: 0;
   font-size: 13px;
+  width: 100%;
 }
 
 .md-table-wrap th {
@@ -1502,6 +1504,37 @@ th {
 .md-table-wrap th,
 .md-table-wrap td {
   padding: 8px 10px;
+}
+
+.md-table-wrap td {
+  white-space: normal;
+  word-break: break-word;
+}
+
+/**
+ * 桌面：AI 回覆表格可突破 820px 對話欄，吃掉左右剩餘寬度（只限表格）。
+ * 上限約 1120px，且不超過主欄（扣側欄 280 + 邊距）。
+ */
+@media (min-width: 769px) {
+  .msg.assistant .bubble {
+    overflow: visible;
+  }
+
+  .msg.assistant .md-table-wrap {
+    --md-table-max: min(1120px, calc(100vw - 280px - 48px));
+    width: var(--md-table-max);
+    max-width: var(--md-table-max);
+    margin-inline: calc((100% - var(--md-table-max)) / 2);
+  }
+
+  .msg.assistant .md-table-wrap table {
+    font-size: 13.5px;
+  }
+
+  .msg.assistant .md-table-wrap th,
+  .msg.assistant .md-table-wrap td {
+    padding: 9px 12px;
+  }
 }
 
 .md-code {
