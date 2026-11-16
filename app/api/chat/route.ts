@@ -2,6 +2,10 @@ import { findModel, type ModelInfo } from "@/lib/models";
 import { routeChat } from "@/lib/gateway";
 import { AUTO_MODEL_ID, applyDeepThink, resolveAutoModel, type AutoDecision } from "@/lib/auto-router";
 import { isAbortError, ModelNotInCatalogError, type ChatImage, type ChatMessage } from "@/lib/providers";
+import {
+  buildConversationStateContext,
+  updateConversationStateAfterTurn,
+} from "@/lib/conversation-state";
 import { slideMessagesForUpstream } from "@/lib/context-window";
 import { getSessionUser, jsonError } from "@/lib/auth";
 import { cloudDbProxy } from "@/lib/cloud-api";
@@ -169,12 +173,14 @@ export async function POST(req: Request) {
       }
     }
 
-    const [, extraSystemContext] = await Promise.all([
+    const [, userMemoryCtx, stateNoteCtx] = await Promise.all([
       sessionUser ? maybeRememberFromUserMessage(userId, upstreamContent) : Promise.resolve(),
       sessionUser
-        ? buildUserMemoryContext(userId, convId).then((s) => s || undefined)
-        : Promise.resolve(undefined),
+        ? buildUserMemoryContext(userId, convId).then((s) => s || "")
+        : Promise.resolve(""),
+      buildConversationStateContext(convId),
     ]);
+    const extraSystemContext = [stateNoteCtx, userMemoryCtx].filter((s) => s.trim()).join("\n\n") || undefined;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -225,6 +231,19 @@ export async function POST(req: Request) {
                   freeMode,
                   ipBucketId: guest?.ipBucketId,
                 });
+                // 本串狀態筆記：吸收本輪＋視窗外舊訊（整則邊界）；失敗不擋回答
+                try {
+                  const latest = await listMessages(convId!);
+                  await updateConversationStateAfterTurn({
+                    conversationId: convId!,
+                    messages: latest,
+                  });
+                } catch (stateErr) {
+                  console.warn(
+                    "[conversation-state] update failed",
+                    stateErr instanceof Error ? stateErr.message : stateErr,
+                  );
+                }
                 const nextBal = sessionUser ? await balance(userId) : undefined;
                 const nextFree = await getFreeDailyStatus({
                   userId,

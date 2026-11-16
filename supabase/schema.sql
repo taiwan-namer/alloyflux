@@ -220,6 +220,38 @@ CREATE TABLE IF NOT EXISTS user_memories (
 );
 CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id, updated_at);
 
+-- 本串對話狀態筆記（不跟 8 輪視窗丟棄；每輪注入上游）
+CREATE TABLE IF NOT EXISTS conversation_states (
+  conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
+  goal TEXT NOT NULL DEFAULT '',
+  hard_constraints TEXT NOT NULL DEFAULT '[]',
+  decisions TEXT NOT NULL DEFAULT '[]',
+  progress TEXT NOT NULL DEFAULT '[]',
+  open_questions TEXT NOT NULL DEFAULT '[]',
+  source_message_ids TEXT NOT NULL DEFAULT '[]',
+  covered_through_created_at BIGINT NOT NULL DEFAULT 0,
+  revision INTEGER NOT NULL DEFAULT 1,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_states_updated
+  ON conversation_states(updated_at);
+
+-- 較早對話歷史摘要塊（整則批次吸收後落庫；注入時只帶最近幾塊）
+CREATE TABLE IF NOT EXISTS conversation_history_summaries (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  from_created_at BIGINT NOT NULL,
+  to_created_at BIGINT NOT NULL,
+  from_message_id TEXT,
+  to_message_id TEXT,
+  summary_text TEXT NOT NULL,
+  token_est INTEGER NOT NULL DEFAULT 0,
+  source_message_ids TEXT NOT NULL DEFAULT '[]',
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conv_history_summaries_conv
+  ON conversation_history_summaries(conversation_id, to_created_at DESC);
+
 CREATE TABLE IF NOT EXISTS user_api_keys (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
