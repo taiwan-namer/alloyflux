@@ -104,6 +104,9 @@ export default function VendorPage() {
   const [busy, setBusy] = useState(false);
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const initialCountRef = useRef<number | null>(null);
+  /** 同步鎖：避免貼上自動送出與手動送出各打一次，把授權碼用掉後回 invalid_grant */
+  const busyRef = useRef(false);
+  const lastSubmittedCodeRef = useRef<string | null>(null);
 
   useEffect(() => {
     fetch("/api/auth/me", { cache: "no-store" })
@@ -190,6 +193,8 @@ export default function VendorPage() {
     setOauthMsg(null);
     setDeviceFlow(null);
     setActiveAuthUrl(null);
+    lastSubmittedCodeRef.current = null;
+    setCallbackInput("");
     setBusy(true);
     try {
       if (selectedModule === "gemini" || (selectedModule === "claude" && claudeMode === "oauth_pool")) {
@@ -266,7 +271,16 @@ export default function VendorPage() {
 
   async function submitCallbackUrl(overrideValue?: string) {
     const raw = (overrideValue ?? callbackInput).trim();
-    if (!raw || busy) return;
+    if (!raw || busyRef.current) return;
+    if (lastSubmittedCodeRef.current === raw) {
+      setOauthMsg({
+        ok: false,
+        text: "這個授權碼剛送過了。Google 授權碼只能換一次；請重新開啟 Google OAuth 後再貼一次。",
+      });
+      return;
+    }
+    busyRef.current = true;
+    lastSubmittedCodeRef.current = raw;
     setBusy(true);
     setOauthMsg(null);
     try {
@@ -298,8 +312,10 @@ export default function VendorPage() {
         ok: true,
         text: `✓ Google 算力節點綁定完成${pctNote}！正在進入 /sources…`,
       });
+      lastSubmittedCodeRef.current = null;
       goToSourcesAfterBind((href) => router.push(href));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   }
@@ -626,6 +642,8 @@ export default function VendorPage() {
                 <strong>「Copy to Clipboard」</strong>。
                 <br />
                 ② 回到本頁點上方 <strong>「📋 2. 一鍵從剪貼簿貼上」</strong>（或在下方框貼上）即自動完成並跳轉 <code>/sources</code>！
+                <br />
+                <span className="muted">注意：授權碼只能交換一次；貼上後若已自動送出，請勿再按「手動送出」。失敗請重新開一輪授權。</span>
               </div>
               <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
                 <input

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { goToSourcesAfterBind } from "@/lib/cloud-site";
 
 interface QuotaWindow {
@@ -171,6 +171,9 @@ export default function SourcesPage() {
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [submittingCode, setSubmittingCode] = useState(false);
+  /** 同步鎖：避免「貼上自動送出」與「手動送出」在同一 tick 各打一次，把單次授權碼用掉後回 invalid_grant */
+  const submittingCodeRef = useRef(false);
+  const lastSubmittedCodeRef = useRef<string | null>(null);
 
   // 單一節點即時滑桿草稿（拖動時即時換算金額，放開寫入後端）
   const [draftLimits, setDraftLimits] = useState<Record<string, number>>({});
@@ -284,6 +287,8 @@ export default function SourcesPage() {
   async function startBrowserOAuth(action: "start_gemini" | "start_chatgpt_browser") {
     setOauthMsg(null);
     setDeviceFlow(null);
+    lastSubmittedCodeRef.current = null;
+    setCallbackInput("");
     const res = await fetch("/api/oauth", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -336,7 +341,16 @@ export default function SourcesPage() {
 
   async function submitCallbackUrl(overrideValue?: string) {
     const raw = (overrideValue ?? callbackInput).trim();
-    if (!raw || submittingCode) return;
+    if (!raw || submittingCodeRef.current) return;
+    if (lastSubmittedCodeRef.current === raw) {
+      setOauthMsg({
+        ok: false,
+        text: "這個授權碼剛送過了。Google 授權碼只能換一次；請重新點上方 Gemini 模組開一輪新授權後再貼。",
+      });
+      return;
+    }
+    submittingCodeRef.current = true;
+    lastSubmittedCodeRef.current = raw;
     setSubmittingCode(true);
     setOauthMsg(null);
     try {
@@ -367,12 +381,15 @@ export default function SourcesPage() {
       setOauthMsg({ ok: true, text: `✓ Google 算力節點綁定完成！已即時同步容量${pctNote}` });
       setCallbackInput("");
       setActiveAuthUrl(null);
+      setActiveOAuthState(null);
       setSubLabel("");
+      lastSubmittedCodeRef.current = null;
       // 本機無 DB 時列表讀不到雲端資料，導向線上 /sources
       goToSourcesAfterBind(() => {
         void refresh();
       });
     } finally {
+      submittingCodeRef.current = false;
       setSubmittingCode(false);
     }
   }
@@ -1198,6 +1215,8 @@ export default function SourcesPage() {
               <strong>「Copy to Clipboard」</strong>。
               <br />
               ② 回到本頁點上方 <strong>「📋 2. 一鍵從剪貼簿貼上並綁定」</strong>（或在下方框直接貼上）即自動完成，立刻顯示 Claude &amp; GPT 池剩餘 %！
+              <br />
+              <span className="muted">注意：授權碼只能交換一次；貼上後若已自動送出，請勿再按「手動送出」。失敗請重新點 Gemini 模組開新一輪。</span>
             </div>
             <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
               <input
