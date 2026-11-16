@@ -16,6 +16,8 @@ export type ArticleExtractResult = {
   documentKind?: "sec_edgar" | "generic";
 };
 
+const HARD_CSS_POLLUTION_RE = /@font-face|font-face\s*\{|\{[^}]{0,40}font-family/i;
+
 const TEMPLATE_POLLUTION_RE =
   /skip\s+to\s+(main\s+)?content|sign\s+in|log\s+in|accept\s+all\s+cookies|cookie\s+settings|@font-face|font-face\s*\{|\{[^}]{0,40}font-family|订阅|訂閱本刊|開啟通知|enable\s+notifications|advertisement|promo\s*code/i;
 
@@ -38,25 +40,44 @@ export function isStructuredFilingUrl(url: string): boolean {
   }
 }
 
+/** 是否為產品技術文件／定價表／條款頁（非新聞入口首頁，通常含表格／費率短列與側欄選單） */
+export function isStructuredDocOrPricingUrl(url?: string): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return /\/(docs|documentation|pricing|rates|fees|terms|tos|privacy|dpa|security|compliance|byok|api-reference|reference|faq|providers)(\/|$)/i.test(
+      u.pathname,
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function looksLikeCssOrTemplatePollution(text: string): boolean {
   const t = text.trim();
   if (!t) return true;
-  if (TEMPLATE_POLLUTION_RE.test(t)) return true;
+  if (HARD_CSS_POLLUTION_RE.test(t)) return true;
   // 大比例為 CSS 規則
   const brace = (t.match(/\{/g) || []).length;
   const colonSemi = (t.match(/:[^;]+;/g) || []).length;
   if (brace >= 3 && colonSemi >= 5) return true;
-  if (/@font-face/i.test(t)) return true;
-  // Skip to… 短殼
-  if (/^skip to/i.test(t) && t.length < 400) return true;
+  // 短空殼（只有登入／跳過導覽／廣告字樣而無實質正文）才攔截；長篇正文／定價頁／ToS 內含 Sign in 不誤殺
+  if (t.length < 320 && TEMPLATE_POLLUTION_RE.test(t)) return true;
+  if (/^skip\s+to/i.test(t) && t.length < 400) return true;
   if (NAV_SHELL_RE.test(t) && t.length < 280 && (t.match(/[。！？.!?]/g) || []).length < 2) {
     return true;
   }
-  // Cookie／隱私同意文案佔主體
+  const shellHits = (t.match(new RegExp(TEMPLATE_POLLUTION_RE.source, "gi")) || []).length;
+  const sentences = (t.match(/[。！？.!?]/g) || []).length;
+  if (shellHits >= 5 && t.length < 800 && sentences < 4) return true;
+  // Cookie／隱私同意橫幅短殼佔主體（避免誤殺正式長篇 Privacy Policy / ToS 頁面）
   if (
-    /cookie|隱私聲明|privacy\s*policy|同意上述規範|accept\s+(all\s+)?cookies/i.test(t) &&
+    /accept\s+(all\s+)?cookies|cookie\s+settings|同意上述規範/i.test(t) &&
     t.length < 600
   ) {
+    return true;
+  }
+  if (/cookie|隱私聲明|privacy\s*policy/i.test(t) && t.length < 320 && sentences < 3) {
     return true;
   }
   return false;
@@ -284,6 +305,7 @@ export function extractArticleFromHtml(
 
   const publishedAt = extractPublishedAtFromHtml(html);
   const filing = opts?.url ? isStructuredFilingUrl(opts.url) : false;
+  const structuredDoc = opts?.url ? isStructuredDocOrPricingUrl(opts.url) : false;
 
   let rawText = filing
     ? extractFilingText(html)
@@ -301,8 +323,8 @@ export function extractArticleFromHtml(
     };
   }
 
-  // 列表／入口頁（通用特徵，非網域特例）
-  if (!filing) {
+  // 列表／入口頁（通用特徵，非網域特例；結構化 Docs／Pricing 頁容許表格短列與側欄選單）
+  if (!filing && !structuredDoc) {
     const listGate = looksLikeListOrHubPage(html, rawText, { url: opts?.url });
     if (listGate.isList) {
       return {
@@ -332,7 +354,7 @@ export function extractArticleFromHtml(
   // 句子過少且含導覽詞 → 降級
   const navHits = (excerpt.match(NAV_SHELL_RE) || []).length;
   const sentences = (excerpt.match(/[。！？.!?]/g) || []).length;
-  if (navHits >= 2 && sentences < 3) {
+  if (navHits >= 2 && sentences < 3 && !structuredDoc) {
     return {
       title: title || opts?.url || "",
       excerpt: "",
@@ -343,9 +365,13 @@ export function extractArticleFromHtml(
     };
   }
 
-  // 單篇特徵：至少一個較長段落，或足夠句點
+  // 單篇特徵：至少一個較長段落，或足夠句點（定價／API 文件頁可由費率／數據列構成）
   const longParas = excerpt.split(/\n/).filter((l) => l.trim().length >= 55).length;
-  if (longParas < 1 && sentences < 4) {
+  const hasStructuredRates =
+    structuredDoc &&
+    excerpt.length >= 160 &&
+    (excerpt.match(/\d+(?:\.\d+)?%|\$\d+|\b(?:API|fee|credits|tokens|BYOK|SLA|privacy|terms)\b/gi) || []).length >= 2;
+  if (longParas < 1 && sentences < 4 && !hasStructuredRates) {
     return {
       title: title || opts?.url || "",
       excerpt: "",
@@ -367,5 +393,5 @@ export function extractArticleFromHtml(
 
 /** 注入文本樣板污染檢測（用於指標） */
 export function injectionHasTemplatePollution(text: string): boolean {
-  return TEMPLATE_POLLUTION_RE.test(text) || /@font-face|font-face\s*\{/i.test(text);
+  return HARD_CSS_POLLUTION_RE.test(text) || looksLikeCssOrTemplatePollution(text);
 }

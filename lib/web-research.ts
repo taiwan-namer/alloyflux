@@ -128,7 +128,7 @@ export const MAX_RESEARCH_BRIEF_CHARS = 2400;
 
 const FINANCE_KEEP_RE = /\d|%|\$|億|萬|元|EPS|YoY|QoQ/i;
 const JUNK_NAV_RE =
-  /訂閱|下載\s*App|下載App|更多新聞|延伸閱讀|相關新聞|熱門新聞|分享到|追蹤我們|廣告刊登|加入會員|立即註冊|看更多|上一則|下一則/i;
+  /訂閱|下載\s*App|下載App|更多新聞|延伸閱讀|相關新聞|熱門新聞|分享到|追蹤我們|廣告刊登|加入會員|立即註冊|看更多|上一則|下一則|^skip\s+to\s+(main\s+)?content$|^skip\s+to\s+navigation$|^(sign\s+in|log\s+in|sign\s+up)$|^advertisement$|^accept\s+(all\s+)?cookies$|^cookie\s+settings$/i;
 const BYLINE_ONLY_RE = /^(記者|編譯|撰稿).{0,24}(報導|撰文)?$|綜合報導|本報訊|中央社|版權所有|著作權所有|copyright/i;
 
 /**
@@ -241,15 +241,17 @@ function isPreferredHost(host: string): boolean {
 export function isUsablePageExcerpt(text: string): boolean {
   const t = text.replace(/\s+/g, " ").trim();
   if (t.length < 120) return false;
-  if (/@font-face|font-face\s*\{|skip\s+to\s+(main\s+)?content/i.test(t)) return false;
+  if (/@font-face|font-face\s*\{|^skip\s+to\s+(main\s+)?content/i.test(t) && t.length < 360) return false;
+  if (/@font-face|font-face\s*\{/i.test(t)) return false;
   const brace = (t.match(/\{/g) || []).length;
   const colonSemi = (t.match(/:[^;]+;/g) || []).length;
   if (brace >= 3 && colonSemi >= 5) return false;
   const navHits = (t.match(/訂閱|下載\s*App|延伸閱讀|相關新聞|熱門新聞|分享到|立即註冊|加入會員|Cookie|Accept all|Sign in|Log in|Skip to/gi) || [])
     .length;
   const sentenceEnds = (t.match(/[。！？.!?]/g) || []).length;
-  if (navHits >= 3 && sentenceEnds < 3) return false;
-  if (sentenceEnds < 2 && t.length < 360) return false;
+  const rateOrDataHits = (t.match(/\d+(?:\.\d+)?%|\$\d+|\b\d+\s*(?:req|requests|tokens|days|min)\b/gi) || []).length;
+  if (navHits >= 3 && sentenceEnds < 3 && rateOrDataHits < 2) return false;
+  if (sentenceEnds < 2 && t.length < 360 && rateOrDataHits < 2) return false;
   return true;
 }
 

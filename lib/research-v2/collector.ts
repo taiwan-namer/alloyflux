@@ -574,7 +574,7 @@ export function collectEventsFromHit(
         continue;
       }
       const statement = sanitizeEvidenceText(
-        `【搜尋摘要，未經原文核對】${seg}`,
+        `【Google 搜尋索引摘錄】${seg}`,
         800,
       );
       const topic = guessTopic(statement);
@@ -632,7 +632,7 @@ export function collectEventsFromHit(
           .map((l) => l.replace(/^[-*•\d.)\s]+/, "").trim())
           .find((l) => l.length >= 8) ?? plan.rawUserQuery;
       const briefClaims: ResearchClaim[] = briefChunks.map((chunk, idx) => {
-        const stmt = sanitizeEvidenceText(`【搜尋摘要，未經原文核對】${chunk}`, 495);
+        const stmt = sanitizeEvidenceText(`【Google 搜尋索引摘錄】${chunk}`, 495);
         return {
           claimId: stableId("clm", briefMergeKey, String(idx)),
           statement: stmt,
