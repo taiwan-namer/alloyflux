@@ -1,8 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { goToSourcesAfterBind } from "@/lib/cloud-site";
+
+const OAUTH_STATE_KEY = "aup_gemini_oauth_state";
+const OAUTH_URL_KEY = "aup_gemini_oauth_url";
 
 interface QuotaWindow {
   label: string;
@@ -171,6 +174,18 @@ export default function SourcesPage() {
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [submittingCode, setSubmittingCode] = useState(false);
+  const submittingCodeRef = useRef(false);
+
+  useEffect(() => {
+    try {
+      const savedState = sessionStorage.getItem(OAUTH_STATE_KEY);
+      const savedUrl = sessionStorage.getItem(OAUTH_URL_KEY);
+      if (savedState) setActiveOAuthState(savedState);
+      if (savedUrl) setActiveAuthUrl(savedUrl);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   // 單一節點即時滑桿草稿（拖動時即時換算金額，放開寫入後端）
   const [draftLimits, setDraftLimits] = useState<Record<string, number>>({});
@@ -296,6 +311,14 @@ export default function SourcesPage() {
     }
     setActiveOAuthState(data.state);
     setActiveAuthUrl(data.authUrl);
+    if (action === "start_gemini") {
+      try {
+        sessionStorage.setItem(OAUTH_STATE_KEY, data.state);
+        sessionStorage.setItem(OAUTH_URL_KEY, data.authUrl);
+      } catch {
+        // ignore
+      }
+    }
     window.open(data.authUrl, "_blank", "noopener,noreferrer");
   }
 
@@ -336,7 +359,23 @@ export default function SourcesPage() {
 
   async function submitCallbackUrl(overrideValue?: string) {
     const raw = (overrideValue ?? callbackInput).trim();
-    if (!raw || submittingCode) return;
+    if (!raw || submittingCode || submittingCodeRef.current) return;
+    let state = activeOAuthState;
+    if (!state) {
+      try {
+        state = sessionStorage.getItem(OAUTH_STATE_KEY);
+      } catch {
+        state = null;
+      }
+    }
+    if (!state) {
+      setOauthMsg({
+        ok: false,
+        text: "找不到本次授權狀態。請在本分頁重新點啟動授權後再貼上（勿重用舊 code）。",
+      });
+      return;
+    }
+    submittingCodeRef.current = true;
     setSubmittingCode(true);
     setOauthMsg(null);
     try {
@@ -346,7 +385,7 @@ export default function SourcesPage() {
         body: JSON.stringify({
           action: "complete_code",
           codeOrUrl: raw,
-          state: activeOAuthState ?? undefined,
+          state,
           label: subLabel,
           shareLimitPct,
         }),
@@ -355,6 +394,12 @@ export default function SourcesPage() {
       if (!res.ok) {
         setOauthMsg({ ok: false, text: data.error });
         return;
+      }
+      try {
+        sessionStorage.removeItem(OAUTH_STATE_KEY);
+        sessionStorage.removeItem(OAUTH_URL_KEY);
+      } catch {
+        // ignore
       }
       const claudeWin = Array.isArray(data.quota?.windows)
         ? data.quota.windows.find((w: { label?: string }) => /claude/i.test(w.label ?? ""))
@@ -367,12 +412,14 @@ export default function SourcesPage() {
       setOauthMsg({ ok: true, text: `✓ Google 算力節點綁定完成！已即時同步容量${pctNote}` });
       setCallbackInput("");
       setActiveAuthUrl(null);
+      setActiveOAuthState(null);
       setSubLabel("");
       // 本機無 DB 時列表讀不到雲端資料，導向線上 /sources
       goToSourcesAfterBind(() => {
         void refresh();
       });
     } finally {
+      submittingCodeRef.current = false;
       setSubmittingCode(false);
     }
   }

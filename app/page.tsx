@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { extractOfficeAttachmentText, isOfficeAttachment } from "@/lib/office-attachments";
 
 type Effort = "low" | "medium" | "high";
 type Brand = "gpt" | "claude" | "gemini" | "grok";
@@ -836,6 +837,8 @@ const MAX_FILE_CHARS = 15_000;
 /** 貼上／輸入超過此字數 → 自動收成 TXT 附件（避免對話欄變文字牆） */
 const LONG_PASTE_TO_FILE_CHARS = 8_000;
 const TEXT_FILE_RE = /\.(txt|csv|md|json|js|ts|tsx|jsx|py|html|htm|xml|log|css|sql|yaml|yml)$/i;
+const FILE_ACCEPT =
+  "image/*,.txt,.csv,.md,.json,.js,.ts,.tsx,.jsx,.py,.html,.htm,.xml,.log,.css,.sql,.yaml,.yml,.pdf,.docx,.xlsx,.xls";
 
 function formatCharCount(n: number): string {
   return n.toLocaleString("zh-TW");
@@ -918,6 +921,11 @@ async function readTextAttachment(file: File): Promise<PendingFile> {
   if (text.length > MAX_FILE_CHARS) {
     text = `${text.slice(0, MAX_FILE_CHARS)}\n...[檔案過長已截斷]`;
   }
+  return { id: crypto.randomUUID(), name: file.name, size: file.size, text };
+}
+
+async function readOfficeAttachment(file: File): Promise<PendingFile> {
+  const text = await extractOfficeAttachmentText(file, MAX_FILE_CHARS);
   return { id: crypto.randomUUID(), name: file.name, size: file.size, text };
 }
 
@@ -1440,10 +1448,15 @@ export default function ChatPage() {
       try {
         if (file.type.startsWith("image/")) {
           addImgs.push(await compressImageFile(file));
+        } else if (isOfficeAttachment(file)) {
+          flashComposerHint(`正在解析「${file.name}」…`);
+          addFiles.push(await readOfficeAttachment(file));
         } else if (TEXT_FILE_RE.test(file.name) || file.type.startsWith("text/") || file.type === "application/json") {
           addFiles.push(await readTextAttachment(file));
         } else {
-          flashComposerHint(`不支援的檔案類型：${file.name}`);
+          flashComposerHint(
+            `不支援的檔案類型：${file.name}（可上傳圖片、文字檔、PDF、Word .docx、Excel）`,
+          );
         }
       } catch (e) {
         flashComposerHint(e instanceof Error ? e.message : String(e));
@@ -1462,7 +1475,7 @@ export default function ChatPage() {
       setPendingFiles((prev) => {
         const next = [...prev, ...addFiles].slice(0, MAX_PENDING_FILES);
         if (prev.length + addFiles.length > MAX_PENDING_FILES) {
-          flashComposerHint(`文字檔最多 ${MAX_PENDING_FILES} 個`);
+          flashComposerHint(`附件最多 ${MAX_PENDING_FILES} 個`);
         }
         return next;
       });
@@ -2179,7 +2192,7 @@ export default function ChatPage() {
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*,.txt,.csv,.md,.json,.js,.ts,.tsx,.jsx,.py,.html,.htm,.xml,.log,.css,.sql,.yaml,.yml"
+                accept={FILE_ACCEPT}
                 multiple
                 hidden
                 onChange={(e) => {
@@ -2234,9 +2247,9 @@ export default function ChatPage() {
               <button
                 type="button"
                 className="composer-icon-btn"
-                title="上傳圖片或文字檔"
+                title="上傳圖片、文字檔、PDF、Word、Excel"
                 disabled={busy}
-                aria-label="上傳圖片或文字檔"
+                aria-label="上傳圖片、文字檔、PDF、Word、Excel"
                 onClick={() => fileInputRef.current?.click()}
               >
                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">

@@ -627,15 +627,12 @@ export async function completeOAuthByCode(input: {
 }): Promise<{ creds: OAuthCredentials; label?: string; shareLimitPct?: number }> {
   const parsed = parseCallbackInput(input.codeOrUrl);
   const stateKey = parsed.state ?? input.state;
-  const pending = decodeStatePayload(stateKey) ?? [...pendingOAuth.values()].pop();
-  if (!pending) {
-    // 若無 state，預設走官方 https://antigravity.google/oauth-callback 嘗試交換
-    const creds = await exchangeGeminiCode(
-      parsed.code,
-      parsed.redirectUri || GEMINI_OFFICIAL_HOSTED_REDIRECT,
-      "",
+  // 禁止用「記憶體裡隨便一筆 pending」硬湊：verifier 對不上就會固定 invalid_grant
+  const pending = decodeStatePayload(stateKey);
+  if (!pending?.verifier) {
+    throw new Error(
+      "缺少本次授權的 state／PKCE（常見：貼上前重新整理了頁面、換了分頁／裝置，或只貼了 code 沒帶啟動授權時的狀態）。請留在同一分頁重新點「啟動授權」，完成 Google 後立刻貼上新的 code／整段回呼網址。",
     );
-    return { creds };
   }
   const redirectUri = pending.redirectUri || parsed.redirectUri || GEMINI_OFFICIAL_HOSTED_REDIRECT;
   const creds =
@@ -646,16 +643,33 @@ export async function completeOAuthByCode(input: {
   return { creds, label: pending.label, shareLimitPct: pending.shareLimitPct };
 }
 
+function explainGoogleOAuthGrantError(status: number, body: string): string {
+  const raw = body.slice(0, 240);
+  if (/invalid_grant/i.test(body)) {
+    return (
+      `Google OAuth 交換失敗（${status} invalid_grant）。常見原因：` +
+      `① 授權碼已用過（貼了兩次／自動送出又按一次）` +
+      `② 授權碼過期（請重新啟動授權立刻貼）` +
+      `③ PKCE／redirect 不一致（請同一分頁完成，勿重新整理）。` +
+      ` 原始回應：${raw}`
+    );
+  }
+  return `Google OAuth 交換失敗（${status}）：${raw}`;
+}
+
 export async function exchangeGeminiCode(code: string, redirectUri: string, verifier: string): Promise<OAuthCredentials> {
-  // code 由官方 Antigravity Desktop Client 發起，交換也必須用同一組憑證（否則 invalid_grant）
+  // code 由官方 Antigravity Desktop Client 發起，交換也必須用同一組憑證＋PKCE（否則 invalid_grant）
+  if (!verifier.trim()) {
+    throw new Error("缺少 code_verifier，無法完成 Google 授權交換。請同一分頁重新啟動授權後再貼上。");
+  }
   const body = new URLSearchParams({
     client_id: DEFAULT_AGY_CLIENT_ID,
     client_secret: DEFAULT_AGY_CLIENT_SECRET,
     code,
     grant_type: "authorization_code",
     redirect_uri: redirectUri,
+    code_verifier: verifier,
   });
-  if (verifier) body.set("code_verifier", verifier);
 
   const res = await fetch(GEMINI_OAUTH.tokenUrl, {
     method: "POST",
@@ -663,7 +677,7 @@ export async function exchangeGeminiCode(code: string, redirectUri: string, veri
     body,
   });
   if (!res.ok) {
-    throw new Error(`Google OAuth 交換失敗（${res.status}）：${(await res.text()).slice(0, 200)}`);
+    throw new Error(explainGoogleOAuthGrantError(res.status, await res.text()));
   }
   const tokens = (await res.json()) as { access_token: string; refresh_token?: string; expires_in?: number };
   const meta = await bootstrapGeminiAccount(tokens.access_token);

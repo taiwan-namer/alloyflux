@@ -104,6 +104,20 @@ export default function VendorPage() {
   const [busy, setBusy] = useState(false);
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const initialCountRef = useRef<number | null>(null);
+  const submittingCodeRef = useRef(false);
+  const OAUTH_STATE_KEY = "aup_gemini_oauth_state";
+  const OAUTH_URL_KEY = "aup_gemini_oauth_url";
+
+  useEffect(() => {
+    try {
+      const savedState = sessionStorage.getItem(OAUTH_STATE_KEY);
+      const savedUrl = sessionStorage.getItem(OAUTH_URL_KEY);
+      if (savedState) setActiveOAuthState(savedState);
+      if (savedUrl) setActiveAuthUrl(savedUrl);
+    } catch {
+      // ignore
+    }
+  }, []);
 
   useEffect(() => {
     fetch("/api/auth/me", { cache: "no-store" })
@@ -207,6 +221,12 @@ export default function VendorPage() {
         }
         setActiveOAuthState(data.state);
         setActiveAuthUrl(data.authUrl);
+        try {
+          sessionStorage.setItem(OAUTH_STATE_KEY, data.state);
+          sessionStorage.setItem(OAUTH_URL_KEY, data.authUrl);
+        } catch {
+          // ignore
+        }
         window.open(data.authUrl, "_blank", "noopener,noreferrer");
       } else if (selectedModule === "claude" && claudeMode === "api_key") {
         if (!claudeKey.trim()) {
@@ -266,7 +286,23 @@ export default function VendorPage() {
 
   async function submitCallbackUrl(overrideValue?: string) {
     const raw = (overrideValue ?? callbackInput).trim();
-    if (!raw || busy) return;
+    if (!raw || busy || submittingCodeRef.current) return;
+    let state = activeOAuthState;
+    if (!state) {
+      try {
+        state = sessionStorage.getItem(OAUTH_STATE_KEY);
+      } catch {
+        state = null;
+      }
+    }
+    if (!state) {
+      setOauthMsg({
+        ok: false,
+        text: "找不到本次授權狀態。請在本分頁重新點啟動授權（勿只貼舊的 code），完成 Google 後再貼上。",
+      });
+      return;
+    }
+    submittingCodeRef.current = true;
     setBusy(true);
     setOauthMsg(null);
     try {
@@ -276,7 +312,7 @@ export default function VendorPage() {
         body: JSON.stringify({
           action: "complete_code",
           codeOrUrl: raw,
-          state: activeOAuthState ?? undefined,
+          state,
           label: subLabel.trim() || (selectedModule === "claude" ? "Claude & Gemini 訂閱池" : undefined),
           shareLimitPct,
         }),
@@ -285,6 +321,12 @@ export default function VendorPage() {
       if (!res.ok) {
         setOauthMsg({ ok: false, text: data.error || "授權驗證失敗，請確認貼上完整回呼網址" });
         return;
+      }
+      try {
+        sessionStorage.removeItem(OAUTH_STATE_KEY);
+        sessionStorage.removeItem(OAUTH_URL_KEY);
+      } catch {
+        // ignore
       }
       const claudeWin = Array.isArray(data.quota?.windows)
         ? data.quota.windows.find((w: { label?: string }) => /claude/i.test(w.label ?? ""))
@@ -300,6 +342,7 @@ export default function VendorPage() {
       });
       goToSourcesAfterBind((href) => router.push(href));
     } finally {
+      submittingCodeRef.current = false;
       setBusy(false);
     }
   }
