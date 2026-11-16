@@ -438,12 +438,12 @@ export function collectEventsFromHit(
     let synIdx = 0;
     for (const raw of supports) {
       if (synIdx >= 6) break;
-      const seg =
-        raw &&
-        typeof raw === "object" &&
-        "segment" in raw &&
-        (raw as { segment?: { text?: string } }).segment?.text;
-      if (!seg || seg.trim().length < 40) continue;
+      const segText =
+        raw && typeof raw === "object" && "segment" in raw
+          ? (raw as { segment?: { text?: string } }).segment?.text
+          : undefined;
+      if (typeof segText !== "string" || segText.trim().length < 40) continue;
+      const seg = segText;
       const conflict = findArticleBodyConflict(seg, byMerge);
       if (conflict) {
         limitations.push(
