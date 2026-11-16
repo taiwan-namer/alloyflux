@@ -174,7 +174,10 @@ export default function SourcesPage() {
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [submittingCode, setSubmittingCode] = useState(false);
+  /** 同步鎖：避免貼上自動送出與手動送出同 tick 各打一次 */
   const submittingCodeRef = useRef(false);
+  /** 同碼只允許送一次；失敗後也擋重送（Google 碼只能換一次） */
+  const lastSubmittedCodeRef = useRef<string | null>(null);
 
   useEffect(() => {
     try {
@@ -299,6 +302,8 @@ export default function SourcesPage() {
   async function startBrowserOAuth(action: "start_gemini" | "start_chatgpt_browser") {
     setOauthMsg(null);
     setDeviceFlow(null);
+    lastSubmittedCodeRef.current = null;
+    setCallbackInput("");
     const res = await fetch("/api/oauth", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -360,6 +365,13 @@ export default function SourcesPage() {
   async function submitCallbackUrl(overrideValue?: string) {
     const raw = (overrideValue ?? callbackInput).trim();
     if (!raw || submittingCode || submittingCodeRef.current) return;
+    if (lastSubmittedCodeRef.current === raw) {
+      setOauthMsg({
+        ok: false,
+        text: "這個授權碼剛送過了。Google 授權碼只能換一次；請重新點上方 Gemini 模組開一輪新授權後再貼。",
+      });
+      return;
+    }
     let state = activeOAuthState;
     if (!state) {
       try {
@@ -376,6 +388,7 @@ export default function SourcesPage() {
       return;
     }
     submittingCodeRef.current = true;
+    lastSubmittedCodeRef.current = raw;
     setSubmittingCode(true);
     setOauthMsg(null);
     try {
@@ -414,6 +427,7 @@ export default function SourcesPage() {
       setActiveAuthUrl(null);
       setActiveOAuthState(null);
       setSubLabel("");
+      lastSubmittedCodeRef.current = null;
       // 本機無 DB 時列表讀不到雲端資料，導向線上 /sources
       goToSourcesAfterBind(() => {
         void refresh();

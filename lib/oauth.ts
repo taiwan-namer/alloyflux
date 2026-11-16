@@ -671,14 +671,30 @@ export async function exchangeGeminiCode(code: string, redirectUri: string, veri
     code_verifier: verifier,
   });
 
+  console.info("[oauth/gemini] token exchange start", {
+    redirectUri,
+    hasVerifier: Boolean(verifier),
+    codePrefix: code.slice(0, 8),
+  });
   const res = await fetch(GEMINI_OAUTH.tokenUrl, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
     body,
   });
   if (!res.ok) {
-    throw new Error(explainGoogleOAuthGrantError(res.status, await res.text()));
+    const raw = await res.text();
+    if (/invalid_grant/i.test(raw)) {
+      console.error("[oauth/gemini] invalid_grant", {
+        status: res.status,
+        redirectUri,
+        hasVerifier: Boolean(verifier),
+        codePrefix: code.slice(0, 8),
+        body: raw.slice(0, 300),
+      });
+    }
+    throw new Error(explainGoogleOAuthGrantError(res.status, raw));
   }
+  console.info("[oauth/gemini] token exchange ok", { codePrefix: code.slice(0, 8) });
   const tokens = (await res.json()) as { access_token: string; refresh_token?: string; expires_in?: number };
   const meta = await bootstrapGeminiAccount(tokens.access_token);
   return {

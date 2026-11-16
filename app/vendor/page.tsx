@@ -105,6 +105,7 @@ export default function VendorPage() {
   const [oauthMsg, setOauthMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const initialCountRef = useRef<number | null>(null);
   const submittingCodeRef = useRef(false);
+  const lastSubmittedCodeRef = useRef<string | null>(null);
   const OAUTH_STATE_KEY = "aup_gemini_oauth_state";
   const OAUTH_URL_KEY = "aup_gemini_oauth_url";
 
@@ -204,6 +205,8 @@ export default function VendorPage() {
     setOauthMsg(null);
     setDeviceFlow(null);
     setActiveAuthUrl(null);
+    lastSubmittedCodeRef.current = null;
+    setCallbackInput("");
     setBusy(true);
     try {
       if (selectedModule === "gemini" || (selectedModule === "claude" && claudeMode === "oauth_pool")) {
@@ -287,6 +290,13 @@ export default function VendorPage() {
   async function submitCallbackUrl(overrideValue?: string) {
     const raw = (overrideValue ?? callbackInput).trim();
     if (!raw || busy || submittingCodeRef.current) return;
+    if (lastSubmittedCodeRef.current === raw) {
+      setOauthMsg({
+        ok: false,
+        text: "這個授權碼剛送過了。Google 授權碼只能換一次；請重新開啟 Google OAuth 後再貼一次。",
+      });
+      return;
+    }
     let state = activeOAuthState;
     if (!state) {
       try {
@@ -303,6 +313,7 @@ export default function VendorPage() {
       return;
     }
     submittingCodeRef.current = true;
+    lastSubmittedCodeRef.current = raw;
     setBusy(true);
     setOauthMsg(null);
     try {
@@ -340,6 +351,7 @@ export default function VendorPage() {
         ok: true,
         text: `✓ Google 算力節點綁定完成${pctNote}！正在進入 /sources…`,
       });
+      lastSubmittedCodeRef.current = null;
       goToSourcesAfterBind((href) => router.push(href));
     } finally {
       submittingCodeRef.current = false;
