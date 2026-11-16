@@ -46,6 +46,70 @@ function stableId(prefix: string, ...parts: string[]): string {
   return `${prefix}_${(h >>> 0).toString(16)}`;
 }
 
+/** 長正文切段門檻／目標塊長／最多段數（避免 FAQ／律所長文中後段被單條 claim 腰斬） */
+export const BODY_EXCERPT_SPLIT_THRESHOLD = 700;
+export const BODY_EXCERPT_CHUNK_CHARS = 700;
+export const BODY_EXCERPT_MAX_PARTS = 3;
+export const BODY_EXCERPT_HARD_CAP = 1800;
+
+/**
+ * 將 article_body／official_document 的 excerpt 切成最多 2~3 段。
+ * 優先在段落／句號邊界切開，確保費率、條款等中後段細節不會整段丟掉。
+ */
+export function splitLongBodyExcerpt(
+  excerpt: string,
+  opts?: { threshold?: number; chunkSize?: number; maxParts?: number; hardCap?: number },
+): string[] {
+  const threshold = opts?.threshold ?? BODY_EXCERPT_SPLIT_THRESHOLD;
+  const chunkSize = opts?.chunkSize ?? BODY_EXCERPT_CHUNK_CHARS;
+  const maxParts = opts?.maxParts ?? BODY_EXCERPT_MAX_PARTS;
+  const hardCap = opts?.hardCap ?? BODY_EXCERPT_HARD_CAP;
+  const capped = excerpt.trim().slice(0, hardCap);
+  if (!capped) return [];
+  if (capped.length <= threshold) return [capped];
+
+  const parts: string[] = [];
+  let start = 0;
+  while (parts.length < maxParts && start < capped.length) {
+    if (parts.length === maxParts - 1) {
+      const rest = capped.slice(start).trim();
+      if (rest) parts.push(rest);
+      break;
+    }
+    let end = Math.min(start + chunkSize, capped.length);
+    if (end < capped.length) {
+      const lookAhead = Math.min(capped.length, end + 100);
+      const window = capped.slice(start, lookAhead);
+      const candidates = [
+        window.lastIndexOf("\n\n"),
+        window.lastIndexOf("\n"),
+        window.lastIndexOf("。"),
+        window.lastIndexOf("！"),
+        window.lastIndexOf("？"),
+        window.lastIndexOf(". "),
+        window.lastIndexOf("? "),
+        window.lastIndexOf("! "),
+      ].filter((i) => i >= Math.floor(chunkSize * 0.45));
+      const breakAt = candidates.length ? Math.max(...candidates) : -1;
+      if (breakAt >= 0) {
+        const ch = window[breakAt];
+        const eat =
+          ch === "." || ch === "!" || ch === "?"
+            ? breakAt + 1
+            : ch === "。" || ch === "！" || ch === "？"
+              ? breakAt + 1
+              : breakAt + (ch === "\n" ? 1 : 0);
+        end = start + Math.max(eat, Math.floor(chunkSize * 0.45));
+      }
+    }
+    const piece = capped.slice(start, end).trim();
+    if (piece) parts.push(piece);
+    start = end;
+    while (start < capped.length && /\s/.test(capped[start]!)) start += 1;
+  }
+  return parts.length ? parts : [capped];
+}
+
 function normalizeTitle(title: string): string {
   return title
     .toLowerCase()
@@ -371,29 +435,32 @@ export function collectEventsFromHit(
     const claimText = isBodyBacked ? `${src.title}\n${src.excerpt ?? ""}` : src.title;
     const claimType = inferClaimType(claimText, src.provenance);
     const attribution = inferAttribution(claimText, src.provenance);
-    const statementCap = isBodyBacked ? 1200 : 560;
-    const statement = sanitizeEvidenceText(
-      src.excerpt?.slice(0, statementCap) || src.title,
-      statementCap,
-    );
-    const claim: ResearchClaim = {
-      claimId: stableId("clm", src.sourceId, statement.slice(0, 40)),
-      statement,
-      claimType,
-      sourceIds: [src.sourceId],
-      attribution,
-      evidenceLevel: evidenceLevelFor(src.quality, claimType, src.provenance),
-      provenance: src.provenance,
-    };
+    const statementParts = isBodyBacked
+      ? splitLongBodyExcerpt(src.excerpt || src.title)
+      : [sanitizeEvidenceText(src.title, 560)];
+    const claims: ResearchClaim[] = statementParts.map((part, idx) => {
+      const statement = sanitizeEvidenceText(part, isBodyBacked ? 750 : 560);
+      return {
+        claimId: stableId("clm", src.sourceId, `${idx}:${statement.slice(0, 40)}`),
+        statement,
+        claimType,
+        sourceIds: [src.sourceId],
+        attribution,
+        evidenceLevel: evidenceLevelFor(src.quality, claimType, src.provenance),
+        provenance: src.provenance,
+      };
+    });
 
     const existing = byMerge.get(mergeKey);
     if (existing) {
       if (!existing.sourceIds.includes(src.sourceId)) existing.sourceIds.push(src.sourceId);
-      if (!existing.claims.some((c) => c.statement === claim.statement)) {
-        existing.claims.push(claim);
-      } else {
-        const c0 = existing.claims.find((c) => c.statement === claim.statement);
-        if (c0 && !c0.sourceIds.includes(src.sourceId)) c0.sourceIds.push(src.sourceId);
+      for (const claim of claims) {
+        if (!existing.claims.some((c) => c.statement === claim.statement)) {
+          existing.claims.push(claim);
+        } else {
+          const c0 = existing.claims.find((c) => c.statement === claim.statement);
+          if (c0 && !c0.sourceIds.includes(src.sourceId)) c0.sourceIds.push(src.sourceId);
+        }
       }
       if (!existing.publishedAt && src.publishedAt) existing.publishedAt = src.publishedAt;
       existing.relevance = Math.max(existing.relevance, qualityScore(src.quality));
@@ -407,7 +474,7 @@ export function collectEventsFromHit(
       eventAt: undefined,
       publishedAt: src.publishedAt,
       topic,
-      claims: [claim],
+      claims,
       sourceIds: [src.sourceId],
       relevance: qualityScore(src.quality),
       freshness: freshnessScore(src.publishedAt, plan, nowMs),
@@ -437,11 +504,12 @@ export function collectEventsFromHit(
     }
   }
 
-  // search_synthesis（feature flag 預設關；管線遇防爬導致合格正文 < 2 篇／正文 claim < 2 時自動備援開啟）
+  // search_synthesis（feature flag 預設關；autoFallback 時：正文不足／任一 title_only／factcheck → 開啟）
   // 不得升格 article_body；與正文衝突時以 article_body 為準
   const validBodyPageCount = rawSources.filter(
     (s) => s.provenance === "article_body" || s.provenance === "official_document",
   ).length;
+  const titleOnlySourceCount = rawSources.filter((s) => s.provenance === "title_only").length;
   const bodyClaimCount = [...byMerge.values()].reduce(
     (acc, ev) =>
       acc +
@@ -454,6 +522,8 @@ export function collectEventsFromHit(
     autoFallback: opts?.autoSynthesisFallback,
     validBodyPageCount,
     bodyClaimCount,
+    titleOnlySourceCount,
+    intent: plan.intent,
   });
   const supports = synthDecision.enabled ? (hit.rawGroundingSupports ?? []) : [];
   if (hit.rawGroundingSupports?.length && !synthDecision.enabled) {
@@ -461,7 +531,7 @@ export function collectEventsFromHit(
   }
   if (synthDecision.enabled && synthDecision.reason === "auto_fallback") {
     limitations.push(
-      `search_synthesis_auto_fallback_enabled: valid_body_pages=${validBodyPageCount},body_claims=${bodyClaimCount}`,
+      `search_synthesis_auto_fallback_enabled: valid_body_pages=${validBodyPageCount},body_claims=${bodyClaimCount},title_only=${titleOnlySourceCount},intent=${plan.intent}`,
     );
   }
   let addedSynthCount = 0;
@@ -528,20 +598,21 @@ export function collectEventsFromHit(
     }
   }
 
-  // 雙重保底：觸發 auto_fallback 時，若 rawGroundingSupports 為空（或層 2 正文完全掛零），把層 1 Flash brief 納入 search_synthesis
+  // 雙重保底：auto_fallback 時，無論 bodyClaimCount／已注入 supports 數量，只要 brief 可用就掛入層 1 摘要
+  // （解決「配角正文夠 2 篇、主角 title_only 仍瞎掉」：層 1 Google 事實一律補足）
+  // 此路徑不再用 findArticleBodyConflict 擋 brief：停用詞易誤判，且 brief 本即標 search_synthesis 供模型區分
   if (
     synthDecision.enabled &&
     synthDecision.reason === "auto_fallback" &&
-    (addedSynthCount === 0 || bodyClaimCount === 0) &&
     briefSafe.length >= 40 &&
-    !/^NO_SEARCH\b/i.test(briefSafe) &&
-    !findArticleBodyConflict(briefSafe, byMerge)
+    !/^NO_SEARCH\b/i.test(briefSafe)
   ) {
     const briefStatement = sanitizeEvidenceText(
       `【搜尋摘要，未經原文核對】${briefSafe}`,
-      800,
+      1000,
     );
-    const primarySrcId = rawSources[0]?.sourceId;
+    const primarySrcId =
+      rawSources.find((s) => s.provenance === "title_only")?.sourceId ?? rawSources[0]?.sourceId;
     const briefMergeKey = `synth:${stableId("syn_brief", briefStatement.slice(0, 48))}`;
     if (!byMerge.has(briefMergeKey)) {
       const topic = guessTopic(briefStatement);
@@ -571,7 +642,7 @@ export function collectEventsFromHit(
         evidenceGrade: "title_only",
       });
       limitations.push(
-        "search_synthesis_from_flash_brief_fallback: 層2防爬或無正文，啟用層1摘要保底",
+        `search_synthesis_from_flash_brief_fallback: auto_fallback 層1摘要保底（title_only=${titleOnlySourceCount},body_claims=${bodyClaimCount},supports=${addedSynthCount}）`,
       );
     }
   }

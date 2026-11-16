@@ -4,11 +4,22 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { collectEventsFromHit, stripSearchSynthesisFromCorpus } from "./collector";
+import {
+  collectEventsFromHit,
+  splitLongBodyExcerpt,
+  stripSearchSynthesisFromCorpus,
+} from "./collector";
 import { gateEvidence } from "./gate";
-import { CLAIM_CHARS_COMPACT, CLAIM_CHARS_DEFAULT, CLAIM_CHARS_DEEP_BODY, formatVerdictInjection, resolveClaimCharCap } from "./inject";
+import {
+  CLAIM_CHARS_COMPACT,
+  CLAIM_CHARS_DEFAULT,
+  CLAIM_CHARS_DEEP_BODY,
+  formatVerdictInjection,
+  resolveClaimCharCap,
+} from "./inject";
 import { runResearchPipelineV2 } from "./pipeline";
 import { planResearch } from "./planner";
+import { shouldEnableSearchSynthesis } from "./synthesis-flag";
 import type { RawSearchHit, ResearchCorpus, ResearchEvent } from "./types";
 
 function basePlan() {
@@ -228,15 +239,15 @@ describe("search_synthesis Gate 不變性與衝突", () => {
     assert.match(verdict.injectionText, /Howey|程式化銷售/);
   });
 
-  it("單條 claim 動態截斷上限：<=3 事件正文放寬至 800 字，一般 500 字，壓縮 240 字", () => {
+  it("單條 claim 動態截斷上限：<=3 事件正文放寬至 750 字，一般 500 字，壓縮 240 字", () => {
     assert.equal(resolveClaimCharCap(2, "article_body", false), CLAIM_CHARS_DEEP_BODY);
-    assert.equal(resolveClaimCharCap(3, "official_document", false), 800);
+    assert.equal(resolveClaimCharCap(3, "official_document", false), 750);
     assert.equal(resolveClaimCharCap(5, "article_body", false), CLAIM_CHARS_DEFAULT);
     assert.equal(resolveClaimCharCap(1, "search_synthesis", false), 500);
     assert.equal(resolveClaimCharCap(1, "article_body", true), CLAIM_CHARS_COMPACT);
 
     const plan = basePlan();
-    const longBody = "法條細節與判決理由完整段落內容。".repeat(45); // ~720 字（> 560 舊上限、< 800 新上限）
+    const longBody = "法條細節與判決理由完整段落內容。".repeat(45); // ~675 字
     const corpus = collectEventsFromHit(plan, {
       provider: "test",
       queries: ["ruling full text"],
@@ -255,7 +266,155 @@ describe("search_synthesis Gate 不變性與衝突", () => {
     });
     const verdict = gateEvidence({ plan, corpus });
     const injected = formatVerdictInjection(verdict);
-    // 720 字應完整保留，不被舊版 320 或 560 字腰斬
-    assert.ok(injected.includes(longBody.slice(0, 700)), "700+ 字單篇深度正文不應被 320/560 腰斬");
+    assert.ok(injected.includes(longBody.slice(0, 600)), "深度正文不應被 320/560 腰斬");
+  });
+
+  it("長正文 >700 字應切成最多 3 段 claims，中後段費率細節可注入", () => {
+    const parts = splitLongBodyExcerpt(
+      [
+        "OpenRouter FAQ 開頭：平台彙總多家模型 API。",
+        "中段說明路由與用量統計 while pooling requests across providers.",
+        "後段關鍵：平台向使用者收取約 5.5% 手續費，並另計上游模型成本。FEE_RATE_MARKER_55",
+      ].join("\n\n") + "\n" + "補充條款段落內容。".repeat(80),
+    );
+    assert.ok(parts.length >= 2 && parts.length <= 3, `應切 2~3 段，實際 ${parts.length}`);
+    assert.ok(parts.some((p) => /FEE_RATE_MARKER_55|5\.5%/.test(p)), "中後段費率標記不可丟");
+
+    const plan = planResearch({
+      text: "OpenRouter 怎麼運作？抽成與計費細節？",
+      now: new Date("2026-11-16T00:00:00.000Z"),
+      timeZone: "Asia/Taipei",
+    });
+    const longFaq =
+      "OpenRouter FAQ start while pooling requests across providers for latency. ".repeat(8) +
+      "\n\nMid section explains credits and provider markup. ".repeat(6) +
+      "\n\nFinal billing: OpenRouter charges approximately 5.5% platform fee on top of upstream model costs. FEE_RATE_MARKER_55";
+    const corpus = collectEventsFromHit(plan, {
+      provider: "test",
+      queries: ["OpenRouter fee"],
+      sources: [{ title: "OpenRouter FAQ", uri: "https://openrouter.ai/docs/faq" }],
+      pages: [
+        {
+          uri: "https://openrouter.ai/docs/faq",
+          title: "OpenRouter FAQ",
+          excerpt: longFaq.slice(0, 1800),
+          fetchStatus: "ok",
+        },
+      ],
+      brief: "",
+      limitations: [],
+    });
+    const bodyClaims = corpus.events.flatMap((e) => e.claims).filter((c) => c.provenance === "article_body");
+    assert.ok(bodyClaims.length >= 2, `長 FAQ 應產生多段正文 claim，實際 ${bodyClaims.length}`);
+    const injected = formatVerdictInjection(gateEvidence({ plan, corpus }));
+    assert.ok(
+      injected.includes("FEE_RATE_MARKER_55") || injected.includes("5.5%"),
+      "注入文字必須保留 FAQ 中後段費率，不可停在 while poo…",
+    );
+    assert.match(injected, /直接整合回答|不必|不要在開頭反覆/);
+  });
+
+  it("autoFallback：任一 title_only 或 factcheck 即開啟；brief 無條件掛入", () => {
+    delete process.env.RESEARCH_SEARCH_SYNTHESIS;
+    assert.equal(
+      shouldEnableSearchSynthesis({
+        autoFallback: true,
+        validBodyPageCount: 2,
+        bodyClaimCount: 2,
+        titleOnlySourceCount: 1,
+      }).reason,
+      "auto_fallback",
+    );
+    assert.equal(
+      shouldEnableSearchSynthesis({
+        autoFallback: true,
+        validBodyPageCount: 3,
+        bodyClaimCount: 3,
+        titleOnlySourceCount: 0,
+        intent: "factcheck",
+      }).reason,
+      "auto_fallback",
+    );
+    assert.equal(
+      shouldEnableSearchSynthesis({
+        autoFallback: true,
+        validBodyPageCount: 2,
+        bodyClaimCount: 2,
+        titleOnlySourceCount: 0,
+        intent: "news",
+      }).reason,
+      "default_off",
+    );
+
+    // 模擬 Akin Gump：2 篇配角有正文、主角律所 title_only；brief 含關鍵事實
+    const plan = planResearch({
+      text: "請詳細分析 Akin Gump 對此案的法律意見與角色分工",
+      now: new Date("2026-11-16T00:00:00.000Z"),
+      timeZone: "Asia/Taipei",
+    });
+    const corpus = collectEventsFromHit(
+      plan,
+      {
+        provider: "test",
+        queries: ["Akin Gump analysis"],
+        sources: [
+          { title: "Akin Gump Memo", uri: "https://akingump.com/en/insights/alert/case-note" },
+          { title: "The Record coverage", uri: "https://therecord.media/case-coverage-2026" },
+          { title: "Malpedia entry", uri: "https://malpedia.caad.fkie.fraunhofer.de/details/win.x" },
+        ],
+        pages: [
+          {
+            uri: "https://akingump.com/en/insights/alert/case-note",
+            title: "Akin Gump Memo",
+            excerpt: "",
+            fetchStatus: "failed",
+          },
+          {
+            uri: "https://therecord.media/case-coverage-2026",
+            title: "The Record coverage",
+            excerpt:
+              "Secondary outlet summarized the dispute and named outside counsel without quoting the firm memo body. ".repeat(
+                3,
+              ),
+            fetchStatus: "ok",
+            publishedAt: "2026-11-14T10:00:00.000Z",
+          },
+          {
+            uri: "https://malpedia.caad.fkie.fraunhofer.de/details/win.x",
+            title: "Malpedia entry",
+            excerpt:
+              "Malpedia lists malware family aliases and technical indicators related to the campaign. ".repeat(3),
+            fetchStatus: "ok",
+            publishedAt: "2026-11-13T08:00:00.000Z",
+          },
+        ],
+        brief:
+          "Akin Gump advised the client on Storm-2139 attribution and recommended coordinated disclosure with counsel leading regulatory outreach; partners split litigation vs advisory roles.",
+        rawGroundingSupports: [
+          {
+            segment: {
+              text: "Search snippet only lists the Akin Gump URL without body text.",
+            },
+          },
+        ],
+        limitations: [],
+      },
+      { autoSynthesisFallback: true },
+    );
+
+    assert.ok(
+      corpus.sources.some((s) => s.host?.includes("akingump") && s.provenance === "title_only"),
+      "主角應為 title_only",
+    );
+    assert.ok(
+      corpus.limitations.some((l) => l.startsWith("search_synthesis_auto_fallback_enabled")),
+      "即使已有 2 篇配角正文，title_only 也應觸發備援",
+    );
+    assert.ok(
+      corpus.limitations.some((l) => l.startsWith("search_synthesis_from_flash_brief_fallback")),
+      "auto_fallback 應無條件掛入 brief",
+    );
+    const injected = formatVerdictInjection(gateEvidence({ plan, corpus }));
+    assert.match(injected, /Storm-2139|coordinated disclosure|Akin Gump advised/i);
   });
 });
