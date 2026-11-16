@@ -535,13 +535,20 @@ export function collectEventsFromHit(
     );
   }
   let addedSynthCount = 0;
+  const hasUsableBriefFallback =
+    synthDecision.enabled &&
+    synthDecision.reason === "auto_fallback" &&
+    briefSafe.length >= 40 &&
+    !/^NO_SEARCH\b/i.test(briefSafe);
+  // 當已有完整層 1 brief 保底時，零碎 groundingSupports 只收最多 2 條，避免雜訊事件塞滿 maxEvents 擠掉主摘要
+  const maxSupportEvents = hasUsableBriefFallback ? 2 : 6;
   if (supports.length) {
     limitations.push(
       "search_synthesis_from_grounding_supports: 搜尋摘要，未經原文核對；不得當成 article_body",
     );
     let synIdx = 0;
     for (const raw of supports) {
-      if (synIdx >= 6) break;
+      if (synIdx >= maxSupportEvents) break;
       const seg = groundingSupportSegmentText(raw);
       if (!seg || seg.length < 40) continue;
       const conflict = findArticleBodyConflict(seg, byMerge);
@@ -641,9 +648,10 @@ export function collectEventsFromHit(
         topic,
         claims: briefClaims,
         sourceIds: primarySrcId ? [primarySrcId] : [],
-        relevance: 0.55,
-        freshness: 0.55,
-        diversityKey: topic,
+        relevance: 0.92,
+        freshness: 0.92,
+        // 獨立 diversityKey，確保不被單一主題上限（MAX_PER_TOPIC=2）擋在 ranked 之外
+        diversityKey: "layer1_brief_synthesis",
         evidenceGrade: "title_only",
       });
       limitations.push(

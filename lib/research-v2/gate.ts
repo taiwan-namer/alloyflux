@@ -161,12 +161,17 @@ export function gateEvidence(input: {
     status = "partial";
     warnings.push("low_event_coverage");
   }
-  // 缺日期 → partial，非整段 failed
+  // 缺日期：新聞／有時間窗查詢強制降 partial；無時間窗的深度文件／法規／官方 Docs（本來就無新聞發布日 meta）僅記錄 warning 不強降
+  const requireDatedSources = plan.intent !== "factcheck" || Boolean(plan.timeWindow) || Boolean(plan.userDateHint);
   if (!corpus.sources.some((s) => s.publishedAt)) {
-    status = status === "ok" ? "partial" : status;
+    if (requireDatedSources) {
+      status = status === "ok" ? "partial" : status;
+    }
     warnings.push("missing_published_at_on_all_sources");
   } else if (corpus.stats.bodyMissingDate > 0) {
-    status = status === "ok" ? "partial" : status;
+    if (requireDatedSources) {
+      status = status === "ok" ? "partial" : status;
+    }
     warnings.push("some_events_body_missing_date");
   }
   if (hasUnconfirmedWithoutAttribution(corpus)) {

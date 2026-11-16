@@ -97,15 +97,34 @@ function eventBlock(
   return lines;
 }
 
+function isPrimarySynthBriefEvent(ev: ResearchEvent): boolean {
+  return (
+    ev.diversityKey === "layer1_brief_synthesis" ||
+    (ev.claims.length >= 2 && ev.claims.every((c) => c.provenance === "search_synthesis"))
+  );
+}
+
+function isBodyBackedEvent(ev: ResearchEvent): boolean {
+  return ev.claims.some(
+    (c) => c.provenance === "article_body" || c.provenance === "official_document",
+  );
+}
+
 function orderEventsForBudget(events: ResearchEvent[]): ResearchEvent[] {
+  // 打包優先序：1. 已讀正文事件 → 2. 層 1 完整搜尋摘要保底（syn_brief） → 3. 其餘零碎 title_only／support 事件
+  // 避免多個空殼 title_only 或單句 support 先把 3000 token 預算吃光，導致關鍵費率／案號摘要被擠掉
+  const prioritized = [...events].sort((a, b) => {
+    const tier = (e: ResearchEvent) => (isBodyBackedEvent(e) ? 0 : isPrimarySynthBriefEvent(e) ? 1 : 2);
+    return tier(a) - tier(b);
+  });
   const ordered: ResearchEvent[] = [];
   const seenTopic = new Set<string>();
-  for (const e of events) {
+  for (const e of prioritized) {
     if (seenTopic.has(e.diversityKey)) continue;
     ordered.push(e);
     seenTopic.add(e.diversityKey);
   }
-  for (const e of events) {
+  for (const e of prioritized) {
     if (ordered.some((x) => x.eventId === e.eventId)) continue;
     ordered.push(e);
   }

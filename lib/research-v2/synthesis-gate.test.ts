@@ -520,4 +520,94 @@ describe("search_synthesis Gate 不變性與衝突", () => {
     assert.ok(keptQ1.includes("Arian Yadegarnia"), "前幾輪回答中的被告姓名不得被 300 字截斷");
     assert.ok(keptQ1.includes("de3u"), "前幾輪回答中的具體工具名 de3u 不得被截斷");
   });
+
+  it("syn_brief 在多筆空殼 title_only 與零碎 supports 競爭預算時仍保送注入", () => {
+    delete process.env.RESEARCH_SEARCH_SYNTHESIS;
+    const plan = planResearch({
+      text: "幫我細查 OpenRouter 是如何運作的？路由機制、計費抽成方式與服務條款規範是什麼？",
+      now: new Date("2026-11-16T00:00:00.000Z"),
+      timeZone: "Asia/Taipei",
+    });
+    const faqBody = "OpenRouter passes through the pricing of the underlying providers and unifies billing. ".repeat(14);
+    const corpus = collectEventsFromHit(
+      plan,
+      {
+        provider: "test",
+        queries: plan.queries,
+        sources: [
+          { title: "OpenRouter FAQ", uri: "https://openrouter.ai/docs/faq" },
+          { title: "OpenRouter Pricing", uri: "https://openrouter.ai/pricing" },
+          { title: "OpenRouter Terms", uri: "https://openrouter.ai/terms" },
+          { title: "Forum post 1", uri: "https://forum1.example.com/post" },
+          { title: "Forum post 2", uri: "https://forum2.example.com/post" },
+          { title: "Forum post 3", uri: "https://forum3.example.com/post" },
+        ],
+        pages: [
+          {
+            uri: "https://openrouter.ai/docs/faq",
+            title: "OpenRouter FAQ",
+            excerpt: faqBody,
+            fetchStatus: "ok",
+          },
+        ],
+        rawGroundingSupports: Array.from({ length: 6 }, (_, i) => ({
+          segment: {
+            text: `Minor scattered forum snippet number ${i + 1} with tangential chatter that should not crowd out pricing summary.`.repeat(
+              2,
+            ),
+          },
+        })),
+        brief:
+          "OpenRouter Pricing 實證：Standard 儲值收 5.5%（最低 $0.80），Business 收 8.0%，BYOK 每月前 $25,000 免路由費、超額 5%。PRICING_BRIEF_SURVIVED",
+        limitations: [],
+      },
+      { autoSynthesisFallback: true },
+    );
+
+    const injected = formatVerdictInjection(gateEvidence({ plan, corpus }));
+    assert.ok(
+      injected.includes("PRICING_BRIEF_SURVIVED"),
+      "層 1 關鍵 Pricing 摘要必須排在零碎 title_only／supports 之前，不得被預算擠掉",
+    );
+  });
+
+  it("factcheck 官方文件無新聞 publishedAt 時，只要正文與來源齊全即判 ok（已上網查證）", () => {
+    const plan = planResearch({
+      text: "幫我細查 OpenRouter 是如何運作的？路由機制與計費抽成方式是什麼？",
+      now: new Date("2026-11-16T00:00:00.000Z"),
+      timeZone: "Asia/Taipei",
+    });
+    assert.equal(plan.intent, "factcheck");
+    assert.equal(plan.timeWindow, null);
+
+    const corpus = collectEventsFromHit(plan, {
+      provider: "test",
+      queries: plan.queries,
+      sources: [
+        { title: "OpenRouter FAQ", uri: "https://openrouter.ai/docs/faq" },
+        { title: "OpenRouter Routing", uri: "https://openrouter.ai/docs/provider-routing" },
+      ],
+      pages: [
+        {
+          uri: "https://openrouter.ai/docs/faq",
+          title: "OpenRouter FAQ",
+          excerpt: "OpenRouter unifies access to hundreds of models and passes through underlying provider token pricing. ".repeat(3),
+          fetchStatus: "ok",
+          // 官方技術文件無 publishedAt
+        },
+        {
+          uri: "https://openrouter.ai/docs/provider-routing",
+          title: "OpenRouter Provider Routing",
+          excerpt: "Default routing balances effective price, TTFT, throughput, and rate-limit error rates with automatic fallbacks. ".repeat(3),
+          fetchStatus: "ok",
+        },
+      ],
+      brief: "",
+      limitations: [],
+    });
+
+    const verdict = gateEvidence({ plan, corpus });
+    assert.equal(verdict.status, "ok");
+    assert.equal(verdict.completionStatus, "complete");
+  });
 });
