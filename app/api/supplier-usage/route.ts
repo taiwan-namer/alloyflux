@@ -13,14 +13,18 @@ export async function GET(req: Request) {
   try {
     const user = await requireSupplier(req);
     const since = Date.now() - WEEK_MS;
-    const sources = (await listSourcesForUser(user)).filter((s) => s.authType === "oauth_sub");
+    // 含已軟刪節點：移除綁定後「近 7 天已累計分潤」不得歸零
+    const sources = (await listSourcesForUser(user, { includeRemoved: true })).filter(
+      (s) => s.authType === "oauth_sub",
+    );
     return Response.json(
       await Promise.all(
         sources.map(async (s) => ({
           sourceId: s.id,
-          label: s.label,
+          label: s.removedAt ? `${s.label}（已移除）` : s.label,
           provider: s.provider,
           quota: s.quota,
+          removed: Boolean(s.removedAt),
           ...(await supplierUsage(s.id, since)),
         })),
       ),

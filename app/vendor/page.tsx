@@ -197,6 +197,30 @@ export default function VendorPage() {
     return () => clearInterval(timer);
   }, [deviceFlow, router]);
 
+  function openAuthPopup(): Window | null {
+    try {
+      return window.open("about:blank", "_blank");
+    } catch {
+      return null;
+    }
+  }
+
+  function navigateAuthPopup(popup: Window | null, url: string): boolean {
+    if (popup && !popup.closed) {
+      try {
+        popup.location.href = url;
+        return true;
+      } catch {
+        try {
+          popup.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+    return false;
+  }
+
   async function startModuleAuth() {
     if (!agreed) {
       setOauthMsg({ ok: false, text: `請先勾選同意${TERMS_NAME}` });
@@ -208,6 +232,7 @@ export default function VendorPage() {
     lastSubmittedCodeRef.current = null;
     setCallbackInput("");
     setBusy(true);
+    const popup = openAuthPopup();
     try {
       if (selectedModule === "gemini" || (selectedModule === "claude" && claudeMode === "oauth_pool")) {
         const defaultLabel =
@@ -219,6 +244,11 @@ export default function VendorPage() {
         });
         const data = await res.json();
         if (!res.ok) {
+          try {
+            popup?.close();
+          } catch {
+            // ignore
+          }
           setOauthMsg({ ok: false, text: data.error || "啟動 Google OAuth 失敗" });
           return;
         }
@@ -230,8 +260,18 @@ export default function VendorPage() {
         } catch {
           // ignore
         }
-        window.open(data.authUrl, "_blank", "noopener,noreferrer");
+        if (!navigateAuthPopup(popup, data.authUrl)) {
+          setOauthMsg({
+            ok: false,
+            text: "瀏覽器封鎖了彈窗。請點下方「前往 Google 授權」連結繼續。",
+          });
+        }
       } else if (selectedModule === "claude" && claudeMode === "api_key") {
+        try {
+          popup?.close();
+        } catch {
+          // ignore
+        }
         if (!claudeKey.trim()) {
           setOauthMsg({ ok: false, text: "請輸入 Anthropic Claude API Key（sk-ant-...）" });
           return;
@@ -262,11 +302,21 @@ export default function VendorPage() {
         });
         const data = await res.json();
         if (!res.ok) {
+          try {
+            popup?.close();
+          } catch {
+            // ignore
+          }
           setOauthMsg({ ok: false, text: data.error || "啟動 ChatGPT 裝置碼授權失敗" });
           return;
         }
         setDeviceFlow({ kind: "chatgpt", state: data.state, userCode: data.userCode, verifyUrl: data.verifyUrl });
-        window.open(data.verifyUrl, "_blank", "noopener,noreferrer");
+        if (!navigateAuthPopup(popup, data.verifyUrl)) {
+          setOauthMsg({
+            ok: false,
+            text: "瀏覽器封鎖了彈窗。請點下方官方授權頁連結並輸入裝置碼。",
+          });
+        }
       } else {
         const res = await fetch("/api/oauth", {
           method: "POST",
@@ -275,12 +325,22 @@ export default function VendorPage() {
         });
         const data = await res.json();
         if (!res.ok) {
+          try {
+            popup?.close();
+          } catch {
+            // ignore
+          }
           setOauthMsg({ ok: false, text: data.error || "啟動 Grok 裝置碼授權失敗" });
           return;
         }
         const verifyUrl = data.verifyUrlComplete || data.verifyUrl;
         setDeviceFlow({ kind: "grok", state: data.state, userCode: data.userCode, verifyUrl });
-        window.open(verifyUrl, "_blank", "noopener,noreferrer");
+        if (!navigateAuthPopup(popup, verifyUrl)) {
+          setOauthMsg({
+            ok: false,
+            text: "瀏覽器封鎖了彈窗。請點下方官方授權頁連結並輸入裝置碼。",
+          });
+        }
       }
     } finally {
       setBusy(false);
@@ -644,7 +704,6 @@ export default function VendorPage() {
             )}
           </button>
 
-          {/* 官方 Antigravity HTTPS 認證頁：點 Copy to Clipboard → 回來點一鍵貼上（免碰網址列、免打字） */}
           {activeAuthUrl && (
             <div className="card" style={{ marginTop: 14, background: "var(--panel-2)" }}>
               <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 10 }}>
@@ -662,40 +721,36 @@ export default function VendorPage() {
                     fontSize: 13,
                   }}
                 >
-                  🔗 1. 前往 Google 授權帳號
+                  前往 Google 授權
                 </a>
-                <button
-                  type="button"
-                  className="primary"
-                  disabled={busy}
-                  style={{ padding: "9px 14px", fontWeight: 700, fontSize: 13 }}
-                  onClick={() => void pasteFromClipboardAndSubmit()}
-                >
-                  {busy ? "交換 Token 並讀取額度中…" : "📋 2. 一鍵從剪貼簿貼上並進入 /sources →"}
-                </button>
               </div>
               <div style={{ marginBottom: 10, lineHeight: 1.7, fontSize: 13 }}>
-                <strong>超簡單 2 個按鈕完成（免打字、免選網址）：</strong>
+                ① 授權後於官方頁點 <strong>Copy to Clipboard</strong>。
                 <br />
-                ① 在新分頁登入 Google 按「允許」，畫面會打開 Google 官方認證頁，點頁面中央黑色按鈕{" "}
-                <strong>「Copy to Clipboard」</strong>。
-                <br />
-                ② 回到本頁點上方 <strong>「📋 2. 一鍵從剪貼簿貼上」</strong>（或在下方框貼上）即自動完成並跳轉 <code>/sources</code>！
+                ② 回本頁在下方輸入欄點 <strong>貼上</strong>（完成後進入 <code>/sources</code>）。
               </div>
-              <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+              <div className="row" style={{ flexWrap: "wrap", gap: 8, alignItems: "center" }}>
                 <input
                   style={{ flex: 1, minWidth: 220 }}
                   value={callbackInput}
                   disabled={busy}
-                  placeholder="或在此貼上剛複製的授權碼（4/0A... 貼上即自動綁定）"
+                  placeholder="貼上授權碼（4/0A...）即自動綁定"
                   onChange={(e) => onCallbackInputChange(e.target.value)}
                 />
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy}
+                  onClick={() => void pasteFromClipboardAndSubmit()}
+                >
+                  {busy ? "綁定中…" : "貼上"}
+                </button>
                 <button
                   type="button"
                   disabled={busy || !callbackInput.trim()}
                   onClick={() => void submitCallbackUrl()}
                 >
-                  {busy ? "綁定中…" : "手動送出 →"}
+                  {busy ? "綁定中…" : "送出"}
                 </button>
               </div>
             </div>

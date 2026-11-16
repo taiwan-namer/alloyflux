@@ -48,7 +48,9 @@ CREATE TABLE IF NOT EXISTS sources (
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at BIGINT NOT NULL,
   -- 綁定此貨源的平台使用者（供給者／管理員）；派發仍用全部 enabled 貨源
-  owner_user_id TEXT
+  owner_user_id TEXT,
+  -- 夥伴移除採軟刪：停派並從控制台隱藏，用量／分潤歷史仍可對帳
+  removed_at BIGINT
 );
 CREATE INDEX IF NOT EXISTS idx_sources_owner ON sources(owner_user_id);
 

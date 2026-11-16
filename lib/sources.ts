@@ -33,6 +33,8 @@ export interface Source {
   fromEnv: boolean;
   /** 綁定此貨源的平台使用者 id；派發路由不依此過濾 */
   ownerUserId: string | null;
+  /** 夥伴「移除」採軟刪：保留列以便分潤／用量歷史不消失 */
+  removedAt: number | null;
   /** OAuth Token 已遷到供給者節點本機 */
   delegatedToNode?: boolean;
 }
@@ -74,6 +76,7 @@ interface SourceRow {
   quota_updated_at: number | null;
   enabled: number;
   owner_user_id?: string | null;
+  removed_at?: number | null;
 }
 
 const globalForOwnerCol = globalThis as unknown as { __sourcesOwnerColReady?: boolean };
@@ -82,6 +85,7 @@ const globalForOwnerCol = globalThis as unknown as { __sourcesOwnerColReady?: bo
 async function ensureSourcesOwnerColumn(): Promise<void> {
   if (globalForOwnerCol.__sourcesOwnerColReady) return;
   await db().exec("ALTER TABLE sources ADD COLUMN IF NOT EXISTS owner_user_id TEXT");
+  await db().exec("ALTER TABLE sources ADD COLUMN IF NOT EXISTS removed_at BIGINT");
   await db().exec("CREATE INDEX IF NOT EXISTS idx_sources_owner ON sources(owner_user_id)");
   try {
     // 舊 oauth 列：key_hint 形如 `email@x.com (Plan)` → 對應 users.email 認領
@@ -132,6 +136,7 @@ function rowToSource(r: SourceRow): Source {
     enabled: r.enabled === 1,
     fromEnv: false,
     ownerUserId: r.owner_user_id ?? null,
+    removedAt: r.removed_at != null ? Number(r.removed_at) : null,
     delegatedToNode,
   };
 }
@@ -156,16 +161,21 @@ function envSources(): (Source & { secret: string })[] {
         enabled: true,
         fromEnv: true,
         ownerUserId: null,
+        removedAt: null,
         secret: apiKey,
       },
     ];
   });
 }
 
-async function dbSources(): Promise<(Source & { resolveSecret: () => string })[]> {
+async function dbSources(opts?: { includeRemoved?: boolean }): Promise<(Source & { resolveSecret: () => string })[]> {
   await ensureSourcesOwnerColumn();
   const rows = (await db()
-    .prepare("SELECT * FROM sources ORDER BY priority, created_at")
+    .prepare(
+      opts?.includeRemoved
+        ? "SELECT * FROM sources ORDER BY priority, created_at"
+        : "SELECT * FROM sources WHERE removed_at IS NULL ORDER BY priority, created_at",
+    )
     .all()) as unknown as SourceRow[];
   return rows.map((r) => ({ ...rowToSource(r), resolveSecret: () => decrypt(r.encrypted_key) }));
 }
@@ -211,14 +221,49 @@ export async function listSources(): Promise<SourceStatus[]> {
   });
 }
 
-/** 供給者後台：僅自己的貨源；管理員看全部（含 env） */
-export async function listSourcesForUser(user: {
-  id: string;
-  isAdmin: boolean;
-}): Promise<SourceStatus[]> {
-  const all = await listSources();
-  if (user.isAdmin) return all;
-  return all.filter((s) => !s.fromEnv && s.ownerUserId === user.id);
+/** 供給者後台：僅自己的貨源；管理員看全部（含 env）；預設不含已移除 */
+export async function listSourcesForUser(
+  user: {
+    id: string;
+    isAdmin: boolean;
+  },
+  opts?: { includeRemoved?: boolean },
+): Promise<SourceStatus[]> {
+  const all = opts?.includeRemoved
+    ? await listSourcesIncludingRemoved()
+    : await listSources();
+  if (user.isAdmin) {
+    return opts?.includeRemoved ? all : all.filter((s) => !s.removedAt);
+  }
+  return all.filter((s) => !s.fromEnv && s.ownerUserId === user.id && (opts?.includeRemoved || !s.removedAt));
+}
+
+/** 含已軟刪節點（分潤／用量歷史用） */
+export async function listSourcesIncludingRemoved(): Promise<SourceStatus[]> {
+  await ensureSourcesOwnerColumn();
+  const rows = (await db()
+    .prepare("SELECT * FROM sources ORDER BY priority, created_at")
+    .all()) as unknown as SourceRow[];
+  const now = Date.now();
+  const usageRows = (await db()
+    .prepare(
+      `SELECT ref_id AS id, COALESCE(SUM(amount_points), 0) AS used
+       FROM ledger
+       WHERE type = 'source_usage' AND created_at >= ? AND ref_id IS NOT NULL
+       GROUP BY ref_id`,
+    )
+    .all(monthStart())) as { id: string; used: number }[];
+  const usedMap = new Map(usageRows.map((r) => [String(r.id), Number(r.used)]));
+  return rows.map((r) => {
+    const s = rowToSource(r);
+    const h = health.get(s.id);
+    return {
+      ...s,
+      usedThisMonthPoints: usedMap.get(s.id) ?? 0,
+      cooldownUntil: h && h.cooldownUntil > now ? h.cooldownUntil : null,
+      lastError: h?.lastError ?? null,
+    };
+  });
 }
 
 export async function assertSourceOwnedBy(
@@ -521,8 +566,13 @@ export async function updateSource(
     await db().prepare("UPDATE sources SET share_limit_pct = ? WHERE id = ?").run(patch.shareLimitPct, id);
 }
 
+/** 夥伴移除＝軟刪：停派並隱藏，保留列讓已產生分潤／用量對帳不歸零 */
 export async function deleteSource(id: string): Promise<void> {
-  await db().prepare("DELETE FROM sources WHERE id = ?").run(id);
+  await ensureSourcesOwnerColumn();
+  const now = Date.now();
+  await db()
+    .prepare(`UPDATE sources SET enabled = 0, removed_at = ? WHERE id = ? AND removed_at IS NULL`)
+    .run(now, id);
   health.delete(id);
 }
 

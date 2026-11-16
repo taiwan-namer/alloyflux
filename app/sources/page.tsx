@@ -299,11 +299,37 @@ export default function SourcesPage() {
     return () => clearInterval(timer);
   }, [deviceFlow, refresh]);
 
+  /** 必須在 await 前記得開窗，否則瀏覽器會當非使用者手勢而封鎖彈窗 */
+  function openAuthPopup(): Window | null {
+    try {
+      return window.open("about:blank", "_blank");
+    } catch {
+      return null;
+    }
+  }
+
+  function navigateAuthPopup(popup: Window | null, url: string): boolean {
+    if (popup && !popup.closed) {
+      try {
+        popup.location.href = url;
+        return true;
+      } catch {
+        try {
+          popup.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+    return false;
+  }
+
   async function startBrowserOAuth(action: "start_gemini" | "start_chatgpt_browser") {
     setOauthMsg(null);
     setDeviceFlow(null);
     lastSubmittedCodeRef.current = null;
     setCallbackInput("");
+    const popup = openAuthPopup();
     const res = await fetch("/api/oauth", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -311,6 +337,11 @@ export default function SourcesPage() {
     });
     const data = await res.json();
     if (!res.ok) {
+      try {
+        popup?.close();
+      } catch {
+        // ignore
+      }
       setOauthMsg({ ok: false, text: data.error });
       return;
     }
@@ -324,12 +355,18 @@ export default function SourcesPage() {
         // ignore
       }
     }
-    window.open(data.authUrl, "_blank", "noopener,noreferrer");
+    if (!navigateAuthPopup(popup, data.authUrl)) {
+      setOauthMsg({
+        ok: false,
+        text: "瀏覽器封鎖了彈窗。請點下方「前往 Google 授權」連結繼續（或允許本站彈窗後重試）。",
+      });
+    }
   }
 
   async function startChatGptDevice() {
     setOauthMsg(null);
     setActiveAuthUrl(null);
+    const popup = openAuthPopup();
     const res = await fetch("/api/oauth", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -337,16 +374,27 @@ export default function SourcesPage() {
     });
     const data = await res.json();
     if (!res.ok) {
+      try {
+        popup?.close();
+      } catch {
+        // ignore
+      }
       setOauthMsg({ ok: false, text: data.error });
       return;
     }
     setDeviceFlow({ kind: "chatgpt", state: data.state, userCode: data.userCode, verifyUrl: data.verifyUrl });
-    window.open(data.verifyUrl, "_blank", "noopener,noreferrer");
+    if (!navigateAuthPopup(popup, data.verifyUrl)) {
+      setOauthMsg({
+        ok: false,
+        text: "瀏覽器封鎖了彈窗。請點下方官方授權頁連結，並輸入顯示的裝置碼。",
+      });
+    }
   }
 
   async function startGrokDevice() {
     setOauthMsg(null);
     setActiveAuthUrl(null);
+    const popup = openAuthPopup();
     const res = await fetch("/api/oauth", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -354,12 +402,22 @@ export default function SourcesPage() {
     });
     const data = await res.json();
     if (!res.ok) {
+      try {
+        popup?.close();
+      } catch {
+        // ignore
+      }
       setOauthMsg({ ok: false, text: data.error });
       return;
     }
     const verifyUrl = data.verifyUrlComplete || data.verifyUrl;
     setDeviceFlow({ kind: "grok", state: data.state, userCode: data.userCode, verifyUrl });
-    window.open(verifyUrl, "_blank", "noopener,noreferrer");
+    if (!navigateAuthPopup(popup, verifyUrl)) {
+      setOauthMsg({
+        ok: false,
+        text: "瀏覽器封鎖了彈窗。請點下方官方授權頁連結，並輸入顯示的裝置碼。",
+      });
+    }
   }
 
   async function submitCallbackUrl(overrideValue?: string) {
@@ -556,7 +614,13 @@ export default function SourcesPage() {
   }
 
   async function remove(id: string) {
-    if (!confirm("確定移除這個算力節點？")) return;
+    if (
+      !confirm(
+        "確定移除此算力節點？\n\n節點會停止派發，但已產生的分潤／用量對帳會保留，不會因移除而歸零。",
+      )
+    ) {
+      return;
+    }
     await fetch(`/api/sources/${id}`, { method: "DELETE" });
     void refresh();
   }
@@ -632,37 +696,37 @@ export default function SourcesPage() {
       >
         <div className="card" style={{ marginBottom: 0, borderColor: "var(--ok)" }}>
           <div className="muted" style={{ fontSize: 12 }}>
-            近 7 天已累計創作者分潤（80% 回饋）
+            近 7 天已產生分潤（實績・移除節點不歸零）
           </div>
           <div style={{ fontSize: 28, fontWeight: 800, color: "var(--ok)", margin: "6px 0 4px" }}>
             NT$ {summaryStats.weekEarnedNtd.toLocaleString("zh-TW")}
           </div>
           <div className="muted" style={{ fontSize: 12 }}>
-            共完成 {summaryStats.weekMessages} 筆工作流任務（對應 {summaryStats.weekBuyerPoints.toFixed(1)} 工作台額度）
+            共 {summaryStats.weekMessages} 筆任務（{summaryStats.weekBuyerPoints.toFixed(1)} 額度 × 80%）。出金結算上線前以此為對帳口徑。
           </div>
         </div>
 
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="muted" style={{ fontSize: 12 }}>
-            已啟用節點・本週剩餘可分配預估回饋
+            現行節點・剩餘產能預估（非錢包餘額）
           </div>
           <div style={{ fontSize: 28, fontWeight: 800, margin: "6px 0 4px" }}>
             約 NT$ {summaryStats.estWeeklyRemTotal.toLocaleString("zh-TW")}
           </div>
           <div className="muted" style={{ fontSize: 12 }}>
-            訂閱月費等值 × 剩餘可調度% ÷ 4.3 週
+            依目前已綁節點剩餘 % 試算；移除節點後此欄會下降，不代表已賺金額被清掉。
           </div>
         </div>
 
         <div className="card" style={{ marginBottom: 0 }}>
           <div className="muted" style={{ fontSize: 12 }}>
-            目前配置・滿載月估（訂閱成本等值）
+            現行配置・滿載月估（產能潛力）
           </div>
           <div style={{ fontSize: 28, fontWeight: 800, color: "var(--accent)", margin: "6px 0 4px" }}>
             約 NT$ {summaryStats.estMonthlyCapTotal.toLocaleString("zh-TW")} / 月
           </div>
           <div className="muted" style={{ fontSize: 12 }}>
-            官方訂閱月費 × 分配%；實際入帳依買家消耗額度 × 80%
+            訂閱月費 × 分配%。實際可提領＝已產生分潤累計 − 已出金（出金流程即將接上）。
           </div>
         </div>
       </div>
@@ -1086,7 +1150,7 @@ export default function SourcesPage() {
           >
             <div style={{ fontWeight: 700 }}>✦ Google Gemini 模組（AI Pro / Ultra，含 Claude & GPT 池）</div>
             <div style={{ fontSize: 12, opacity: 0.9, marginTop: 3 }}>
-              官方認證頁一鍵複製代碼 · 一鍵貼上完成（免裝程式，15 秒）
+              官方認證頁複製代碼 · 回本頁輸入欄按「貼上」完成
             </div>
           </button>
 
@@ -1240,40 +1304,36 @@ export default function SourcesPage() {
                   fontSize: 13,
                 }}
               >
-                🔗 1. 前往 Google 授權帳號
+                前往 Google 授權
               </a>
-              <button
-                type="button"
-                className="primary"
-                disabled={submittingCode}
-                style={{ padding: "9px 14px", fontWeight: 700, fontSize: 13 }}
-                onClick={() => void pasteFromClipboardAndSubmit()}
-              >
-                {submittingCode ? "正在交換 Token 並讀取額度…" : "📋 2. 一鍵從剪貼簿貼上並綁定"}
-              </button>
             </div>
             <div style={{ marginBottom: 10, fontSize: 13, lineHeight: 1.7 }}>
-              <strong>超簡單 2 個按鈕完成（免打字、免選網址）：</strong>
+              ① 在授權分頁登入並按「允許」，於官方頁點 <strong>Copy to Clipboard</strong>。
               <br />
-              ① 在新分頁登入 Google 並按「允許」，畫面會直接跳到 Google 官方認證頁，點頁面中央黑色按鈕{" "}
-              <strong>「Copy to Clipboard」</strong>。
-              <br />
-              ② 回到本頁點上方 <strong>「📋 2. 一鍵從剪貼簿貼上並綁定」</strong>（或在下方框直接貼上）即自動完成，立刻顯示 Claude &amp; GPT 池剩餘 %！
+              ② 回到本頁，在下方輸入欄點 <strong>貼上</strong>（或直接貼上授權碼）即可綁定。
             </div>
-            <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
+            <div className="row" style={{ flexWrap: "wrap", gap: 8, alignItems: "center" }}>
               <input
                 style={{ flex: 1, minWidth: 220 }}
                 value={callbackInput}
                 disabled={submittingCode}
-                placeholder="或在此貼上剛複製的授權碼（4/0A... 貼上即自動綁定）"
+                placeholder="貼上授權碼（4/0A...）即自動綁定"
                 onChange={(e) => onCallbackInputChange(e.target.value)}
               />
+              <button
+                type="button"
+                className="primary"
+                disabled={submittingCode}
+                onClick={() => void pasteFromClipboardAndSubmit()}
+              >
+                {submittingCode ? "綁定中…" : "貼上"}
+              </button>
               <button
                 type="button"
                 disabled={submittingCode || !callbackInput.trim()}
                 onClick={() => void submitCallbackUrl()}
               >
-                {submittingCode ? "綁定中…" : "手動送出"}
+                {submittingCode ? "綁定中…" : "送出"}
               </button>
             </div>
           </div>
