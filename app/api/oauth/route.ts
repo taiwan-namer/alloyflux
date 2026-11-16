@@ -83,31 +83,44 @@ async function completeCodeAndSave(
     codeOrUrl: input.codeOrUrl,
     state: input.state,
   });
-  if (shouldProxyOAuthPersist(req)) {
-    return persistOAuthViaCloud(
-      {
-        action: "import_raw_token",
-        provider: creds.provider,
-        accessToken: creds.accessToken,
-        refreshToken: creds.refreshToken,
-        accountId: creds.accountId,
-        projectId: creds.projectId,
-        email: creds.email,
-        planType: creds.planType,
-        expiresAt: creds.expiresAt,
-        label: input.label || label,
-        shareLimitPct: input.shareLimitPct ?? shareLimitPct,
-      },
-      req,
+  try {
+    if (shouldProxyOAuthPersist(req)) {
+      return await persistOAuthViaCloud(
+        {
+          action: "import_raw_token",
+          provider: creds.provider,
+          accessToken: creds.accessToken,
+          refreshToken: creds.refreshToken,
+          accountId: creds.accountId,
+          projectId: creds.projectId,
+          email: creds.email,
+          planType: creds.planType,
+          expiresAt: creds.expiresAt,
+          label: input.label || label,
+          shareLimitPct: input.shareLimitPct ?? shareLimitPct,
+        },
+        req,
+      );
+    }
+    const added = await addOAuthSubscriptionSource({
+      creds,
+      label: input.label || label,
+      shareLimitPct: input.shareLimitPct ?? shareLimitPct,
+      ownerUserId: input.ownerUserId,
+    });
+    return { ok: true, ...added };
+  } catch (e) {
+    // Google code 已用掉；寫庫失敗時不可叫使用者重貼同碼
+    const detail = e instanceof Error ? e.message : String(e);
+    console.error("[oauth] token ok but persist failed", {
+      email: creds.email,
+      provider: creds.provider,
+      detail,
+    });
+    throw new Error(
+      `Google 授權已成功，但寫入節點失敗（${detail}）。授權碼已用過，請重新點 Gemini 開一輪新授權後再貼一次。`,
     );
   }
-  const added = await addOAuthSubscriptionSource({
-    creds,
-    label: input.label || label,
-    shareLimitPct: input.shareLimitPct ?? shareLimitPct,
-    ownerUserId: input.ownerUserId,
-  });
-  return { ok: true, ...added };
 }
 
 function ensureLocalCallbackListener(port: number, expectedPath: string) {

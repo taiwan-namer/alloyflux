@@ -289,40 +289,42 @@ export async function addOAuthSubscriptionSource(input: {
         ? `Grok 訂閱 ${input.creds.email ?? ""}`.trim()
         : `ChatGPT 訂閱 ${input.creds.email ?? ""}`.trim());
 
-  // 同平台＋同帳號 email 重綁：優先覆寫「同一主人」或「尚無主人」的列，不搶別人的
+  // 同平台＋同帳號 email 重綁：優先覆寫「同一主人」或「尚無主人」的列，不搶別人的。
+  // 不可寫 `OR ? IS NULL`：Postgres 無法推斷 null 參數型別 → could not determine data type of parameter $N
   if (input.creds.email) {
     const emailPrefix = `${input.creds.email.toLowerCase()} (`;
-    const existing = (await db()
-      .prepare(
-        `SELECT id, label, share_limit_pct, owner_user_id FROM sources
-         WHERE auth_type = 'oauth_sub' AND provider = ? AND LOWER(key_hint) LIKE ?
-           AND (
-             owner_user_id IS NULL
-             OR owner_user_id = ?
-             OR ? IS NULL
-           )
-         ORDER BY
-           CASE WHEN owner_user_id = ? THEN 0 WHEN owner_user_id IS NULL THEN 1 ELSE 2 END,
-           created_at DESC
-         LIMIT 1`,
-      )
-      .get(
-        input.creds.provider,
-        `${emailPrefix}%`,
-        input.ownerUserId ?? null,
-        input.ownerUserId ?? null,
-        input.ownerUserId ?? null,
-      )) as
-      | { id: string; label: string; share_limit_pct: number | null; owner_user_id: string | null }
-      | undefined;
+    const ownerId = input.ownerUserId?.trim() || null;
+    const existing = (
+      ownerId
+        ? ((await db()
+            .prepare(
+              `SELECT id, label, share_limit_pct, owner_user_id FROM sources
+               WHERE auth_type = 'oauth_sub' AND provider = ? AND LOWER(key_hint) LIKE ?
+                 AND (owner_user_id IS NULL OR owner_user_id = ?)
+               ORDER BY
+                 CASE WHEN owner_user_id = ? THEN 0 WHEN owner_user_id IS NULL THEN 1 ELSE 2 END,
+                 created_at DESC
+               LIMIT 1`,
+            )
+            .get(input.creds.provider, `${emailPrefix}%`, ownerId, ownerId)) as
+            | { id: string; label: string; share_limit_pct: number | null; owner_user_id: string | null }
+            | undefined)
+        : ((await db()
+            .prepare(
+              `SELECT id, label, share_limit_pct, owner_user_id FROM sources
+               WHERE auth_type = 'oauth_sub' AND provider = ? AND LOWER(key_hint) LIKE ?
+                 AND owner_user_id IS NULL
+               ORDER BY created_at DESC
+               LIMIT 1`,
+            )
+            .get(input.creds.provider, `${emailPrefix}%`)) as
+            | { id: string; label: string; share_limit_pct: number | null; owner_user_id: string | null }
+            | undefined)
+    );
 
     if (existing) {
       // 若已有主人且不是目前使用者，略過覆寫（理論上 WHERE 已擋；雙重保險）
-      if (
-        existing.owner_user_id &&
-        input.ownerUserId &&
-        existing.owner_user_id !== input.ownerUserId
-      ) {
+      if (existing.owner_user_id && ownerId && existing.owner_user_id !== ownerId) {
         // fall through to insert
       } else {
         await db()
@@ -330,7 +332,7 @@ export async function addOAuthSubscriptionSource(input: {
             `UPDATE sources
              SET label = ?, encrypted_key = ?, key_hint = ?, share_limit_pct = ?,
                  quota_json = ?, quota_updated_at = ?, enabled = 1,
-                 owner_user_id = COALESCE(?, owner_user_id)
+                 owner_user_id = COALESCE(CAST(? AS TEXT), owner_user_id)
              WHERE id = ?`,
           )
           .run(
@@ -340,7 +342,7 @@ export async function addOAuthSubscriptionSource(input: {
             input.shareLimitPct ?? existing.share_limit_pct ?? 80,
             JSON.stringify(quota),
             now,
-            input.ownerUserId ?? null,
+            ownerId,
             existing.id,
           );
         health.delete(existing.id);
@@ -350,10 +352,11 @@ export async function addOAuthSubscriptionSource(input: {
   }
 
   const id = newId();
+  const ownerIdForInsert = input.ownerUserId?.trim() || null;
   await db()
     .prepare(
       `INSERT INTO sources (id, label, kind, provider, auth_type, encrypted_key, key_hint, priority, monthly_cap_points, share_limit_pct, quota_json, quota_updated_at, enabled, created_at, owner_user_id)
-       VALUES (?, ?, 'supplier', ?, 'oauth_sub', ?, ?, ?, NULL, ?, ?, ?, 1, ?, ?)`,
+       VALUES (?, ?, 'supplier', ?, 'oauth_sub', ?, ?, ?, NULL, ?, ?, ?, 1, ?, CAST(? AS TEXT))`,
     )
     .run(
       id,
@@ -366,7 +369,7 @@ export async function addOAuthSubscriptionSource(input: {
       JSON.stringify(quota),
       now,
       now,
-      input.ownerUserId ?? null,
+      ownerIdForInsert,
     );
   health.delete(id);
   return { id, quota };
