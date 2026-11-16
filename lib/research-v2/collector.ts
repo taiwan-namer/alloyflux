@@ -204,6 +204,17 @@ function qualityScore(q: ResearchSource["quality"]): number {
   return 0.25;
 }
 
+/** 從 Flash groundingSupports 取出 segment.text */
+function groundingSupportSegmentText(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const segment = (raw as { segment?: unknown }).segment;
+  if (!segment || typeof segment !== "object") return null;
+  const text = (segment as { text?: unknown }).text;
+  if (typeof text !== "string") return null;
+  const trimmed = text.trim();
+  return trimmed.length ? trimmed : null;
+}
+
 /** 與既有 article_body 事件重疊 → 衝突，以正文為準 */
 function findArticleBodyConflict(
   seg: string,
@@ -438,12 +449,8 @@ export function collectEventsFromHit(
     let synIdx = 0;
     for (const raw of supports) {
       if (synIdx >= 6) break;
-      const seg =
-        raw &&
-        typeof raw === "object" &&
-        "segment" in raw &&
-        (raw as { segment?: { text?: string } }).segment?.text;
-      if (!seg || seg.trim().length < 40) continue;
+      const seg = groundingSupportSegmentText(raw);
+      if (!seg || seg.length < 40) continue;
       const conflict = findArticleBodyConflict(seg, byMerge);
       if (conflict) {
         limitations.push(
@@ -454,7 +461,7 @@ export function collectEventsFromHit(
           conflict.claims.push({
             claimId: stableId("clm", conflict.eventId, "synth_conflict"),
             statement: sanitizeEvidenceText(
-              `【衝突｜以正文為準｜搜尋摘要未採用】${seg.trim().slice(0, 160)}`,
+              `【衝突｜以正文為準｜搜尋摘要未採用】${seg.slice(0, 160)}`,
               200,
             ),
             claimType: "unconfirmed",
@@ -467,7 +474,7 @@ export function collectEventsFromHit(
         continue;
       }
       const statement = sanitizeEvidenceText(
-        `【搜尋摘要，未經原文核對】${seg.trim()}`,
+        `【搜尋摘要，未經原文核對】${seg}`,
         560,
       );
       const topic = guessTopic(statement);
@@ -484,7 +491,7 @@ export function collectEventsFromHit(
       };
       byMerge.set(mergeKey, {
         eventId: stableId("evt", mergeKey),
-        title: sanitizeEvidenceText(seg.trim(), 120),
+        title: sanitizeEvidenceText(seg, 120),
         topic,
         claims: [claim],
         sourceIds: srcId ? [srcId] : [],
