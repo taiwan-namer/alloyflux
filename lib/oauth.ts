@@ -663,7 +663,27 @@ export async function exchangeGeminiCode(code: string, redirectUri: string, veri
     body,
   });
   if (!res.ok) {
-    throw new Error(`Google OAuth 交換失敗（${res.status}）：${(await res.text()).slice(0, 200)}`);
+    const raw = (await res.text()).slice(0, 300);
+    let hint = "";
+    if (/invalid_grant/i.test(raw)) {
+      // Google 對「已用過／過期的 code」與「redirect_uri 不一致」常只回 Bad Request；
+      // PKCE 對不上時多半會寫 incorrect code_verifier。
+      if (/incorrect code_verifier|missing code verifier/i.test(raw)) {
+        hint =
+          "（PKCE verifier 與授權網址不一致：請重新點「Google Gemini 模組」開一輪新授權，勿混用舊分頁的碼）";
+      } else {
+        hint =
+          "（授權碼多半已用過、過期，或與啟動時的 redirect_uri 不一致。請重新授權；貼上後勿再按第二次「手動送出」——授權碼只能換一次）";
+      }
+      console.error("[oauth/gemini] invalid_grant", {
+        status: res.status,
+        redirectUri,
+        hasVerifier: Boolean(verifier),
+        codePrefix: code.slice(0, 8),
+        body: raw,
+      });
+    }
+    throw new Error(`Google OAuth 交換失敗（${res.status}）：${raw}${hint}`);
   }
   const tokens = (await res.json()) as { access_token: string; refresh_token?: string; expires_in?: number };
   const meta = await bootstrapGeminiAccount(tokens.access_token);
