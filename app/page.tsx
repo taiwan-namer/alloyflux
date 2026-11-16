@@ -765,6 +765,39 @@ function CopyReplyButton({ text }: { text: string }) {
   );
 }
 
+/** 使用者提問旁的圖示複製鈕（如 ChatGPT 氣泡下方） */
+function CopyIconButton({ text, label = "複製" }: { text: string; label?: string }) {
+  const [done, setDone] = useState(false);
+  return (
+    <button
+      type="button"
+      className="msg-icon-btn"
+      title={done ? "已複製" : label}
+      aria-label={done ? "已複製" : label}
+      onClick={async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          setDone(true);
+          setTimeout(() => setDone(false), 1500);
+        } catch {
+          // ignore
+        }
+      }}
+    >
+      {done ? (
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M5 13l4 4L19 7" />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="9" y="9" width="11" height="11" rx="2" />
+          <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
 const DOWNLOADABLE_EXTS = new Set([
   "csv",
   "html",
@@ -988,6 +1021,10 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<{ stop: () => void } | null>(null);
+  /** Windows 注音等 IME：compositionend 後同一下 Enter 常會再觸發送出 */
+  const imeComposingRef = useRef(false);
+  const imeJustEndedRef = useRef(false);
+  const imeJustEndedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** 僅在使用者本來就在底部附近時，才跟隨 AI 串流往下捲；往上閱讀時不強迫跟隨 */
   const stickToBottomRef = useRef(true);
   const [showJumpLatest, setShowJumpLatest] = useState(false);
@@ -1561,6 +1598,8 @@ export default function ChatPage() {
     forceMain?: boolean;
   }) {
     if (busy || !currentModel?.available) return;
+    // 組字中勿送出，避免注音半成品（如「ㄎ」）變成對話訊息
+    if (!opts?.regenerate && imeComposingRef.current) return;
     if (currentLocked) {
       flashComposerHint("此為高階模型，請先登入並開通雲端工作台服務費方案，或改選各家免費入門模型");
       if (authUser) setAccountOpen(true);
@@ -1745,10 +1784,16 @@ export default function ChatPage() {
       const aborted = controller.signal.aborted;
       abortRef.current = null;
       if (aborted) {
-        // 撤回未完成回合，把內容跳回可編輯／可收合刪除的對話欄，避免模型下一輪重複讀取
+        // 撤回未完成回合，把原文跳回可編輯對話欄（應停在可改字的地方，不留半成品氣泡）
         setMessages((prev) => prev.filter((m) => m.id !== userMsgId && m.id !== assistantId));
         if (!startedConvId) setActiveId(null);
         if (!composerDraft.regenerate) {
+          imeComposingRef.current = false;
+          imeJustEndedRef.current = false;
+          if (imeJustEndedTimerRef.current) {
+            clearTimeout(imeJustEndedTimerRef.current);
+            imeJustEndedTimerRef.current = null;
+          }
           setInput(composerDraft.text);
           setPendingImages(composerDraft.images);
           setPendingFiles(composerDraft.files);
@@ -1758,6 +1803,12 @@ export default function ChatPage() {
             el.style.height = "48px";
             el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
             el.focus();
+            const len = el.value.length;
+            try {
+              el.setSelectionRange(len, len);
+            } catch {
+              /* ignore */
+            }
           });
         }
       }
@@ -2069,6 +2120,11 @@ export default function ChatPage() {
                     m.content
                   )}
                 </div>
+                {m.role === "user" && m.content && (
+                  <div className="msg-toolbar msg-toolbar-user">
+                    <CopyIconButton text={m.content} label="複製提問" />
+                  </div>
+                )}
                 {m.error && <div className="meta error">⚠ {m.error}</div>}
                 {m.role === "assistant" && m.content && !m.error && (
                   <div className="msg-toolbar">
@@ -2244,6 +2300,24 @@ export default function ChatPage() {
                 value={input}
                 placeholder="輸入訊息（Enter 送出，Shift+Enter 換行；可貼上截圖）"
                 onChange={(e) => setInput(e.target.value)}
+                onCompositionStart={() => {
+                  imeComposingRef.current = true;
+                  imeJustEndedRef.current = false;
+                  if (imeJustEndedTimerRef.current) {
+                    clearTimeout(imeJustEndedTimerRef.current);
+                    imeJustEndedTimerRef.current = null;
+                  }
+                }}
+                onCompositionEnd={() => {
+                  imeComposingRef.current = false;
+                  // Windows 注音：compositionend 後常緊接著再派一次 Enter keydown
+                  imeJustEndedRef.current = true;
+                  if (imeJustEndedTimerRef.current) clearTimeout(imeJustEndedTimerRef.current);
+                  imeJustEndedTimerRef.current = setTimeout(() => {
+                    imeJustEndedRef.current = false;
+                    imeJustEndedTimerRef.current = null;
+                  }, 50);
+                }}
                 onPaste={(e) => {
                   const items = e.clipboardData?.items;
                   const imageFiles: File[] = [];
@@ -2276,10 +2350,19 @@ export default function ChatPage() {
                   }
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                    e.preventDefault();
-                    void send();
+                  if (e.key !== "Enter" || e.shiftKey) return;
+                  // 注音／IME：組字中或剛結束組字的 Enter 只確認候選，不要送出
+                  if (
+                    e.nativeEvent.isComposing ||
+                    imeComposingRef.current ||
+                    imeJustEndedRef.current ||
+                    e.keyCode === 229
+                  ) {
+                    return;
                   }
+                  e.preventDefault();
+                  if (busy) return;
+                  void send();
                 }}
               />
               <div className="composer-bar">
