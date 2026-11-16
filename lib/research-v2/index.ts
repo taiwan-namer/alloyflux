@@ -35,7 +35,11 @@ export {
   rankEventsWithDiversity,
   stripSearchSynthesisFromCorpus,
 } from "./collector";
-export { isSearchSynthesisEnabled } from "./synthesis-flag";
+export {
+  isSearchSynthesisEnabled,
+  isSearchSynthesisExplicitlyOff,
+  shouldEnableSearchSynthesis,
+} from "./synthesis-flag";
 export { gateEvidence } from "./gate";
 export { formatVerdictInjection, shouldShowVerifiedBadge, measureInjectionBudget } from "./inject";
 export {

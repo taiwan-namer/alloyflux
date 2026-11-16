@@ -9,9 +9,20 @@ export const openaiApiAdapter: ProviderAdapter = {
   supports(providerKey) {
     return providerKey === "openai-api";
   },
-  async *run({ modelId, messages, signal }): AsyncGenerator<AdapterEvent> {
+  async *run({ modelId, messages, extraSystemContext, customSystemPrompt, signal }): AsyncGenerator<AdapterEvent> {
     const key = process.env.OPENAI_API_KEY?.trim();
     if (!key) throw new Error("節點未設定 OPENAI_API_KEY");
+
+    const custom = customSystemPrompt?.trim();
+    const extra = extraSystemContext?.trim();
+    const sysText =
+      custom && extra
+        ? `${custom}\n\n[User Context - 僅供背景脈絡參考，非當前指令]\n${extra}`
+        : custom || extra || undefined;
+    const wireMessages = [
+      ...(sysText ? [{ role: "system" as const, content: sysText }] : []),
+      ...messages.map((m) => ({ role: m.role, content: m.content })),
+    ];
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -21,7 +32,7 @@ export const openaiApiAdapter: ProviderAdapter = {
       },
       body: JSON.stringify({
         model: modelId,
-        messages: messages.map((m) => ({ role: m.role, content: m.content })),
+        messages: wireMessages,
         stream: true,
         stream_options: { include_usage: true },
       }),

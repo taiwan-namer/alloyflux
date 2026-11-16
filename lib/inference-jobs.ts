@@ -36,7 +36,14 @@ export type JobStreamEvent =
   | { type: "thinking"; text: string }
   | {
       type: "usage";
-      usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number; upstreamModelId?: string };
+      usage: {
+        inputTokens: number;
+        cachedInputTokens: number;
+        outputTokens: number;
+        upstreamModelId?: string;
+        groundingSources?: { title: string; uri: string }[];
+        webSearchQueries?: string[];
+      };
     };
 
 export interface InferenceJob {
@@ -419,7 +426,13 @@ export async function completeJob(
   jobId: string,
   nodeId: string,
   result: {
-    usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
+    usage: {
+      inputTokens: number;
+      cachedInputTokens: number;
+      outputTokens: number;
+      groundingSources?: { title: string; uri: string }[];
+      webSearchQueries?: string[];
+    };
     platformCostPoints: number;
     chargedPoints: number;
     supplierRewardPoints: number;
@@ -457,6 +470,7 @@ export async function completeJob(
 
   const l = live.get(jobId) ?? { events: [], ended: false, waiters: [] };
   live.set(jobId, l);
+  l.events.push({ type: "usage", usage: result.usage });
   l.ended = true;
   wake(jobId);
   return true;

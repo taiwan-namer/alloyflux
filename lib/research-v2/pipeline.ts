@@ -222,7 +222,12 @@ export async function runResearchPipelineV2(opts: PipelineOptions): Promise<Rese
     errorMessage = live.error;
   }
 
-  const corpus = hit ? collectEventsFromHit(plan, hit, { now: opts.now }) : null;
+  const corpus = hit
+    ? collectEventsFromHit(plan, hit, {
+        now: opts.now,
+        autoSynthesisFallback: true,
+      })
+    : null;
   const verdict = gateEvidence({ plan, corpus, errorMessage });
   const snap = buildDebugSnapshot({
     requestId,

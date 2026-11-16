@@ -2,6 +2,7 @@ import { shouldSkipLiveResearch, needsWebResearch } from "../web-research";
 import {
   didStripRemovePastedContent,
   extractUserInstructionText,
+  hasDeepResearchDemand,
   hasExplicitLiveDemand,
   hasOptOutOfLiveResearch,
   isMetaNewsSystemsTalk,
@@ -14,6 +15,7 @@ import type { ResearchIntent, ResearchPlan } from "./types";
 export {
   didStripRemovePastedContent,
   extractUserInstructionText,
+  hasDeepResearchDemand,
   hasExplicitLiveDemand,
   hasOptOutOfLiveResearch,
   isMetaNewsSystemsTalk,
@@ -122,9 +124,13 @@ export function detectIntent(text: string): ResearchIntent {
   // 明確不要查時事／不要上網 → 不走 NEWSY
   if (hasOptOutOfLiveResearch(instruction)) return "skip";
 
-  if (shouldSkipLiveResearch(instruction) && !needsWebResearch(instruction)) return "skip";
+  const deepDemand = hasDeepResearchDemand(instruction, { stripRemovedPaste });
+  if (shouldSkipLiveResearch(instruction) && !needsWebResearch(instruction) && !deepDemand) {
+    return "skip";
+  }
   if (FACTCHECK_RE.test(instruction)) return "factcheck";
   if (NEWSY_RE.test(instruction) || needsWebResearch(instruction)) return "news";
+  if (deepDemand) return "factcheck";
   if (shouldSkipLiveResearch(instruction)) return "skip";
   // 寒暄
   if (/^(你好|嗨|哈囉|hello|hi|hey)[!！.。\s]*$/i.test(instruction)) return "skip";
@@ -144,6 +150,8 @@ function subjectHint(text: string): string {
 
 function buildCoverageHints(text: string, intent: ResearchIntent): string[] {
   if (intent !== "news" && intent !== "factcheck") return [];
+  // 非即時新聞類的判例／條款／案例／機制深度查證：不硬塞外交／軍事子題，避免汙染查詢詞
+  if (intent === "factcheck" && !NEWSY_RE.test(text)) return [];
   const subj = subjectHint(text);
   // 不強制不存在的主題；僅作「盡量涵蓋」提示
   return [
@@ -162,6 +170,12 @@ function buildQueries(input: {
 }): string[] {
   const { text, intent, timeWindow, userDateHint, coverageHints } = input;
   if (intent === "skip") return [];
+
+  if (intent === "factcheck" && !timeWindow && !userDateHint) {
+    return [
+      `${text}（優先官方文件、法院判決／法規原文、權威機構與主流媒體；排除農場內容與 YouTube）`,
+    ];
+  }
 
   const windowLabel = userDateHint
     ? `日期 ${userDateHint}`
@@ -238,6 +252,9 @@ export function planResearch(input: PlannerInput): ResearchPlan {
       toIso: today,
       preferRecentHours: 72,
     };
+  } else if (intent === "factcheck" && !needsWebResearch(intentBasis)) {
+    // 歷史判例／法案／條款／運作機制查證：不鎖死 14 天時間窗，以免漏掉正式法規或經典判例原文
+    timeWindow = null;
   } else {
     timeWindow = {
       fromIso: addDaysIso(today, -14),

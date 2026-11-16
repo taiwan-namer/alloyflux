@@ -39,6 +39,8 @@ export class AgentApi {
         providerKey: string;
         upstreamModel: string;
         messages: { role: "user" | "assistant"; content: string }[];
+        extraSystemContext?: string;
+        customSystemPrompt?: string;
         payloadSha256: string;
       };
       signature?: string;
@@ -72,10 +74,16 @@ function hashCredential(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-/** 驗證平台簽章：HMAC(sha256(credential), payload) */
+/** 驗證平台簽章：HMAC(sha256(credential), payload) —— 與平台 lib/inference-jobs.ts payloadCanonical 對齊 */
 export function verifyJobSignature(
   credential: string,
-  job: { modelId: string; upstreamModel: string; messages: unknown },
+  job: {
+    modelId: string;
+    upstreamModel: string;
+    messages: unknown;
+    extraSystemContext?: string;
+    customSystemPrompt?: string;
+  },
   signature: string,
   payloadSha256: string,
 ): boolean {
@@ -83,6 +91,8 @@ export function verifyJobSignature(
     modelId: job.modelId,
     upstreamModel: job.upstreamModel,
     messages: job.messages,
+    extraSystemContext: job.extraSystemContext?.trim() || undefined,
+    customSystemPrompt: job.customSystemPrompt?.trim() || undefined,
   });
   if (createHash("sha256").update(payload).digest("hex") !== payloadSha256) return false;
   const expected = createHmac("sha256", hashCredential(credential)).update(payload).digest("hex");

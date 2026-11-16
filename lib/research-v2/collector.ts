@@ -1,6 +1,6 @@
 import { cleanSourceUrl } from "../web-research";
 import { sanitizeEvidenceText } from "./sanitize";
-import { isSearchSynthesisEnabled } from "./synthesis-flag";
+import { shouldEnableSearchSynthesis } from "./synthesis-flag";
 import type {
   EvidenceGrade,
   EvidenceLevel,
@@ -269,7 +269,7 @@ export function stripSearchSynthesisFromCorpus(corpus: ResearchCorpus): Research
 export function collectEventsFromHit(
   plan: ResearchPlan,
   hit: RawSearchHit,
-  opts?: { now?: Date },
+  opts?: { now?: Date; autoSynthesisFallback?: boolean },
 ): ResearchCorpus {
   const nowMs = (opts?.now ?? new Date()).getTime();
   const limitations = [
@@ -366,15 +366,15 @@ export function collectEventsFromHit(
     const topic = guessTopic(`${src.title} ${src.excerpt ?? ""}`);
     // 同一 canonical URL 只形成一個事件（標題差異不裂開）
     const mergeKey = `url:${canon(src.uri)}`;
-    const claimText =
-      src.provenance === "article_body" || src.provenance === "official_document"
-        ? `${src.title}\n${src.excerpt ?? ""}`
-        : src.title;
+    const isBodyBacked =
+      src.provenance === "article_body" || src.provenance === "official_document";
+    const claimText = isBodyBacked ? `${src.title}\n${src.excerpt ?? ""}` : src.title;
     const claimType = inferClaimType(claimText, src.provenance);
     const attribution = inferAttribution(claimText, src.provenance);
+    const statementCap = isBodyBacked ? 1200 : 560;
     const statement = sanitizeEvidenceText(
-      src.excerpt?.slice(0, 560) || src.title,
-      560,
+      src.excerpt?.slice(0, statementCap) || src.title,
+      statementCap,
     );
     const claim: ResearchClaim = {
       claimId: stableId("clm", src.sourceId, statement.slice(0, 40)),
@@ -437,11 +437,34 @@ export function collectEventsFromHit(
     }
   }
 
-  // search_synthesis（feature flag 預設關）：不得升格 article_body；與正文衝突時以 article_body 為準
-  const supports = isSearchSynthesisEnabled() ? (hit.rawGroundingSupports ?? []) : [];
-  if (hit.rawGroundingSupports?.length && !isSearchSynthesisEnabled()) {
+  // search_synthesis（feature flag 預設關；管線遇防爬導致合格正文 < 2 篇／正文 claim < 2 時自動備援開啟）
+  // 不得升格 article_body；與正文衝突時以 article_body 為準
+  const validBodyPageCount = rawSources.filter(
+    (s) => s.provenance === "article_body" || s.provenance === "official_document",
+  ).length;
+  const bodyClaimCount = [...byMerge.values()].reduce(
+    (acc, ev) =>
+      acc +
+      ev.claims.filter(
+        (c) => c.provenance === "article_body" || c.provenance === "official_document",
+      ).length,
+    0,
+  );
+  const synthDecision = shouldEnableSearchSynthesis({
+    autoFallback: opts?.autoSynthesisFallback,
+    validBodyPageCount,
+    bodyClaimCount,
+  });
+  const supports = synthDecision.enabled ? (hit.rawGroundingSupports ?? []) : [];
+  if (hit.rawGroundingSupports?.length && !synthDecision.enabled) {
     limitations.push("search_synthesis_disabled_by_flag: raw supports present but not injected");
   }
+  if (synthDecision.enabled && synthDecision.reason === "auto_fallback") {
+    limitations.push(
+      `search_synthesis_auto_fallback_enabled: valid_body_pages=${validBodyPageCount},body_claims=${bodyClaimCount}`,
+    );
+  }
+  let addedSynthCount = 0;
   if (supports.length) {
     limitations.push(
       "search_synthesis_from_grounding_supports: 搜尋摘要，未經原文核對；不得當成 article_body",
@@ -475,7 +498,7 @@ export function collectEventsFromHit(
       }
       const statement = sanitizeEvidenceText(
         `【搜尋摘要，未經原文核對】${seg}`,
-        560,
+        800,
       );
       const topic = guessTopic(statement);
       const mergeKey = `synth:${stableId("syn", statement.slice(0, 48))}`;
@@ -501,6 +524,55 @@ export function collectEventsFromHit(
         evidenceGrade: "title_only",
       });
       synIdx += 1;
+      addedSynthCount += 1;
+    }
+  }
+
+  // 雙重保底：觸發 auto_fallback 時，若 rawGroundingSupports 為空（或層 2 正文完全掛零），把層 1 Flash brief 納入 search_synthesis
+  if (
+    synthDecision.enabled &&
+    synthDecision.reason === "auto_fallback" &&
+    (addedSynthCount === 0 || bodyClaimCount === 0) &&
+    briefSafe.length >= 40 &&
+    !/^NO_SEARCH\b/i.test(briefSafe) &&
+    !findArticleBodyConflict(briefSafe, byMerge)
+  ) {
+    const briefStatement = sanitizeEvidenceText(
+      `【搜尋摘要，未經原文核對】${briefSafe}`,
+      800,
+    );
+    const primarySrcId = rawSources[0]?.sourceId;
+    const briefMergeKey = `synth:${stableId("syn_brief", briefStatement.slice(0, 48))}`;
+    if (!byMerge.has(briefMergeKey)) {
+      const topic = guessTopic(briefStatement);
+      const briefTitleLine =
+        briefSafe
+          .split(/\n+/)
+          .map((l) => l.replace(/^[-*•\d.)\s]+/, "").trim())
+          .find((l) => l.length >= 8) ?? plan.rawUserQuery;
+      byMerge.set(briefMergeKey, {
+        eventId: stableId("evt", briefMergeKey),
+        title: sanitizeEvidenceText(briefTitleLine, 120),
+        topic,
+        claims: [
+          {
+            claimId: stableId("clm", briefMergeKey),
+            statement: briefStatement,
+            claimType: inferClaimType(briefStatement, "search_synthesis"),
+            sourceIds: primarySrcId ? [primarySrcId] : [],
+            evidenceLevel: "insufficient",
+            provenance: "search_synthesis",
+          },
+        ],
+        sourceIds: primarySrcId ? [primarySrcId] : [],
+        relevance: 0.5,
+        freshness: 0.55,
+        diversityKey: topic,
+        evidenceGrade: "title_only",
+      });
+      limitations.push(
+        "search_synthesis_from_flash_brief_fallback: 層2防爬或無正文，啟用層1摘要保底",
+      );
     }
   }
 

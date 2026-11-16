@@ -1279,12 +1279,17 @@ async function* openaiCompatible(
   const base = isOpenRouter ? BASE_URL.openrouter : isXai ? BASE_URL.xai : BASE_URL.openai;
   const upstream = isOpenRouter ? model.openrouterId : model.grokId ?? model.id;
   const url = `${base}/chat/completions`;
+  // 自研查證注入 system（外層 Gateway 已跑過則透過 ALS 零成本重用；未跑過如 failover 亦可補齊）
+  const research = await researchForMessages(messages, signal);
   const body: Record<string, unknown> = {
     model: upstream,
     messages: [
       {
         role: "system",
-        content: systemPromptFor(model, upstream, extraSystemContext, customSystemPrompt),
+        content: withResearchSystem(
+          systemPromptFor(model, upstream, extraSystemContext, customSystemPrompt),
+          research,
+        ),
       },
       ...messages.map((m) => ({ role: m.role, content: openAiContentForMessage(m, model) })),
     ],
@@ -1303,6 +1308,17 @@ async function* openaiCompatible(
   }
   const res = await post(url, { authorization: `Bearer ${c.apiKey}` }, body, signal);
 
+  const usage: Usage = {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+    upstreamModelId: upstream,
+  };
+  {
+    const b = legacyBundleFromAttach(research);
+    if (b) applyResearchBundle(usage, b);
+  }
+
   for await (const data of sseData(res, signal)) {
     if (data === "[DONE]") break;
     const json = JSON.parse(data);
@@ -1313,17 +1329,15 @@ async function* openaiCompatible(
     if (typeof thinking === "string" && thinking) yield { type: "thinking", text: thinking };
     const text = delta?.content;
     if (text) yield { type: "text", text };
+    const cites = extractUrlCitations(delta ?? json);
+    if (cites.length) mergeGroundingSources(usage, cites);
     if (json.usage) {
-      yield {
-        type: "usage",
-        usage: {
-          inputTokens: json.usage.prompt_tokens ?? 0,
-          cachedInputTokens: json.usage.prompt_tokens_details?.cached_tokens ?? 0,
-          outputTokens: json.usage.completion_tokens ?? 0,
-        },
-      };
+      usage.inputTokens = json.usage.prompt_tokens ?? usage.inputTokens;
+      usage.cachedInputTokens = json.usage.prompt_tokens_details?.cached_tokens ?? usage.cachedInputTokens;
+      usage.outputTokens = json.usage.completion_tokens ?? usage.outputTokens;
     }
   }
+  yield { type: "usage", usage };
 }
 
 // === 5. Anthropic API Key ===

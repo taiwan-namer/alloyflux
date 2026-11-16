@@ -6,6 +6,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { collectEventsFromHit, stripSearchSynthesisFromCorpus } from "./collector";
 import { gateEvidence } from "./gate";
+import { CLAIM_CHARS_COMPACT, CLAIM_CHARS_DEFAULT, CLAIM_CHARS_DEEP_BODY, formatVerdictInjection, resolveClaimCharCap } from "./inject";
+import { runResearchPipelineV2 } from "./pipeline";
 import { planResearch } from "./planner";
 import type { RawSearchHit, ResearchCorpus, ResearchEvent } from "./types";
 
@@ -185,5 +187,75 @@ describe("search_synthesis Gate 不變性與衝突", () => {
     const a = gateEvidence({ plan, corpus });
     const b = gateEvidence({ plan, corpus: stripSearchSynthesisFromCorpus(corpus) });
     assert.equal(a.status, b.status);
+  });
+
+  it("層 2 防爬（合格正文 < 2 篇）時，管線自動開啟 search_synthesis 與 brief 雙重保底", async () => {
+    delete process.env.RESEARCH_SEARCH_SYNTHESIS;
+    // 模擬政府／律所網站 403 抓不到正文，但層 1 有 grounding URL 與 Flash 摘要／supports
+    const blockedHit: RawSearchHit = {
+      provider: "test",
+      queries: ["SEC Ripple ruling details"],
+      sources: [
+        {
+          title: "SEC v. Ripple Ruling Analysis - Law Firm Memo",
+          uri: "https://reuters.com/legal/sec-ripple-case-2026",
+        },
+      ],
+      pages: [], // 層 2 全數防爬失敗
+      brief:
+        "法院在該案裁定機構銷售構成投資契約，但交易所程式化銷售不構成證券發行，並對違規部分處以民事罰金。",
+      rawGroundingSupports: [
+        {
+          segment: {
+            text: "The court held that institutional sales satisfied Howey while programmatic exchange sales did not constitute investment contracts.",
+          },
+        },
+      ],
+      limitations: [],
+    };
+
+    const verdict = await runResearchPipelineV2({
+      messages: [{ role: "user", content: "幫我細查 SEC v. Ripple 判例細節與條款" }],
+      now: new Date("2026-11-16T00:00:00.000Z"),
+      mockHit: blockedHit,
+    });
+
+    assert.equal(verdict.status, "partial");
+    assert.ok(
+      verdict.warnings.some((w) => w.startsWith("search_synthesis_auto_fallback_enabled")),
+      "應記錄觸發自動備援",
+    );
+    assert.match(verdict.injectionText, /Howey|程式化銷售/);
+  });
+
+  it("單條 claim 動態截斷上限：<=3 事件正文放寬至 800 字，一般 500 字，壓縮 240 字", () => {
+    assert.equal(resolveClaimCharCap(2, "article_body", false), CLAIM_CHARS_DEEP_BODY);
+    assert.equal(resolveClaimCharCap(3, "official_document", false), 800);
+    assert.equal(resolveClaimCharCap(5, "article_body", false), CLAIM_CHARS_DEFAULT);
+    assert.equal(resolveClaimCharCap(1, "search_synthesis", false), 500);
+    assert.equal(resolveClaimCharCap(1, "article_body", true), CLAIM_CHARS_COMPACT);
+
+    const plan = basePlan();
+    const longBody = "法條細節與判決理由完整段落內容。".repeat(45); // ~720 字（> 560 舊上限、< 800 新上限）
+    const corpus = collectEventsFromHit(plan, {
+      provider: "test",
+      queries: ["ruling full text"],
+      sources: [{ title: "Reuters Legal", uri: "https://reuters.com/legal/ruling-2026" }],
+      pages: [
+        {
+          uri: "https://reuters.com/legal/ruling-2026",
+          title: "Ruling Full Text",
+          excerpt: longBody,
+          fetchStatus: "ok",
+          publishedAt: "2026-11-15T12:00:00.000Z",
+        },
+      ],
+      brief: "",
+      limitations: [],
+    });
+    const verdict = gateEvidence({ plan, corpus });
+    const injected = formatVerdictInjection(verdict);
+    // 720 字應完整保留，不被舊版 320 或 560 字腰斬
+    assert.ok(injected.includes(longBody.slice(0, 700)), "700+ 字單篇深度正文不應被 320/560 腰斬");
   });
 });

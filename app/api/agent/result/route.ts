@@ -30,7 +30,13 @@ export async function POST(req: Request) {
     action?: "event" | "complete" | "fail" | "running";
     jobId?: string;
     event?: JobStreamEvent;
-    usage?: { inputTokens: number; cachedInputTokens?: number; outputTokens: number };
+    usage?: {
+      inputTokens: number;
+      cachedInputTokens?: number;
+      outputTokens: number;
+      groundingSources?: { title: string; uri: string }[];
+      webSearchQueries?: string[];
+    };
     platformCostUsd?: number;
     error?: string;
     status?: number;
@@ -59,10 +65,27 @@ export async function POST(req: Request) {
   }
 
   if (body.action === "complete") {
+    const sanitizedSources = Array.isArray(body.usage?.groundingSources)
+      ? body.usage.groundingSources
+          .filter(
+            (s): s is { title: string; uri: string } =>
+              Boolean(s && typeof s.uri === "string" && /^https?:\/\//i.test(s.uri)),
+          )
+          .slice(0, 16)
+          .map((s) => ({ title: String(s.title || s.uri).slice(0, 200), uri: s.uri.slice(0, 2048) }))
+      : undefined;
+    const sanitizedQueries = Array.isArray(body.usage?.webSearchQueries)
+      ? body.usage.webSearchQueries
+          .filter((q): q is string => typeof q === "string" && q.trim().length > 0)
+          .slice(0, 8)
+          .map((q) => q.trim().slice(0, 200))
+      : undefined;
     const usage = {
       inputTokens: body.usage?.inputTokens ?? 0,
       cachedInputTokens: body.usage?.cachedInputTokens ?? 0,
       outputTokens: body.usage?.outputTokens ?? 0,
+      groundingSources: sanitizedSources?.length ? sanitizedSources : undefined,
+      webSearchQueries: sanitizedQueries?.length ? sanitizedQueries : undefined,
     };
     const costUsd =
       typeof body.platformCostUsd === "number"

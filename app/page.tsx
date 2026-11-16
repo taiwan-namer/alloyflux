@@ -1575,6 +1575,19 @@ export default function ChatPage() {
     const content = buildOutgoingContent(boxText, files);
     if (!content && imgs.length === 0) return;
 
+    // 先掛 AbortController，避免 busy 後立刻按停止卻還抓不到 controller
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    // 還原時用送出當下的短提示＋附件 chip（可收合／刪除），不要把長文再塞回 textarea
+    const composerDraft = {
+      text: boxText,
+      images: imgs.map((img) => ({ ...img })),
+      files: files.map((f) => ({ ...f })),
+      regenerate: Boolean(opts?.regenerate),
+    };
+    const startedConvId = activeId;
+
     if (!opts?.regenerate) {
       setInput("");
       setPendingImages([]);
@@ -1591,10 +1604,11 @@ export default function ChatPage() {
     setShowJumpLatest(false);
     const displayContent =
       imgs.length > 0 ? `[已上傳 ${imgs.length} 張圖片]\n${content || "（見附圖）"}` : content;
+    const userMsgId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
     setMessages((prev) => [
       ...prev,
-      { id: crypto.randomUUID(), role: "user", content: displayContent },
+      { id: userMsgId, role: "user", content: displayContent },
       {
         id: assistantId,
         role: "assistant",
@@ -1617,8 +1631,6 @@ export default function ChatPage() {
       patch((m) => ({ ...m, thinking: (m.thinking ?? "") + chunk }));
     });
 
-    const controller = new AbortController();
-    abortRef.current = controller;
     let streamOk = false;
     try {
       const res = await fetch("/api/chat", {
@@ -1719,7 +1731,25 @@ export default function ChatPage() {
       }
       thinkingTw.stop();
       contentTw.stop();
+      const aborted = controller.signal.aborted;
       abortRef.current = null;
+      if (aborted) {
+        // 撤回未完成回合，把內容跳回可編輯／可收合刪除的對話欄，避免模型下一輪重複讀取
+        setMessages((prev) => prev.filter((m) => m.id !== userMsgId && m.id !== assistantId));
+        if (!startedConvId) setActiveId(null);
+        if (!composerDraft.regenerate) {
+          setInput(composerDraft.text);
+          setPendingImages(composerDraft.images);
+          setPendingFiles(composerDraft.files);
+          requestAnimationFrame(() => {
+            const el = textareaRef.current;
+            if (!el) return;
+            el.style.height = "48px";
+            el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+            el.focus();
+          });
+        }
+      }
       setBusy(false);
       refreshConversations();
       if (authUser) refreshWallet();

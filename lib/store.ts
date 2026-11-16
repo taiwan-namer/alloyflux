@@ -60,12 +60,21 @@ export async function listMessages(conversationId: string): Promise<StoredMessag
     .all(conversationId)) as unknown as StoredMessage[];
 }
 
-export async function addUserMessage(conversationId: string, content: string, model: string): Promise<void> {
+export async function addUserMessage(conversationId: string, content: string, model: string): Promise<string> {
+  const id = newId();
   const now = Date.now();
   await db()
     .prepare("INSERT INTO messages (id, conversation_id, role, content, model, created_at) VALUES (?, ?, 'user', ?, ?, ?)")
-    .run(newId(), conversationId, content, model, now);
+    .run(id, conversationId, content, model, now);
   await db().prepare("UPDATE conversations SET updated_at = ?, model = ? WHERE id = ?").run(now, model, conversationId);
+  return id;
+}
+
+/** 停止／中止時回滾尚未 settle 的 user 訊息，避免下一輪重複餵進模型 */
+export async function deleteMessage(conversationId: string, messageId: string): Promise<void> {
+  await db()
+    .prepare("DELETE FROM messages WHERE id = ? AND conversation_id = ?")
+    .run(messageId, conversationId);
 }
 
 /** Saves the answer and books the charge to the buyer and the usage to the source in one transaction. */

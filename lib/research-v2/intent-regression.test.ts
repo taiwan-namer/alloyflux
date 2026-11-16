@@ -162,3 +162,23 @@ describe("意圖：不得被 meta／fixture 誤 skip", () => {
     });
   }
 });
+
+const DEEP_RESEARCH_CASES: { id: string; text: string }[] = [
+  { id: "dr01_read_full", text: "讀這篇全文並告訴我關鍵數據" },
+  { id: "dr02_precedent", text: "幫我細查 SEC v. Ripple 判例與關鍵條款" },
+  { id: "dr03_act_compliance", text: "EU AI Act 高風險系統合規案例有哪些？" },
+  { id: "dr04_how_it_works", text: "Worldcoin 的虹膜驗證機制是如何運作的？" },
+  { id: "dr05_lawsuit_company", text: "調查某生技公司專利訴訟與裁定結果" },
+  { id: "dr06_en_org", text: "幫我了解 Anthropic 的商業模式是什麼、如何運作" },
+];
+
+describe("意圖：深度追問／案例／判例／全文查證必觸發聯網", () => {
+  for (const c of DEEP_RESEARCH_CASES) {
+    it(`${c.id} → requireLive=true`, () => {
+      const intent = detectIntent(c.text);
+      const plan = planResearch({ text: c.text, now: new Date("2026-11-16T04:00:00+08:00") });
+      assert.ok(intent === "news" || intent === "factcheck", `intent=${intent} for ${c.id}`);
+      assert.equal(plan.requireLive, true, `requireLive for ${c.id}`);
+    });
+  }
+});

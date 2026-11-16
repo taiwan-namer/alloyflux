@@ -1,10 +1,20 @@
 export type ChatMessage = { role: "user" | "assistant"; content: string };
 
+export type GroundingSource = { title: string; uri: string };
+
+export type AdapterUsage = {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  groundingSources?: GroundingSource[];
+  webSearchQueries?: string[];
+};
+
 export type AdapterEvent =
   | { type: "text"; text: string }
   | {
       type: "usage";
-      usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
+      usage: AdapterUsage;
       platformCostUsd?: number;
     };
 
@@ -15,6 +25,8 @@ export interface ProviderAdapter {
     providerKey: string;
     modelId: string;
     messages: ChatMessage[];
+    extraSystemContext?: string;
+    customSystemPrompt?: string;
     signal?: AbortSignal;
   }): AsyncGenerator<AdapterEvent>;
 }

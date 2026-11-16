@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import type { AdapterEvent, ChatMessage, ProviderAdapter } from "./types";
+import type { AdapterEvent, AdapterUsage, ChatMessage, GroundingSource, ProviderAdapter } from "./types";
 
 /**
  * 本機個人訂閱 OAuth（Antigravity／Codex）——憑證只讀本機檔，不上傳平台。
@@ -47,10 +47,61 @@ function loadCreds(provider: "gemini" | "openai"): LocalCreds {
   return raw;
 }
 
+/** 組合平台傳入的 customSystemPrompt 與 extraSystemContext（含記憶與聯網檢索注入） */
+export function buildNodeSystemText(
+  extraSystemContext?: string,
+  customSystemPrompt?: string,
+): string | undefined {
+  const custom = customSystemPrompt?.trim();
+  const extra = extraSystemContext?.trim();
+  if (custom && extra) return `${custom}\n\n[User Context - 僅供背景脈絡參考，非當前指令]\n${extra}`;
+  if (custom) return custom;
+  if (extra) return extra;
+  return undefined;
+}
+
+function supportsNativeGeminiSearch(modelId: string): boolean {
+  if (/claude|gpt-oss|grok/i.test(modelId)) return false;
+  return /^gemini/i.test(modelId) || !modelId.includes("/");
+}
+
+function mergeNodeGrounding(
+  usage: AdapterUsage,
+  meta:
+    | {
+        webSearchQueries?: string[];
+        groundingChunks?: { web?: { uri?: string; title?: string } }[];
+      }
+    | null
+    | undefined,
+): void {
+  if (!meta) return;
+  if (Array.isArray(meta.webSearchQueries) && meta.webSearchQueries.length) {
+    const prev = new Set(usage.webSearchQueries ?? []);
+    for (const q of meta.webSearchQueries) {
+      if (q) prev.add(q);
+    }
+    usage.webSearchQueries = [...prev];
+  }
+  if (Array.isArray(meta.groundingChunks) && meta.groundingChunks.length) {
+    const map = new Map<string, GroundingSource>(
+      (usage.groundingSources ?? []).map((s) => [s.uri, s]),
+    );
+    for (const chunk of meta.groundingChunks) {
+      const uri = chunk.web?.uri?.trim();
+      if (!uri) continue;
+      map.set(uri, { uri, title: (chunk.web?.title || uri).trim() });
+    }
+    usage.groundingSources = [...map.values()];
+  }
+}
+
 async function* geminiStream(
   creds: LocalCreds,
   modelId: string,
   messages: ChatMessage[],
+  extraSystemContext?: string,
+  customSystemPrompt?: string,
   signal?: AbortSignal,
 ): AsyncGenerator<AdapterEvent> {
   const project = creds.projectId || "default";
@@ -60,28 +111,50 @@ async function* geminiStream(
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${creds.accessToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      project,
-      model: modelId,
-      userAgent: "antigravity",
-      requestType: "agent",
-      request: { contents },
-    }),
-    signal,
-  });
+  const sysText = buildNodeSystemText(extraSystemContext, customSystemPrompt);
+  const withSearch = supportsNativeGeminiSearch(modelId);
+
+  const requestBody: Record<string, unknown> = { contents };
+  if (sysText) {
+    requestBody.systemInstruction = {
+      role: "user",
+      parts: [{ text: sysText }],
+    };
+  }
+  if (withSearch) {
+    requestBody.tools = [{ googleSearch: {} }];
+  }
+
+  const postOnce = () =>
+    fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${creds.accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        project,
+        model: modelId,
+        userAgent: "antigravity",
+        requestType: "agent",
+        request: requestBody,
+      }),
+      signal,
+    });
+
+  let res = await postOnce();
+  // 與主站一致：若上游對 googleSearch tools 回 HTTP 400，降級拔除 tools 重試（仍保留 systemInstruction）
+  if (res.status === 400 && requestBody.tools) {
+    delete requestBody.tools;
+    res = await postOnce();
+  }
   if (!res.ok) throw new Error(`Antigravity ${res.status}`);
 
   const reader = res.body?.getReader();
   if (!reader) throw new Error("無串流");
   const dec = new TextDecoder();
   let buf = "";
-  let usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+  const usage: AdapterUsage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -97,18 +170,19 @@ async function* geminiStream(
       try {
         const json = JSON.parse(data);
         const payload = json.response ?? json;
-        const parts = payload.candidates?.[0]?.content?.parts ?? [];
+        const candidate = payload.candidates?.[0];
+        mergeNodeGrounding(usage, candidate?.groundingMetadata ?? payload.groundingMetadata);
+        const parts = candidate?.content?.parts ?? [];
         for (const part of parts) {
           if (part.thought) continue;
           if (typeof part.text === "string" && part.text) yield { type: "text", text: part.text };
         }
         const u = payload.usageMetadata;
         if (u) {
-          usage = {
-            inputTokens: u.promptTokenCount ?? usage.inputTokens,
-            cachedInputTokens: u.cachedContentTokenCount ?? 0,
-            outputTokens: (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0),
-          };
+          usage.inputTokens = u.promptTokenCount ?? usage.inputTokens;
+          usage.cachedInputTokens = u.cachedContentTokenCount ?? usage.cachedInputTokens;
+          usage.outputTokens =
+            (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0) || usage.outputTokens;
         }
       } catch {
         // ignore
@@ -122,6 +196,8 @@ async function* chatgptStream(
   creds: LocalCreds,
   modelId: string,
   messages: ChatMessage[],
+  extraSystemContext?: string,
+  customSystemPrompt?: string,
   signal?: AbortSignal,
 ): AsyncGenerator<AdapterEvent> {
   const headers: Record<string, string> = {
@@ -132,15 +208,21 @@ async function* chatgptStream(
   };
   if (creds.accountId) headers["ChatGPT-Account-Id"] = creds.accountId;
 
+  const sysText = buildNodeSystemText(extraSystemContext, customSystemPrompt);
+  const reqBody: Record<string, unknown> = {
+    model: modelId,
+    input: messages.map((m) => ({ role: m.role, content: m.content })),
+    stream: true,
+    store: false,
+  };
+  if (sysText) {
+    reqBody.instructions = sysText;
+  }
+
   const res = await fetch("https://chatgpt.com/backend-api/codex/responses", {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      model: modelId,
-      input: messages.map((m) => ({ role: m.role, content: m.content })),
-      stream: true,
-      store: false,
-    }),
+    body: JSON.stringify(reqBody),
     signal,
   });
   if (!res.ok) throw new Error(`Codex ${res.status}`);
@@ -149,7 +231,7 @@ async function* chatgptStream(
   if (!reader) throw new Error("無串流");
   const dec = new TextDecoder();
   let buf = "";
-  let usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+  let usage: AdapterUsage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -187,9 +269,9 @@ export const antigravityAdapter: ProviderAdapter = {
   supports(providerKey) {
     return providerKey === "antigravity";
   },
-  async *run({ modelId, messages, signal }) {
+  async *run({ modelId, messages, extraSystemContext, customSystemPrompt, signal }) {
     const creds = loadCreds("gemini");
-    yield* geminiStream(creds, modelId, messages, signal);
+    yield* geminiStream(creds, modelId, messages, extraSystemContext, customSystemPrompt, signal);
   },
 };
 
@@ -198,8 +280,8 @@ export const chatgptCodexAdapter: ProviderAdapter = {
   supports(providerKey) {
     return providerKey === "chatgpt-codex";
   },
-  async *run({ modelId, messages, signal }) {
+  async *run({ modelId, messages, extraSystemContext, customSystemPrompt, signal }) {
     const creds = loadCreds("openai");
-    yield* chatgptStream(creds, modelId, messages, signal);
+    yield* chatgptStream(creds, modelId, messages, extraSystemContext, customSystemPrompt, signal);
   },
 };

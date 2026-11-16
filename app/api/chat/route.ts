@@ -15,6 +15,8 @@ import {
   balance,
   buildUserMemoryContext,
   createConversation,
+  deleteConversation,
+  deleteMessage,
   getConversation,
   listMessages,
   maybeRememberFromUserMessage,
@@ -150,8 +152,12 @@ export async function POST(req: Request) {
     const deepThinkApplied = !freeMode && !isAuto && Boolean(body.deepThink) && model.effort === "medium";
 
     const userModelTag = isAuto ? AUTO_MODEL_ID : model.id;
-    if (!convId) convId = await createConversation(userId, dbContent.slice(0, 30), userModelTag);
-    await addUserMessage(convId, dbContent, userModelTag);
+    let createdThisTurn = false;
+    if (!convId) {
+      convId = await createConversation(userId, dbContent.slice(0, 30), userModelTag);
+      createdThisTurn = true;
+    }
+    const userMsgId = await addUserMessage(convId, dbContent, userModelTag);
 
     // 不再重讀 DB：用先前訊息＋本輪 user 組歷史
     const fullHistory: ChatMessage[] = [
@@ -199,6 +205,7 @@ export async function POST(req: Request) {
         };
         announceAuto();
         let answer = "";
+        let settled = false;
         const triedAutoModels = new Set<string>();
         try {
           for (;;) {
@@ -231,6 +238,7 @@ export async function POST(req: Request) {
                   freeMode,
                   ipBucketId: guest?.ipBucketId,
                 });
+                settled = true;
                 // 本串狀態筆記：吸收本輪＋視窗外舊訊（整則邊界）；失敗不擋回答
                 try {
                   const latest = await listMessages(convId!);
@@ -279,6 +287,21 @@ export async function POST(req: Request) {
             send({ type: "error", message: e instanceof Error ? e.message : String(e) });
           }
         } finally {
+          // 使用者按「停止」：回滾本輪 user 訊息，避免下一則繼續重複讀取附件全文
+          if (!settled && req.signal.aborted) {
+            try {
+              if (createdThisTurn) {
+                await deleteConversation(userId, convId!);
+              } else {
+                await deleteMessage(convId!, userMsgId);
+              }
+            } catch (rollbackErr) {
+              console.warn(
+                "[chat] abort rollback failed",
+                rollbackErr instanceof Error ? rollbackErr.message : rollbackErr,
+              );
+            }
+          }
           controller.close();
         }
       },

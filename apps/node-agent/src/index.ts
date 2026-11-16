@@ -151,12 +151,18 @@ async function start() {
     try {
       await api.result({ action: "running", jobId: job.id });
       const adapter = resolveAdapter(job.providerKey, job.upstreamModel);
-      let usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+      let usage: import("./adapters/types").AdapterUsage = {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+      };
       let platformCostUsd: number | undefined;
       for await (const ev of adapter.run({
         providerKey: job.providerKey,
         modelId: job.upstreamModel,
         messages: job.messages,
+        extraSystemContext: job.extraSystemContext,
+        customSystemPrompt: job.customSystemPrompt,
       })) {
         if (ev.type === "text") {
           await api.result({ action: "event", jobId: job.id, event: { type: "text", text: ev.text } });

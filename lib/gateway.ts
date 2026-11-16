@@ -117,6 +117,8 @@ async function* streamViaNodeAgent(
         cachedInputTokens: ev.usage.cachedInputTokens,
         outputTokens: ev.usage.outputTokens,
         upstreamModelId: route.upstreamModel,
+        groundingSources: ev.usage.groundingSources ?? usage.groundingSources,
+        webSearchQueries: ev.usage.webSearchQueries ?? usage.webSearchQueries,
       };
     }
   }
