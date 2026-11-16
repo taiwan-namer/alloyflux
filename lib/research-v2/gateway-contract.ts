@@ -33,13 +33,17 @@ export function attachResearchToDone<T extends { type: string }>(
         : verdict.status === "failed"
           ? "failed"
           : "unknown");
-  if (!verdict.showVerifiedBadge) {
+  // failed／skipped：不得顯示「已查證」來源清單
+  if (!verdict.showVerifiedBadge || verdict.status === "failed" || verdict.status === "skipped") {
     return {
       ...done,
-      groundingSources: done.groundingSources,
+      groundingSources: verdict.status === "failed" || verdict.status === "skipped"
+        ? undefined
+        : done.groundingSources,
       webSearchQueries: done.webSearchQueries,
       completionStatus,
       researchGateStatus: verdict.status,
+      showVerifiedBadge: false,
     } as T;
   }
   const merged = new Map<string, { title: string; uri: string }>();

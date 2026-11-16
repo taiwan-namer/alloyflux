@@ -92,13 +92,17 @@ async function liveFetchHit(
         originalUrl: p.originalUrl || p.uri,
         resolvedUrl: p.resolvedUrl || p.uri,
         fetchStatus: p.fetchStatus ?? "ok",
+        htmlPath: p.htmlPath,
+        htmlSha256: p.htmlSha256,
       })),
       provider: searchHit.provider,
+      rawGroundingSupports: searchHit.rawGroundingSupports ?? [],
       limitations: [
         "grounding_partial_serp",
         "published_at_often_missing_from_grounding",
         "brief_is_flash_summary_not_full_serp",
         "flash_brief_is_search_snippet_not_article_body",
+        "raw_grounding_supports_logged_synthesis_deferred",
       ],
     };
     return { hit, modelCallCount };

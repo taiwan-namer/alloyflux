@@ -1,0 +1,36 @@
+{
+  "qi": 4,
+  "text": "今天台積電有什麼消息？",
+  "variant": "with_synth",
+  "slot": "astra",
+  "modelId": "gpt-6-astra",
+  "ms": 15367,
+  "completionStatus": "complete",
+  "injectionFingerprint": "1151bdbf88f6f090",
+  "injectionChars": 2314,
+  "frozenGate": "ok",
+  "frozenSynthClaims": 1,
+  "contentChars": 713,
+  "content": "**以本輪資料的最新日期（2026 年 11 月 16 日）來看，台積電今天的新聞焦點是海外擴廠補助；近一週另一項大消息，則是核准投資 OpenAI 與 Anthropic。**\n\n### 今天：擴廠補助受到關注\n《Taipei Times》11 月 16 日刊出報導，指出台積電隨晶圓廠擴張，取得創紀錄的補助。**目前提供的報導內容有限，無法確認補助金額、認列期間及各廠分配**，因此不宜直接解讀成「今天收到一筆新補助」。  \n來源：[Taipei Times](https://www.taipeitimes.com/News/biz/archives/2026/11/16/2003867791)\n\n### 近一週：核准最高 10 億美元投資 AI 模型公司\n據 11 月 10 日至 11 日的報導，台積電董事會核准：\n- **最高 5 億美元**取得 Anthropic 普通股。\n- **最高 5 億美元**認購 OpenAI 特別股。\n\n這是**核准投資額度，不等於已完成交割**。策略上，值得關注台積電從 AI 晶片製造供應商，進一步參與模型公司的股權投資；但目前不能據此認定會增加多少訂單或獲利。  \n來源：[鉅亨網／優分析](https://news.cnyes.com/news/id/6657710)、[鏡週刊轉載報導](https://www.mirrormedia.mg/external/setn_1937378)\n\n**若你是想判斷股價影響：**補助要看實際入帳與附帶條件；AI 股權投資則要看估值、交易條件及後續效益，不能單憑標題判定利多。這批資料沒有今日股價與成交量，尚不足以判斷市場反應。",
+  "error": null,
+  "entityCount": 6,
+  "entityMatchBodyRate": 0.6667,
+  "entityMatchSynthOnlyRate": 0,
+  "synthFactsMarkedUnverified": null,
+  "hedgeTitleOnlyCount": 2,
+  "entities": [
+    "台積電",
+    "openai",
+    "anthropic",
+    "2026/11",
+    "10 億",
+    "5 億"
+  ],
+  "matchedBody": [
+    "台積電",
+    "openai",
+    "anthropic",
+    "2026/11"
+  ],
+  "matchedSynthOnly": []
+}

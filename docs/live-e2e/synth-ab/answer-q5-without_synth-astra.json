@@ -1,0 +1,28 @@
+{
+  "qi": 5,
+  "text": "英國政局或大選最新進展？",
+  "variant": "without_synth",
+  "slot": "astra",
+  "modelId": "gpt-6-astra",
+  "ms": 17470,
+  "completionStatus": "complete",
+  "injectionFingerprint": "62cda7627fe25e05",
+  "injectionChars": 1487,
+  "frozenGate": "ok",
+  "frozenSynthClaims": 2,
+  "contentChars": 820,
+  "content": "**截至這輪提供的 2026 年 11 月 16 日資料，尚無足夠可靠資訊確認英國宣布提前大選、公布投票日期，或出現首相更替。**目前資料主要是外交動態與政治人物評論，不足以判定整體選情。\n\n### 目前可確認的動態\n\n| 日期 | 動態 | 能說明什麼 |\n|---|---|---|\n| 11 月 12 日 | 英國政府發布首相與義大利總理梅洛尼會晤的公告。 | 屬於政府外交活動，**不是大選或領導權變動的證據**。[英國政府公告](https://www.gov.uk/government/news/pm-meeting-with-prime-minister-meloni-of-italy-12-november-2026) |\n| 11 月 15 日 | Andy Burnham 在《衛報》發表評論，主張以跨世代政策回應英國年輕人的困境。 | 顯示青年處境與福利政策是政治討論議題；但**不能據此推論他已挑戰黨魁，或工黨正啟動換人程序**。[《衛報》評論](https://www.theguardian.com/commentisfree/2026/nov/15/britain-young-people-crisis-alan-milburn-review-welfare-childhood) |\n\n### 大選進度怎麼看？\n\n- **背景**：上一次英國下議院大選在 **2024 年 7 月 4 日**舉行，由工黨勝出、施凱爾出任首相。這是歷史背景，不是本輪確認的最新政府名單。\n- **正常時程**：若國會任期走滿，下次大選最晚約在 **2029 年夏季**；也可能提前解散國會舉行。\n- **最新選情**：本輪沒有可靠的最新民調、補選結果或解散國會公告，因此不能負責任地判定哪一黨目前領先、是否即將提前大選。\n\n**簡單說：目前能確認有政策辯論與外交活動，但沒有足夠證據說英國已進入提前大選或換首相階段。**",
+  "error": null,
+  "entityCount": 1,
+  "entityMatchBodyRate": 1,
+  "entityMatchSynthOnlyRate": 0,
+  "synthFactsMarkedUnverified": null,
+  "hedgeTitleOnlyCount": 1,
+  "entities": [
+    "burnham"
+  ],
+  "matchedBody": [
+    "burnham"
+  ],
+  "matchedSynthOnly": []
+}

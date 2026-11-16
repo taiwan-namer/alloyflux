@@ -1,0 +1,282 @@
+{
+  "measuredAt": "2026-11-15T18:19:25.207Z",
+  "note": "品質結論僅在有 injectionText 持久化時有效",
+  "perQuestion": [
+    {
+      "qi": 0,
+      "text": "川普最新消息有哪些？請附來源與日期。",
+      "gate": "ok",
+      "articleBodyCount": 6,
+      "publishedAtCount": 6,
+      "sourceCount": 8,
+      "titleOnlyCount": 2,
+      "searchSynthesisClaimCount": 3,
+      "dedup": {
+        "rawSourceCount": 8,
+        "dedupedSourceCount": 8,
+        "rawEventCount": 14,
+        "dedupedEventCount": 14
+      },
+      "injectionCharsAfter": 2011,
+      "injectionCharsBeforeSynthStripped": 1734,
+      "injectionEntityCount": 5,
+      "answers": [
+        {
+          "slot": "astra",
+          "completionStatus": "complete",
+          "entityCount": 6,
+          "entityMatchedToInjection": 4,
+          "entityMatchRate": 0.6667,
+          "hedgeHits": 5
+        },
+        {
+          "slot": "claude",
+          "completionStatus": "complete",
+          "entityCount": 6,
+          "entityMatchedToInjection": 5,
+          "entityMatchRate": 0.8333,
+          "hedgeHits": 3
+        },
+        {
+          "slot": "argon",
+          "completionStatus": "complete",
+          "entityCount": 7,
+          "entityMatchedToInjection": 2,
+          "entityMatchRate": 0.2857,
+          "hedgeHits": 0
+        }
+      ]
+    },
+    {
+      "qi": 1,
+      "text": "明天股市預測重點是什麼？請標註不確定性。",
+      "gate": "ok",
+      "articleBodyCount": 6,
+      "publishedAtCount": 4,
+      "sourceCount": 10,
+      "titleOnlyCount": 4,
+      "searchSynthesisClaimCount": 4,
+      "dedup": {
+        "rawSourceCount": 10,
+        "dedupedSourceCount": 10,
+        "rawEventCount": 16,
+        "dedupedEventCount": 16
+      },
+      "injectionCharsAfter": 2104,
+      "injectionCharsBeforeSynthStripped": 1721,
+      "injectionEntityCount": 4,
+      "answers": [
+        {
+          "slot": "astra",
+          "completionStatus": "complete",
+          "entityCount": 2,
+          "entityMatchedToInjection": 1,
+          "entityMatchRate": 0.5,
+          "hedgeHits": 2
+        },
+        {
+          "slot": "claude",
+          "completionStatus": "complete",
+          "entityCount": 4,
+          "entityMatchedToInjection": 3,
+          "entityMatchRate": 0.75,
+          "hedgeHits": 6
+        },
+        {
+          "slot": "argon",
+          "completionStatus": "complete",
+          "entityCount": 15,
+          "entityMatchedToInjection": 1,
+          "entityMatchRate": 0.0667,
+          "hedgeHits": 0
+        }
+      ]
+    },
+    {
+      "qi": 2,
+      "text": "NVIDIA 過去 7 天新聞重點，附日期與網址。",
+      "gate": "ok",
+      "articleBodyCount": 4,
+      "publishedAtCount": 4,
+      "sourceCount": 9,
+      "titleOnlyCount": 5,
+      "searchSynthesisClaimCount": 2,
+      "dedup": {
+        "rawSourceCount": 9,
+        "dedupedSourceCount": 9,
+        "rawEventCount": 14,
+        "dedupedEventCount": 14
+      },
+      "injectionCharsAfter": 2054,
+      "injectionCharsBeforeSynthStripped": 1951,
+      "injectionEntityCount": 4,
+      "answers": [
+        {
+          "slot": "astra",
+          "completionStatus": "complete",
+          "entityCount": 4,
+          "entityMatchedToInjection": 2,
+          "entityMatchRate": 0.5,
+          "hedgeHits": 3
+        },
+        {
+          "slot": "claude",
+          "completionStatus": "complete",
+          "entityCount": 4,
+          "entityMatchedToInjection": 3,
+          "entityMatchRate": 0.75,
+          "hedgeHits": 1
+        },
+        {
+          "slot": "argon",
+          "completionStatus": "complete",
+          "entityCount": 10,
+          "entityMatchedToInjection": 3,
+          "entityMatchRate": 0.3,
+          "hedgeHits": 0
+        }
+      ]
+    },
+    {
+      "qi": 3,
+      "text": "台灣最近科技新聞有哪些？",
+      "gate": "partial",
+      "articleBodyCount": 8,
+      "publishedAtCount": 6,
+      "sourceCount": 9,
+      "titleOnlyCount": 1,
+      "searchSynthesisClaimCount": 0,
+      "dedup": {
+        "rawSourceCount": 9,
+        "dedupedSourceCount": 9,
+        "rawEventCount": 14,
+        "dedupedEventCount": 14
+      },
+      "injectionCharsAfter": 1995,
+      "injectionCharsBeforeSynthStripped": 1892,
+      "injectionEntityCount": 3,
+      "answers": [
+        {
+          "slot": "astra",
+          "completionStatus": "truncated",
+          "entityCount": 2,
+          "entityMatchedToInjection": 2,
+          "entityMatchRate": 1,
+          "hedgeHits": 1
+        },
+        {
+          "slot": "claude",
+          "completionStatus": "unknown",
+          "entityCount": 0,
+          "entityMatchedToInjection": 0,
+          "entityMatchRate": null,
+          "hedgeHits": 0
+        },
+        {
+          "slot": "argon",
+          "completionStatus": "truncated",
+          "entityCount": 12,
+          "entityMatchedToInjection": 1,
+          "entityMatchRate": 0.0833,
+          "hedgeHits": 0
+        }
+      ]
+    },
+    {
+      "qi": 4,
+      "text": "今天台積電有什麼消息？",
+      "gate": "ok",
+      "articleBodyCount": 8,
+      "publishedAtCount": 6,
+      "sourceCount": 11,
+      "titleOnlyCount": 3,
+      "searchSynthesisClaimCount": 1,
+      "dedup": {
+        "rawSourceCount": 11,
+        "dedupedSourceCount": 11,
+        "rawEventCount": 14,
+        "dedupedEventCount": 14
+      },
+      "injectionCharsAfter": 2314,
+      "injectionCharsBeforeSynthStripped": 2080,
+      "injectionEntityCount": 10,
+      "answers": [
+        {
+          "slot": "astra",
+          "completionStatus": "complete",
+          "entityCount": 6,
+          "entityMatchedToInjection": 4,
+          "entityMatchRate": 0.6667,
+          "hedgeHits": 2
+        },
+        {
+          "slot": "claude",
+          "completionStatus": "unknown",
+          "entityCount": 0,
+          "entityMatchedToInjection": 0,
+          "entityMatchRate": null,
+          "hedgeHits": 0
+        },
+        {
+          "slot": "argon",
+          "completionStatus": "complete",
+          "entityCount": 22,
+          "entityMatchedToInjection": 6,
+          "entityMatchRate": 0.2727,
+          "hedgeHits": 0
+        }
+      ]
+    },
+    {
+      "qi": 5,
+      "text": "英國政局或大選最新進展？",
+      "gate": "ok",
+      "articleBodyCount": 8,
+      "publishedAtCount": 8,
+      "sourceCount": 10,
+      "titleOnlyCount": 2,
+      "searchSynthesisClaimCount": 2,
+      "dedup": {
+        "rawSourceCount": 10,
+        "dedupedSourceCount": 10,
+        "rawEventCount": 16,
+        "dedupedEventCount": 16
+      },
+      "injectionCharsAfter": 2066,
+      "injectionCharsBeforeSynthStripped": 1811,
+      "injectionEntityCount": 2,
+      "answers": [
+        {
+          "slot": "astra",
+          "completionStatus": "complete",
+          "entityCount": 1,
+          "entityMatchedToInjection": 1,
+          "entityMatchRate": 1,
+          "hedgeHits": 3
+        },
+        {
+          "slot": "claude",
+          "completionStatus": "complete",
+          "entityCount": 2,
+          "entityMatchedToInjection": 2,
+          "entityMatchRate": 1,
+          "hedgeHits": 1
+        },
+        {
+          "slot": "argon",
+          "completionStatus": "complete",
+          "entityCount": 3,
+          "entityMatchedToInjection": 1,
+          "entityMatchRate": 0.3333,
+          "hedgeHits": 0
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "questions": 6,
+    "meanArticleBody": 6.67,
+    "meanPublishedAt": 5.67,
+    "meanSynthClaims": 2
+  }
+}

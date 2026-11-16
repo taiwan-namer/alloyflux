@@ -1,0 +1,28 @@
+{
+  "qi": 5,
+  "text": "英國政局或大選最新進展？",
+  "variant": "with_synth",
+  "slot": "astra",
+  "modelId": "gpt-6-astra",
+  "ms": 19901,
+  "completionStatus": "complete",
+  "injectionFingerprint": "99a5c8f2145e8ac7",
+  "injectionChars": 2066,
+  "frozenGate": "ok",
+  "frozenSynthClaims": 2,
+  "contentChars": 855,
+  "content": "**截至這輪資料涵蓋的 2026 年 11 月 16 日，沒有足夠可靠資訊顯示英國已宣布提前大選、解散國會，或出現新的全國大選結果。**目前可確認的更新主要是政策辯論與政府外交活動，不能把它們解讀成大選啟動。\n\n| 日期 | 最新動向 | 如何解讀 |\n|---|---|---|\n| 11 月 15 日 | Andy Burnham 在《衛報》發表評論，主張年輕人面臨的危機源於政治決策，需要跨世代的政策回應。 | 顯示青年與福利政策受到關注；**這是政治人物的評論，不是政府新政策或黨魁挑戰公告**。 |\n| 11 月 12 日 | 英國政府發布首相與義大利總理 Giorgia Meloni 會面的消息，提及歐洲政治共同體會議。 | 屬政府外交動態，並非選舉時程變動。 |\n\n來源：[Burnham《衛報》評論](https://www.theguardian.com/commentisfree/2026/nov/15/britain-young-people-crisis-alan-milburn-review-welfare-childhood)、[英國政府會面公告](https://www.gov.uk/government/news/pm-meeting-with-prime-minister-meloni-of-italy-12-november-2026)。\n\n### 大選方面，現在能說到哪裡？\n- **提前大選：**本輪資料未提供已宣布提前大選的可靠證據；這不等於能斷言完全沒有相關政治討論。\n- **各黨民調、席次預測：**沒有可核對的最新數字，因此不宜判定工黨、保守黨或改革黨目前誰領先。\n- **國會攻防：**搜尋摘要提到《訪客徵收法案》的二讀爭議，但尚未核對原文，不能當成已確認的表決或法案結果。\n\n**簡單說：目前這批資訊不足以支持「英國即將大選」或「政權已出現重大變動」的結論。**你比較想追的是**提前大選與首相去留**，還是**改革黨崛起、各黨民調與勝選機會**？",
+  "error": null,
+  "entityCount": 1,
+  "entityMatchBodyRate": 1,
+  "entityMatchSynthOnlyRate": 0,
+  "synthFactsMarkedUnverified": null,
+  "hedgeTitleOnlyCount": 1,
+  "entities": [
+    "burnham"
+  ],
+  "matchedBody": [
+    "burnham"
+  ],
+  "matchedSynthOnly": []
+}

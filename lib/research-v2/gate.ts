@@ -36,6 +36,7 @@ function onlyTitleOrSnippetClaims(corpus: ResearchCorpus): boolean {
       (c) =>
         c.provenance === "title_only" ||
         c.provenance === "search_snippet" ||
+        c.provenance === "search_synthesis" ||
         c.provenance === "unknown",
     ),
   );
@@ -210,6 +211,7 @@ export function gateEvidence(input: {
     })),
     webSearchQueries: corpus.queriesUsed,
     warnings,
+    // UI 依 completionStatus 顯示「已上網查證／部分查證／查證未完成」；failed／skipped 由 gateway 清來源
     showVerifiedBadge: status === "ok" || status === "partial",
     forbidStaleNewsVoice: status === "partial",
     evidenceGrades: grades,

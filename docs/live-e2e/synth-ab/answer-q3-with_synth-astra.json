@@ -1,0 +1,33 @@
+{
+  "qi": 3,
+  "text": "台灣最近科技新聞有哪些？",
+  "variant": "with_synth",
+  "slot": "astra",
+  "modelId": "gpt-6-astra",
+  "ms": 18592,
+  "completionStatus": "truncated",
+  "injectionFingerprint": "a7b4ab3e6cca5bdd",
+  "injectionChars": 1995,
+  "frozenGate": "partial",
+  "frozenSynthClaims": 0,
+  "contentChars": 887,
+  "content": "**最近台灣科技新聞，值得留意的是台積電擴廠，以及關鍵技術保護政策。** 以下依目前取得的 **11 月 12～16 日報導**整理；這是重點摘錄，不是完整新聞清單。\n\n| 新聞 | 已知重點 | 值得關注的原因 |\n|---|---|---|\n| **台積電先進封裝、無人機產業落腳嘉義** | 中央社 11 月 15 日報導，行政院長卓榮泰表示，台積電先進封裝廠與無人機產業進駐，將推動嘉義成為「農業科技大縣」。 | 科技產業聚落向嘉義延伸，後續可觀察建廠進度、人才需求與地方基礎設施配套。 |\n| **台灣擬將受保護技術清單擴至 46 項** | DIGITIMES 11 月 12 日報導，台灣提出擴大受保護技術清單的方案。**目前應視為提案，不能當成已全面實施。** | 企業研發、技術移轉與法遵值得留意；具體適用技術與規範仍須以正式公告為準。 |\n| **台積電擴廠與政府補助受關注** | 《Taipei Times》11 月 16 日報導，台積電在擴廠之際取得創紀錄的補助。現有資料不足以核對金額、來源與認列期間，因此不列數字。 | 觀察海外布局時，除了建廠成本，也需看補助條件及實際到位情況。 |\n\n### 來源\n- [中央社：台積電進駐，嘉義將成為「農業科技大縣」](https://www.cna.com.tw/news/aipl/202611150135.aspx)\n- [DIGITIMES：台灣擬擴大受保護技術清單至 46 項](https://www.digitimes.com/news/a20261112PD202/taiwan-ai-chip-nstc-technology-2026.html)\n- [Taipei Times：台積電擴廠、補助創紀錄](https://www.taipeitimes.com/News/biz/archives/2026/11/16/2003867791)\n\n**一句話看趨勢：半導體產能布局持續擴張，同時政府也在加強核心技術保護。** 不過，產業落腳、政策提案與實際量產是不同階段，不能直接畫上等號。",
+  "error": null,
+  "entityCount": 4,
+  "entityMatchBodyRate": 0.75,
+  "entityMatchSynthOnlyRate": 0,
+  "synthFactsMarkedUnverified": null,
+  "hedgeTitleOnlyCount": 1,
+  "entities": [
+    "台積電",
+    "卓榮泰",
+    "nstc",
+    "2026/11"
+  ],
+  "matchedBody": [
+    "台積電",
+    "卓榮泰",
+    "2026/11"
+  ],
+  "matchedSynthOnly": []
+}

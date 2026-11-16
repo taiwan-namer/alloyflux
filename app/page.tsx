@@ -2049,11 +2049,14 @@ export default function ChatPage() {
                           : " · 免費體驗額度"
                         : ""}
                       {m.groundingSources && m.groundingSources.length > 0
-                        ? m.completionStatus === "truncated"
-                          ? " · 部分查證"
-                          : m.completionStatus === "failed"
-                            ? " · 查證未完成"
-                            : " · 已上網查證"
+                        ? m.completionStatus === "failed"
+                          ? " · 查證未完成"
+                          : m.completionStatus === "truncated" ||
+                              m.completionStatus === "unknown"
+                            ? " · 部分查證"
+                            : m.completionStatus === "complete"
+                              ? " · 已上網查證"
+                              : " · 部分查證"
                         : ""}
                     </span>
                   </div>

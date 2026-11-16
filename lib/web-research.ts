@@ -2,6 +2,9 @@
  * 層 1＋層 2 共用查證：Google Search grounding → 讀取原文摘錄。
  * 讓 Claude／GPT／Grok 也能拿到接近 Gemini 原生 grounding 的素材。
  */
+import { createHash } from "node:crypto";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import {
   GEMINI_OAUTH,
   bootstrapGeminiAccount,
@@ -20,6 +23,9 @@ export type ResearchPage = {
   originalUrl?: string;
   resolvedUrl?: string;
   fetchStatus?: "ok" | "failed" | "skipped" | "unresolved" | "blocked_ssrf";
+  /** 快照相對路徑（若 RESEARCH_HTML_SNAPSHOT_DIR 有設） */
+  htmlPath?: string;
+  htmlSha256?: string;
 };
 export type ResearchBundle = {
   brief: string;
@@ -40,7 +46,7 @@ const SEARCH_SYSTEM = [
 
 /** 口語化／明確要求聯網或找外部即時資訊的意圖 */
 const WEB_RESEARCH_INTENT_RE =
-  /上網|網路|网上|网上搜|爬文|搜一下|查一下|找看看|搜尋|搜索|查證|google|googling|瀏覽|浏览|大神|分享|評價|评价|推薦|推荐|災情|灾情|PTT|Dcard|Reddit|Threads|最新|現況|现况|勝率|胜率|行情|新聞|新闻|股價|股价|今天|今日|時事|时事|論壇|论坛|八卦|傳聞|传闻|誰贏|谁赢|選舉|选举|天氣|天气|匯率|汇率/i;
+  /上網|網路|网上|网上搜|爬文|搜一下|查一下|找看看|搜尋|搜索|查證|google|googling|瀏覽|浏览|大神|分享|評價|评价|推薦|推荐|災情|灾情|PTT|Dcard|Reddit|Threads|最新|現況|现况|勝率|胜率|行情|股市|新聞|新闻|股價|股价|今天|今日|明天|明日|時事|时事|論壇|论坛|八卦|傳聞|传闻|誰贏|谁赢|選舉|选举|天氣|天气|匯率|汇率/i;
 
 async function ensureFresh(sourceId: string, creds: OAuthCredentials): Promise<OAuthCredentials> {
   if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
@@ -64,10 +70,16 @@ function mergeSources(into: ResearchSource[], extra: ResearchSource[]) {
 function parseGrounding(meta: {
   webSearchQueries?: string[];
   groundingChunks?: { web?: { uri?: string; title?: string } }[];
-} | null | undefined): { sources: ResearchSource[]; queries: string[] } {
+  groundingSupports?: unknown[];
+} | null | undefined): {
+  sources: ResearchSource[];
+  queries: string[];
+  rawGroundingSupports: unknown[];
+} {
   const sources: ResearchSource[] = [];
   const queries: string[] = [];
-  if (!meta) return { sources, queries };
+  const rawGroundingSupports: unknown[] = [];
+  if (!meta) return { sources, queries, rawGroundingSupports };
   if (Array.isArray(meta.webSearchQueries)) {
     for (const q of meta.webSearchQueries) if (q) queries.push(q);
   }
@@ -78,7 +90,28 @@ function parseGrounding(meta: {
       sources.push({ uri, title: (chunk.web?.title || uri).trim() });
     }
   }
-  return { sources, queries };
+  if (Array.isArray(meta.groundingSupports)) {
+    for (const s of meta.groundingSupports) rawGroundingSupports.push(s);
+  }
+  return { sources, queries, rawGroundingSupports };
+}
+
+/** 寫入 raw groundingSupports 備查檔（search_synthesis 延後；本函式只記錄） */
+export function persistRawGroundingSupportsLog(entry: {
+  at: string;
+  provider: string;
+  queryPreview: string;
+  supportCount: number;
+  rawGroundingSupports: unknown[];
+}): void {
+  try {
+    const dir = path.join(process.cwd(), "docs", "live-e2e");
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "flash-grounding-supports.jsonl");
+    appendFileSync(file, `${JSON.stringify(entry)}\n`, "utf8");
+  } catch {
+    // 記錄失敗不阻斷主路徑
+  }
 }
 
 /** 注入主模型的查證全文硬上限（字元）；摘要＋來源＋各篇摘錄合計 */
@@ -141,11 +174,15 @@ function isPreferredHost(host: string): boolean {
   return PREFERRED_HOST_RE.test(host);
 }
 
-/** 過濾「只有導覽／Cookie／選單」的假正文，避免模型以為新聞未核實 */
+/** 過濾「只有導覽／Cookie／選單／CSS」的假正文，避免模型以為新聞未核實 */
 export function isUsablePageExcerpt(text: string): boolean {
   const t = text.replace(/\s+/g, " ").trim();
   if (t.length < 120) return false;
-  const navHits = (t.match(/訂閱|下載\s*App|延伸閱讀|相關新聞|熱門新聞|分享到|立即註冊|加入會員|Cookie|Accept all|Sign in|Log in/gi) || [])
+  if (/@font-face|font-face\s*\{|skip\s+to\s+(main\s+)?content/i.test(t)) return false;
+  const brace = (t.match(/\{/g) || []).length;
+  const colonSemi = (t.match(/:[^;]+;/g) || []).length;
+  if (brace >= 3 && colonSemi >= 5) return false;
+  const navHits = (t.match(/訂閱|下載\s*App|延伸閱讀|相關新聞|熱門新聞|分享到|立即註冊|加入會員|Cookie|Accept all|Sign in|Log in|Skip to/gi) || [])
     .length;
   const sentenceEnds = (t.match(/[。！？.!?]/g) || []).length;
   if (navHits >= 3 && sentenceEnds < 3) return false;
@@ -294,51 +331,45 @@ export async function fetchPageExcerpt(
   }
 
   const html = fetched.body;
-  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  const title = (titleMatch?.[1] || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 200);
-  const publishedAt = extractPublishedAtFromHtml(html);
-  const stripped = html
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
-    .replace(/<!--[\s\S]*?-->/g, " ")
-    .replace(/<\/(p|div|h1|h2|h3|h4|li|tr|br|section|article)>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-  const text = cleanArticleText(stripped);
-  const excerpt = text.slice(0, MAX_PAGE_CHARS);
   const resolved = fetched.resolvedUrl || uri;
-  if (!isUsablePageExcerpt(excerpt)) {
+  const htmlSha256 = createHash("sha256").update(html).digest("hex");
+  let htmlPath: string | undefined;
+  const snapDir = process.env.RESEARCH_HTML_SNAPSHOT_DIR?.trim();
+  if (snapDir) {
+    try {
+      mkdirSync(snapDir, { recursive: true });
+      const file = `${htmlSha256.slice(0, 16)}.html`;
+      writeFileSync(path.join(snapDir, file), html, "utf8");
+      htmlPath = file;
+    } catch {
+      /* 快照失敗不阻斷 */
+    }
+  }
+  const { extractArticleFromHtml } = await import("./research-v2/article-extract");
+  const extracted = extractArticleFromHtml(html, { url: resolved, maxChars: MAX_PAGE_CHARS });
+  if (!extracted.isMainBody) {
     return {
       uri: resolved,
-      title: title || uri,
-      excerpt: excerpt || title || "",
-      publishedAt,
+      title: extracted.title || uri,
+      excerpt: "",
+      publishedAt: extracted.publishedAt,
       originalUrl: uri,
       resolvedUrl: resolved,
-      fetchStatus: excerpt || title ? "ok" : "failed",
+      fetchStatus: "failed",
+      htmlPath,
+      htmlSha256,
     };
   }
   return {
     uri: resolved,
-    title: title || uri,
-    excerpt,
-    publishedAt,
+    title: extracted.title || uri,
+    excerpt: extracted.excerpt,
+    publishedAt: extracted.publishedAt,
     originalUrl: uri,
     resolvedUrl: resolved,
     fetchStatus: "ok",
+    htmlPath,
+    htmlSha256,
   };
 }
 
@@ -403,7 +434,12 @@ async function searchViaAntigravity(
   sourceId: string,
   query: string,
   signal?: AbortSignal,
-): Promise<{ brief: string; sources: ResearchSource[]; queries: string[] } | null> {
+): Promise<{
+  brief: string;
+  sources: ResearchSource[];
+  queries: string[];
+  rawGroundingSupports: unknown[];
+} | null> {
   const fresh = await ensureFresh(sourceId, creds);
   if (!fresh.projectId && fresh.accessToken) {
     try {
@@ -466,6 +502,7 @@ async function searchViaAntigravity(
   let brief = "";
   let sources: ResearchSource[] = [];
   let queries: string[] = [];
+  const rawGroundingSupports: unknown[] = [];
   const reader = res.body?.getReader();
   if (!reader) return null;
   const decoder = new TextDecoder();
@@ -488,6 +525,7 @@ async function searchViaAntigravity(
         const g = parseGrounding(candidate?.groundingMetadata ?? payload.groundingMetadata);
         sources = mergeSources(sources, g.sources);
         for (const q of g.queries) if (!queries.includes(q)) queries.push(q);
+        for (const s of g.rawGroundingSupports) rawGroundingSupports.push(s);
         for (const part of candidate?.content?.parts ?? []) {
           if (typeof part.text === "string" && part.thought !== true) brief += part.text;
         }
@@ -500,14 +538,19 @@ async function searchViaAntigravity(
   const trimmed = brief.trim();
   if (!trimmed && !sources.length) return null;
   if (/^NO_SEARCH\b/i.test(trimmed) && !sources.length) return null;
-  return { brief: trimmed, sources, queries };
+  return { brief: trimmed, sources, queries, rawGroundingSupports };
 }
 
 async function searchViaGeminiApiKey(
   apiKey: string,
   query: string,
   signal?: AbortSignal,
-): Promise<{ brief: string; sources: ResearchSource[]; queries: string[] } | null> {
+): Promise<{
+  brief: string;
+  sources: ResearchSource[];
+  queries: string[];
+  rawGroundingSupports: unknown[];
+} | null> {
   const model = process.env.GEMINI_RESEARCH_MODEL?.trim() || "gemini-2.0-flash";
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
   let res: Response;
@@ -534,6 +577,7 @@ async function searchViaGeminiApiKey(
         groundingMetadata?: {
           webSearchQueries?: string[];
           groundingChunks?: { web?: { uri?: string; title?: string } }[];
+          groundingSupports?: unknown[];
         };
       }[];
     };
@@ -546,7 +590,12 @@ async function searchViaGeminiApiKey(
     const trimmed = brief.trim();
     if (!trimmed && !g.sources.length) return null;
     if (/^NO_SEARCH\b/i.test(trimmed) && !g.sources.length) return null;
-    return { brief: trimmed, sources: g.sources, queries: g.queries };
+    return {
+      brief: trimmed,
+      sources: g.sources,
+      queries: g.queries,
+      rawGroundingSupports: g.rawGroundingSupports,
+    };
   } catch {
     return null;
   }
@@ -766,7 +815,11 @@ export function shouldSkipLiveResearch(text: string): boolean {
     return true;
   }
   // 明顯寫程式／改碼／解釋語法（無時事／聯網意圖）
-  if (/```|寫一個|幫我寫|refactor|debug|typescript|javascript|python|sql|regex|編譯|報錯|typeerror|syntax/i.test(q)) {
+  if (
+    /```|寫一個|幫我寫|refactor|debug|typescript|javascript|python|sql|regex|編譯|報錯|typeerror|syntax|解釋這段程式|這段程式|程式碼|抽取邏輯|只要解釋/i.test(
+      q,
+    )
+  ) {
     return true;
   }
   // 純翻譯／潤飾／改寫（繁簡皆可）
@@ -790,7 +843,13 @@ export async function fetchLiveResearchSearchHit(
     prefer?: { sourceId: string; creds: OAuthCredentials };
     signal?: AbortSignal;
   },
-): Promise<{ brief: string; sources: ResearchSource[]; queries: string[]; provider: string } | null> {
+): Promise<{
+  brief: string;
+  sources: ResearchSource[];
+  queries: string[];
+  provider: string;
+  rawGroundingSupports: unknown[];
+} | null> {
   const q = query.trim();
   if (!q) return null;
   if (shouldSkipLiveResearch(q)) return null;
@@ -799,7 +858,12 @@ export async function fetchLiveResearchSearchHit(
     ? `【必須使用 Google Search，禁止回覆 NO_SEARCH】\n${q}\n【優先】官方新聞室、投資人公告、路透／美聯社／BBC／大型報紙；排除維基百科與 YouTube。`
     : `${q}\n【查證時優先官方與主流媒體新聞，排除維基百科與 YouTube。】`;
 
-  let hit: { brief: string; sources: ResearchSource[]; queries: string[] } | null = null;
+  let hit: {
+    brief: string;
+    sources: ResearchSource[];
+    queries: string[];
+    rawGroundingSupports: unknown[];
+  } | null = null;
   let provider = "unknown";
 
   if (opts?.prefer) {
@@ -819,6 +883,13 @@ export async function fetchLiveResearchSearchHit(
   }
   if (!hit) return null;
   if (/^NO_SEARCH\b/i.test(hit.brief) && !hit.sources.length) return null;
+  persistRawGroundingSupportsLog({
+    at: new Date().toISOString(),
+    provider,
+    queryPreview: q.slice(0, 160),
+    supportCount: hit.rawGroundingSupports.length,
+    rawGroundingSupports: hit.rawGroundingSupports,
+  });
   return { ...hit, provider };
 }
 

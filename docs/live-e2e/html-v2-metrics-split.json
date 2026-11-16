@@ -1,0 +1,455 @@
+{
+  "measuredAt": "2026-11-15T18:27:00.849Z",
+  "split": {
+    "all": {
+      "n": 25,
+      "bodyRecognitionRecall": 1,
+      "shellFalseBodyRate": 0,
+      "precision": 1,
+      "publishedAtRateOnExpectedBody": 0.8462,
+      "confusion": {
+        "tp": 13,
+        "fp": 0,
+        "tn": 12,
+        "fn": 0
+      },
+      "rows": [
+        {
+          "id": "live_article_01",
+          "holdOut": true,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:link_and_short_block",
+          "publishedAt": "2026-11-15T16:32:43.000Z"
+        },
+        {
+          "id": "live_article_02",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "not_usable_main_body",
+          "publishedAt": "2026-11-15T15:13:04.000Z"
+        },
+        {
+          "id": "live_article_03",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-08T17:58:43.000Z"
+        },
+        {
+          "id": "live_article_04",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-09T00:00:00.000Z"
+        },
+        {
+          "id": "live_article_05",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-15T16:00:00.000Z"
+        },
+        {
+          "id": "live_article_06",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:short_block_repetition",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_07",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-12T11:35:31.000Z"
+        },
+        {
+          "id": "live_article_08",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_09",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "not_usable_main_body",
+          "publishedAt": "2026-11-03T15:30:00.000Z"
+        },
+        {
+          "id": "live_article_10",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_11",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_12",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:link_and_short_block",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_13",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-13T08:13:51.000Z"
+        },
+        {
+          "id": "live_article_14",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:link_and_short_block",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_15",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-13T04:00:08.000Z"
+        },
+        {
+          "id": "live_article_16",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:link_and_short_block",
+          "publishedAt": "2026-11-11T22:04:17.000Z"
+        },
+        {
+          "id": "live_article_17",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": "2026-11-15T12:23:10.897Z"
+        },
+        {
+          "id": "live_article_18",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_19",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-15T16:00:00.000Z"
+        },
+        {
+          "id": "live_article_20",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-15T08:58:00.000Z"
+        },
+        {
+          "id": "live_article_21",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-12T01:21:31.000Z"
+        },
+        {
+          "id": "live_article_22",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_23",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-12T08:40:43.000Z"
+        },
+        {
+          "id": "live_article_24",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-10T14:30:06.000Z"
+        },
+        {
+          "id": "shell_css",
+          "holdOut": true,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": null
+        }
+      ]
+    },
+    "dev": {
+      "n": 18,
+      "bodyRecognitionRecall": 1,
+      "shellFalseBodyRate": 0,
+      "precision": 1,
+      "publishedAtRateOnExpectedBody": 0.875,
+      "confusion": {
+        "tp": 8,
+        "fp": 0,
+        "tn": 10,
+        "fn": 0
+      },
+      "rows": [
+        {
+          "id": "live_article_02",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "not_usable_main_body",
+          "publishedAt": "2026-11-15T15:13:04.000Z"
+        },
+        {
+          "id": "live_article_06",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:short_block_repetition",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_08",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_09",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "not_usable_main_body",
+          "publishedAt": "2026-11-03T15:30:00.000Z"
+        },
+        {
+          "id": "live_article_11",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_12",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:link_and_short_block",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_13",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-13T08:13:51.000Z"
+        },
+        {
+          "id": "live_article_14",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:link_and_short_block",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_15",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-13T04:00:08.000Z"
+        },
+        {
+          "id": "live_article_16",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:link_and_short_block",
+          "publishedAt": "2026-11-11T22:04:17.000Z"
+        },
+        {
+          "id": "live_article_17",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": "2026-11-15T12:23:10.897Z"
+        },
+        {
+          "id": "live_article_18",
+          "holdOut": false,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_19",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-15T16:00:00.000Z"
+        },
+        {
+          "id": "live_article_20",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-15T08:58:00.000Z"
+        },
+        {
+          "id": "live_article_21",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-12T01:21:31.000Z"
+        },
+        {
+          "id": "live_article_22",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": null
+        },
+        {
+          "id": "live_article_23",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-12T08:40:43.000Z"
+        },
+        {
+          "id": "live_article_24",
+          "holdOut": false,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-10T14:30:06.000Z"
+        }
+      ]
+    },
+    "holdOut": {
+      "n": 7,
+      "bodyRecognitionRecall": 1,
+      "shellFalseBodyRate": 0,
+      "precision": 1,
+      "publishedAtRateOnExpectedBody": 0.8,
+      "confusion": {
+        "tp": 5,
+        "fp": 0,
+        "tn": 2,
+        "fn": 0
+      },
+      "rows": [
+        {
+          "id": "live_article_01",
+          "holdOut": true,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "list_or_hub:link_and_short_block",
+          "publishedAt": "2026-11-15T16:32:43.000Z"
+        },
+        {
+          "id": "live_article_03",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-08T17:58:43.000Z"
+        },
+        {
+          "id": "live_article_04",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-09T00:00:00.000Z"
+        },
+        {
+          "id": "live_article_05",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-15T16:00:00.000Z"
+        },
+        {
+          "id": "live_article_07",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": "2026-11-12T11:35:31.000Z"
+        },
+        {
+          "id": "live_article_10",
+          "holdOut": true,
+          "expected": "has_body",
+          "predBody": true,
+          "degrade": null,
+          "publishedAt": null
+        },
+        {
+          "id": "shell_css",
+          "holdOut": true,
+          "expected": "shell",
+          "predBody": false,
+          "degrade": "template_or_css_pollution",
+          "publishedAt": null
+        }
+      ]
+    }
+  },
+  "liveInSample": {
+    "liveArticleBodySources": 40,
+    "alsoInHtmlV2Fixture": 16,
+    "inSampleRate": 0.4
+  }
+}

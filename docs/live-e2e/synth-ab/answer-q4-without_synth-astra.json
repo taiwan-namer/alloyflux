@@ -1,0 +1,36 @@
+{
+  "qi": 4,
+  "text": "今天台積電有什麼消息？",
+  "variant": "without_synth",
+  "slot": "astra",
+  "modelId": "gpt-6-astra",
+  "ms": 18364,
+  "completionStatus": "complete",
+  "injectionFingerprint": "81c6c0b5b5dbc80c",
+  "injectionChars": 1990,
+  "frozenGate": "ok",
+  "frozenSynthClaims": 1,
+  "contentChars": 754,
+  "content": "**今天（11 月 16 日）台積電的新聞焦點是海外擴廠相關補助；另外，近期值得注意的是董事會核准投資 OpenAI 與 Anthropic，合計上限 10 億美元。**\n\n| 時間 | 重點消息 | 怎麼看 |\n|---|---|---|\n| **今日報導：11/16** | 《Taipei Times》報導，台積電隨晶圓廠擴張，取得的補助創紀錄。現有資料未提供具體金額及認列期間。 | 可關注補助如何抵銷海外建廠成本；**不能直接把補助視為當期獲利**，仍須看入帳方式與附帶條件。[來源](https://www.taipeitimes.com/News/biz/archives/2026/11/16/2003867791) |\n| **近期重大消息：11/10 董事會** | 據報導，台積電核准分別以**最高 5 億美元**投資 Anthropic 與 OpenAI，合計最高 10 億美元。 | 從 AI 晶片製造進一步延伸至模型公司的股權布局。不過，**核准額度不等於已完成投資**。[鉅亨網／優分析](https://news.cnyes.com/news/id/6657710) |\n| **後續報導：11/11** | 報導指出，投資標的分別為 Anthropic 普通股及 OpenAI 特別股。 | 財務報酬與風險仍取決於交易條件，不能僅憑投資消息就判定對台積電獲利有多大貢獻。[鏡週刊轉載報導](https://www.mirrormedia.mg/external/setn_1937378) |\n\n**如果你是想看對股價的意義：**這些消息偏向中長期布局，短期仍要搭配估值、資本支出與海外廠獲利表現判讀。目前這批資料沒有今日股價及法人買賣超，不能據此認定市場已正面或負面反應。",
+  "error": null,
+  "entityCount": 6,
+  "entityMatchBodyRate": 0.6667,
+  "entityMatchSynthOnlyRate": 0,
+  "synthFactsMarkedUnverified": null,
+  "hedgeTitleOnlyCount": 0,
+  "entities": [
+    "台積電",
+    "openai",
+    "anthropic",
+    "10 億",
+    "2026/11",
+    "5 億"
+  ],
+  "matchedBody": [
+    "台積電",
+    "openai",
+    "anthropic",
+    "2026/11"
+  ],
+  "matchedSynthOnly": []
+}

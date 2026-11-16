@@ -1,5 +1,6 @@
 import { cleanSourceUrl } from "../web-research";
 import { sanitizeEvidenceText } from "./sanitize";
+import { isSearchSynthesisEnabled } from "./synthesis-flag";
 import type {
   EvidenceGrade,
   EvidenceLevel,
@@ -72,8 +73,24 @@ function extractActors(text: string): string[] {
 }
 
 function guessTopic(text: string): string {
-  if (/選舉|中期|期中|midterm|election|國會|congress|ballot/i.test(text)) return "election";
-  if (/會談|峰會|summit|APEC|會見|訪問|行程|外交|trilateral|xi|putin|習|普丁/i.test(text)) {
+  // 突發事故／災害優先，避免「機場／選舉」等誤傷
+  if (/撞機|空難|墜機|地震|颱風|飓风|洪水|野火|事故|disaster|plane\s*crash|earthquake|hurricane/i.test(text)) {
+    return "disaster";
+  }
+  if (/CEO|執行長|董事會|財報|併購|裁員|earnings|corporate|resign|newsroom|8-K|form\s*8/i.test(text)) {
+    return "corporate";
+  }
+  if (
+    /選舉|中期|期中|midterm|election|國會|congress|ballot/i.test(text) &&
+    !/機場|航空|航班|airport|airline/i.test(text)
+  ) {
+    return "election";
+  }
+  // xi 需詞界，避免誤傷含 xi 字元序列的英文詞
+  if (
+    /會談|峰會|summit|APEC|會見|外交|trilateral|putin|習近平|普丁|普京/i.test(text) ||
+    /(^|[^a-z])xi([^a-z]|$)/i.test(text)
+  ) {
     return "diplomacy";
   }
   if (/伊朗|戰爭|軍事|攻擊|導彈|核武|military|missile/i.test(text)) return "security";
@@ -82,8 +99,12 @@ function guessTopic(text: string): string {
 }
 
 function inferClaimType(text: string, provenance: EvidenceProvenance): ResearchClaimType {
-  // 僅標題／搜尋摘要：不得升格為已核對事實
-  if (provenance === "title_only" || provenance === "search_snippet") {
+  // 僅標題／搜尋摘要／synthesis：不得升格為已核對事實
+  if (
+    provenance === "title_only" ||
+    provenance === "search_snippet" ||
+    provenance === "search_synthesis"
+  ) {
     if (/尚未確認|未正式確認|未證實|unconfirmed|not\s+confirm/i.test(text)) return "unconfirmed";
     if (/否認|駁斥|denied/i.test(text)) return "denied";
     if (/主張|質疑|聲稱|alleged|says?|claims?/i.test(text)) return "party_claim";
@@ -131,7 +152,12 @@ function evidenceLevelFor(
   provenance: EvidenceProvenance,
 ): EvidenceLevel {
   if (claimType === "unconfirmed") return "weak";
-  if (provenance === "title_only" || provenance === "search_snippet" || provenance === "unknown") {
+  if (
+    provenance === "title_only" ||
+    provenance === "search_snippet" ||
+    provenance === "search_synthesis" ||
+    provenance === "unknown"
+  ) {
     return "insufficient";
   }
   if (quality === "preferred" && provenance === "article_body") return "strong";
@@ -178,6 +204,53 @@ function qualityScore(q: ResearchSource["quality"]): number {
   return 0.25;
 }
 
+/** 與既有 article_body 事件重疊 → 衝突，以正文為準 */
+function findArticleBodyConflict(
+  seg: string,
+  byMerge: Map<string, ResearchEvent>,
+): ResearchEvent | null {
+  const tokens = seg
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter((t) => t.length >= 3)
+    .slice(0, 16);
+  if (tokens.length < 3) return null;
+  for (const ev of byMerge.values()) {
+    const hasBody = ev.claims.some((c) => c.provenance === "article_body");
+    if (!hasBody) continue;
+    const blob = `${ev.title} ${ev.claims.map((c) => c.statement).join(" ")}`.toLowerCase();
+    const hits = tokens.filter((t) => blob.includes(t)).length;
+    if (hits >= 3) return ev;
+  }
+  return null;
+}
+
+/**
+ * 移除 search_synthesis 主張／純 synthesis 事件（Gate 不變性／A/B without_synth）。
+ * 不改其他 provenance。
+ */
+export function stripSearchSynthesisFromCorpus(corpus: ResearchCorpus): ResearchCorpus {
+  const events = corpus.events
+    .map((e) => ({
+      ...e,
+      claims: e.claims.filter((c) => c.provenance !== "search_synthesis"),
+    }))
+    .filter((e) => e.claims.length > 0);
+  return {
+    ...corpus,
+    events,
+    limitations: [
+      ...corpus.limitations.filter((l) => !l.startsWith("search_synthesis")),
+      "search_synthesis_stripped_for_gate_check",
+    ],
+    stats: {
+      ...corpus.stats,
+      dedupedEventCount: events.length,
+    },
+  };
+}
+
 /**
  * 從 RawSearchHit 建立結構化 Corpus。
  * Flash brief 僅作線索／unconfirmed 提示，不得冒充 article_body。
@@ -194,13 +267,14 @@ export function collectEventsFromHit(
     "flash_brief_is_search_snippet_not_article_body",
   ];
 
+  const canon = (u: string) => cleanSourceUrl(u).toLowerCase().replace(/\/$/, "");
+
   const pageByUri = new Map(
-    hit.pages.map((p) => [cleanSourceUrl(p.resolvedUrl || p.uri), p]),
+    hit.pages.map((p) => [canon(p.resolvedUrl || p.uri), p]),
   );
-  // 也以 originalUrl 索引
   for (const p of hit.pages) {
-    if (p.originalUrl) pageByUri.set(cleanSourceUrl(p.originalUrl), p);
-    pageByUri.set(cleanSourceUrl(p.uri), p);
+    if (p.originalUrl) pageByUri.set(canon(p.originalUrl), p);
+    pageByUri.set(canon(p.uri), p);
   }
 
   const rawSources: ResearchSource[] = [];
@@ -211,27 +285,34 @@ export function collectEventsFromHit(
     const resolvedUrl = s.resolvedUrl ? cleanSourceUrl(s.resolvedUrl) : undefined;
     const uri = resolvedUrl || originalUrl;
     if (!/^https?:\/\//i.test(uri)) continue;
-    if (seenUri.has(uri)) continue;
-    seenUri.add(uri);
+    const key = canon(uri);
+    if (seenUri.has(key)) continue;
+    seenUri.add(key);
     const host = hostnameOf(uri);
-    const page = pageByUri.get(uri) || pageByUri.get(originalUrl);
-    const hasBody = Boolean(page?.excerpt && page.excerpt.length >= 120);
+    const page = pageByUri.get(key) || pageByUri.get(canon(originalUrl));
+    const excerptRaw = page?.excerpt?.trim() || "";
+    const hasBody =
+      Boolean(excerptRaw.length >= 120) &&
+      page?.fetchStatus === "ok" &&
+      !/@font-face|skip\s+to\s+main/i.test(excerptRaw);
     const fetchStatus: FetchStatus =
-      page?.fetchStatus ?? (hasBody ? "ok" : page ? "ok" : "unresolved");
+      page?.fetchStatus ?? (hasBody ? "ok" : page ? "failed" : "unresolved");
     const provenance = provenanceForSource({ hasBody, host, fetchStatus });
     const publishedAt = s.publishedAt || page?.publishedAt || undefined;
     rawSources.push({
-      sourceId: stableId("src", uri),
+      sourceId: stableId("src", key),
       title: (s.title || page?.title || host || uri).trim(),
       uri,
       originalUrl,
       resolvedUrl: resolvedUrl || (page?.resolvedUrl ? cleanSourceUrl(page.resolvedUrl) : undefined),
       host,
       publishedAt,
-      excerpt: hasBody && page?.excerpt ? sanitizeEvidenceText(page.excerpt, 900) : undefined,
+      excerpt: hasBody ? sanitizeEvidenceText(excerptRaw, 900) : undefined,
       quality: sourceQuality(host),
       fetchStatus,
       provenance,
+      htmlPath: page?.htmlPath,
+      htmlSha256: page?.htmlSha256,
     });
   }
 
@@ -239,23 +320,30 @@ export function collectEventsFromHit(
     const originalUrl = cleanSourceUrl(p.originalUrl || p.uri);
     const resolvedUrl = p.resolvedUrl ? cleanSourceUrl(p.resolvedUrl) : cleanSourceUrl(p.uri);
     const uri = resolvedUrl || originalUrl;
-    if (!/^https?:\/\//i.test(uri) || seenUri.has(uri)) continue;
-    seenUri.add(uri);
+    const key = canon(uri);
+    if (!/^https?:\/\//i.test(uri) || seenUri.has(key)) continue;
+    seenUri.add(key);
     const host = hostnameOf(uri);
-    const hasBody = Boolean(p.excerpt && p.excerpt.length >= 120);
+    const excerptRaw = p.excerpt?.trim() || "";
+    const hasBody =
+      Boolean(excerptRaw.length >= 120) &&
+      (p.fetchStatus ?? "ok") === "ok" &&
+      !/@font-face|skip\s+to\s+main/i.test(excerptRaw);
     const fetchStatus: FetchStatus = p.fetchStatus ?? (hasBody ? "ok" : "failed");
     rawSources.push({
-      sourceId: stableId("src", uri),
+      sourceId: stableId("src", key),
       title: (p.title || host).trim(),
       uri,
       originalUrl,
       resolvedUrl,
       host,
       publishedAt: p.publishedAt || undefined,
-      excerpt: hasBody ? sanitizeEvidenceText(p.excerpt, 900) : undefined,
+      excerpt: hasBody ? sanitizeEvidenceText(excerptRaw, 900) : undefined,
       quality: sourceQuality(host),
       fetchStatus,
       provenance: provenanceForSource({ hasBody, host, fetchStatus }),
+      htmlPath: p.htmlPath,
+      htmlSha256: p.htmlSha256,
     });
   }
 
@@ -265,7 +353,8 @@ export function collectEventsFromHit(
 
   for (const src of rawSources) {
     const topic = guessTopic(`${src.title} ${src.excerpt ?? ""}`);
-    const mergeKey = eventMergeKey(src.title, src.publishedAt, topic);
+    // 同一 canonical URL 只形成一個事件（標題差異不裂開）
+    const mergeKey = `url:${canon(src.uri)}`;
     const claimText =
       src.provenance === "article_body" || src.provenance === "official_document"
         ? `${src.title}\n${src.excerpt ?? ""}`
@@ -334,6 +423,77 @@ export function collectEventsFromHit(
         evidenceLevel: "weak",
         provenance: "search_snippet",
       });
+    }
+  }
+
+  // search_synthesis（feature flag 預設關）：不得升格 article_body；與正文衝突時以 article_body 為準
+  const supports = isSearchSynthesisEnabled() ? (hit.rawGroundingSupports ?? []) : [];
+  if (hit.rawGroundingSupports?.length && !isSearchSynthesisEnabled()) {
+    limitations.push("search_synthesis_disabled_by_flag: raw supports present but not injected");
+  }
+  if (supports.length) {
+    limitations.push(
+      "search_synthesis_from_grounding_supports: 搜尋摘要，未經原文核對；不得當成 article_body",
+    );
+    let synIdx = 0;
+    for (const raw of supports) {
+      if (synIdx >= 6) break;
+      const seg =
+        raw &&
+        typeof raw === "object" &&
+        "segment" in raw &&
+        (raw as { segment?: { text?: string } }).segment?.text;
+      if (!seg || seg.trim().length < 40) continue;
+      const conflict = findArticleBodyConflict(seg, byMerge);
+      if (conflict) {
+        limitations.push(
+          `synthesis_conflict_article_body_wins:${conflict.eventId}`,
+        );
+        // 標記在正文事件上，不另建 synthesis 事件
+        if (!conflict.claims.some((c) => c.provenance === "search_synthesis")) {
+          conflict.claims.push({
+            claimId: stableId("clm", conflict.eventId, "synth_conflict"),
+            statement: sanitizeEvidenceText(
+              `【衝突｜以正文為準｜搜尋摘要未採用】${seg.trim().slice(0, 160)}`,
+              200,
+            ),
+            claimType: "unconfirmed",
+            sourceIds: conflict.sourceIds.slice(0, 1),
+            evidenceLevel: "insufficient",
+            provenance: "search_synthesis",
+          });
+        }
+        synIdx += 1;
+        continue;
+      }
+      const statement = sanitizeEvidenceText(
+        `【搜尋摘要，未經原文核對】${seg.trim()}`,
+        280,
+      );
+      const topic = guessTopic(statement);
+      const mergeKey = `synth:${stableId("syn", statement.slice(0, 48))}`;
+      if (byMerge.has(mergeKey)) continue;
+      const srcId = rawSources[synIdx % Math.max(rawSources.length, 1)]?.sourceId;
+      const claim: ResearchClaim = {
+        claimId: stableId("clm", mergeKey),
+        statement,
+        claimType: inferClaimType(statement, "search_synthesis"),
+        sourceIds: srcId ? [srcId] : [],
+        evidenceLevel: "insufficient",
+        provenance: "search_synthesis",
+      };
+      byMerge.set(mergeKey, {
+        eventId: stableId("evt", mergeKey),
+        title: sanitizeEvidenceText(seg.trim(), 120),
+        topic,
+        claims: [claim],
+        sourceIds: srcId ? [srcId] : [],
+        relevance: 0.45,
+        freshness: 0.5,
+        diversityKey: topic,
+        evidenceGrade: "title_only",
+      });
+      synIdx += 1;
     }
   }
 

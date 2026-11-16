@@ -1,0 +1,297 @@
+{
+  "measuredAt": "2026-11-15T16:59:11.423Z",
+  "note": "before=裸 HTML strip；after=extractArticleFromHtml 品質閘門。hold-out 鎖定後未針對其調規則。",
+  "totals": {
+    "fixtures": 18,
+    "holdOut": 5,
+    "dev": 13
+  },
+  "before": {
+    "all": {
+      "n": 18,
+      "tp": 13,
+      "fp": 1,
+      "tn": 4,
+      "fn": 0,
+      "precision": 0.9286,
+      "recall": 1,
+      "f1": 0.963,
+      "reverseFalseBodyRate": 0.2
+    },
+    "holdOut": {
+      "n": 5,
+      "tp": 3,
+      "fp": 1,
+      "tn": 1,
+      "fn": 0,
+      "precision": 0.75,
+      "recall": 1,
+      "f1": 0.8571,
+      "reverseFalseBodyRate": 0.5
+    },
+    "dev": {
+      "n": 13,
+      "tp": 10,
+      "fp": 0,
+      "tn": 3,
+      "fn": 0,
+      "precision": 1,
+      "recall": 1,
+      "f1": 1,
+      "reverseFalseBodyRate": 0
+    }
+  },
+  "after": {
+    "all": {
+      "n": 18,
+      "tp": 7,
+      "fp": 0,
+      "tn": 5,
+      "fn": 6,
+      "precision": 1,
+      "recall": 0.5385,
+      "f1": 0.7,
+      "reverseFalseBodyRate": 0
+    },
+    "holdOut": {
+      "n": 5,
+      "tp": 2,
+      "fp": 0,
+      "tn": 2,
+      "fn": 1,
+      "precision": 1,
+      "recall": 0.6667,
+      "f1": 0.8,
+      "reverseFalseBodyRate": 0
+    },
+    "dev": {
+      "n": 13,
+      "tp": 5,
+      "fp": 0,
+      "tn": 3,
+      "fn": 5,
+      "precision": 1,
+      "recall": 0.5,
+      "f1": 0.6667,
+      "reverseFalseBodyRate": 0
+    }
+  },
+  "detail": [
+    {
+      "id": "reuters_tech_sample",
+      "type": "intl_wire",
+      "expected": "shell",
+      "holdOut": true,
+      "beforeIsMainBody": false,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterHasDate": false,
+      "beforePollution": true,
+      "htmlSha256": "4693621e20a3e0e8b0dbbaef1f9c437c41f887d1f6ccc297edf20438b457371a"
+    },
+    {
+      "id": "apnews_world",
+      "type": "intl_wire",
+      "expected": "shell",
+      "holdOut": false,
+      "beforeIsMainBody": false,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterHasDate": false,
+      "beforePollution": true,
+      "htmlSha256": "5a572b5dda38f01209c0580b4d01507d9b107006d7be01e3969563c0c949e285"
+    },
+    {
+      "id": "guardian_world",
+      "type": "intl_wire",
+      "expected": "has_body",
+      "holdOut": true,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterHasDate": false,
+      "beforePollution": true,
+      "htmlSha256": "b0ee779d42eee416670a82ede135baac5312ae692ab027c2839a6b722ce2d712"
+    },
+    {
+      "id": "cnn_world",
+      "type": "intl_wire",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterHasDate": false,
+      "beforePollution": false,
+      "htmlSha256": "b2e128355715302f30ca3442e496b005a3c4485c0dc05d225750cbc8e0a66a35"
+    },
+    {
+      "id": "cnbc_markets",
+      "type": "finance",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterHasDate": false,
+      "beforePollution": true,
+      "htmlSha256": "622f700ee5775b9fe7a2b749670052715f62338f7cee4d423c954bba5f4f93c0"
+    },
+    {
+      "id": "marketwatch_home",
+      "type": "finance",
+      "expected": "shell",
+      "holdOut": false,
+      "beforeIsMainBody": false,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterHasDate": false,
+      "beforePollution": true,
+      "htmlSha256": "4693621e20a3e0e8b0dbbaef1f9c437c41f887d1f6ccc297edf20438b457371a"
+    },
+    {
+      "id": "cna_taiwan",
+      "type": "zh_tw",
+      "expected": "has_body",
+      "holdOut": true,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterHasDate": false,
+      "beforePollution": false,
+      "htmlSha256": "62606b549be522cba849d6687e74460e42fa37683f7003f174d6e2f3403d689b"
+    },
+    {
+      "id": "udn_money",
+      "type": "zh_tw",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "not_usable_main_body",
+      "afterHasDate": true,
+      "beforePollution": false,
+      "htmlSha256": "224dfec858d3ae67c93bc50e8bcb4dd3180e10e78db682abde2f988278459b0a"
+    },
+    {
+      "id": "ltn_news",
+      "type": "zh_tw",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterHasDate": false,
+      "beforePollution": false,
+      "htmlSha256": "457a3946d8d103c510d855804b251a1c398d77fe737e3a78dbe59d150b2f28f9"
+    },
+    {
+      "id": "microsoft_newsroom",
+      "type": "corp_newsroom",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "not_usable_main_body",
+      "afterHasDate": true,
+      "beforePollution": false,
+      "htmlSha256": "0c8d15cc8c6492e199079fe8bd2e1245c2a4c384eff0cd3ec44645d3d802426c"
+    },
+    {
+      "id": "apple_newsroom",
+      "type": "corp_newsroom",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "not_usable_main_body",
+      "afterHasDate": false,
+      "beforePollution": false,
+      "htmlSha256": "50d59a915e122c5ac6bf76f22077becb6f42a1620b430c7db1c203bca7ae1ae8"
+    },
+    {
+      "id": "sec_edgar_search",
+      "type": "gov_filing",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterHasDate": false,
+      "beforePollution": false,
+      "htmlSha256": "42f619ee8d99ffcd3e8ce09d8eddcab60f20bf3264017d9ec6448354df669635"
+    },
+    {
+      "id": "whitehouse_briefing",
+      "type": "gov_filing",
+      "expected": "has_body",
+      "holdOut": true,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterHasDate": true,
+      "beforePollution": true,
+      "htmlSha256": "4c217e6426e1dba06386207f3982c57fbf6eccef42a7ee20f93462135b5df804"
+    },
+    {
+      "id": "synthetic_css_shell",
+      "type": "shell_or_paywall",
+      "expected": "shell",
+      "holdOut": true,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterHasDate": false,
+      "beforePollution": true,
+      "htmlSha256": "3c598fd93c8d53b36a43367e3e9ec9b22d496e331ba47fcfa642f5065d538138"
+    },
+    {
+      "id": "synthetic_grounding_redirect",
+      "type": "grounding_redirect",
+      "expected": "shell",
+      "holdOut": false,
+      "beforeIsMainBody": false,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterHasDate": false,
+      "beforePollution": true,
+      "htmlSha256": "46ed3933f2a9f5e1049f1eb4537361e2ece580652d633e6472bc73a66d465147"
+    },
+    {
+      "id": "nvidia_newsroom_hub",
+      "type": "corp_newsroom",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterHasDate": false,
+      "beforePollution": false,
+      "htmlSha256": "5e0680b1b2a041776ec9f5c11d081c4898cf4000cee6f531dea3fb24920db8bc"
+    },
+    {
+      "id": "synthetic_good_article_en",
+      "type": "synthetic_article",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterHasDate": true,
+      "beforePollution": true,
+      "htmlSha256": "f754fc1deb0db309843861ed6e9b21847c5c00d379dc1890aba1e7c323d69b08"
+    },
+    {
+      "id": "synthetic_good_article_zh",
+      "type": "synthetic_article",
+      "expected": "has_body",
+      "holdOut": false,
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterHasDate": true,
+      "beforePollution": false,
+      "htmlSha256": "05a61c47103aca2cde09b8dd930295586ae588c83540050a78ff4eef2679b387"
+    }
+  ]
+}

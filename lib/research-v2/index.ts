@@ -21,8 +21,21 @@ export type {
 } from "./types";
 
 export { PHASE4_PRODUCT_MODELS } from "./types";
-export { planResearch, formatDateInTimeZone, plannerQueryFingerprint } from "./planner";
-export { collectEventsFromHit, rankEventsWithDiversity } from "./collector";
+export {
+  planResearch,
+  formatDateInTimeZone,
+  plannerQueryFingerprint,
+  detectIntent,
+  extractUserInstructionText,
+  hasExplicitLiveDemand,
+  isSummarizeOrTranslateOnly,
+} from "./planner";
+export {
+  collectEventsFromHit,
+  rankEventsWithDiversity,
+  stripSearchSynthesisFromCorpus,
+} from "./collector";
+export { isSearchSynthesisEnabled } from "./synthesis-flag";
 export { gateEvidence } from "./gate";
 export { formatVerdictInjection, shouldShowVerifiedBadge, measureInjectionBudget } from "./inject";
 export {
@@ -76,7 +89,12 @@ import {
   isPlatformResearchDone,
   runWithResearchContextAsync,
 } from "./context";
+import {
+  extractUserInstructionText,
+  hasExplicitLiveDemand,
+} from "./instruction-text";
 import { isResearchPipelineV2Enabled, runResearchPipelineV2, type ChatTurn } from "./pipeline";
+import { planResearch } from "./planner";
 import type { ResearchSupplyPath, ResearchVerdict } from "./types";
 
 /** 平台側只跑一次；供 Gateway 在 Node／local 前呼叫 */
@@ -90,7 +108,21 @@ export async function preparePlatformResearch(input: {
   if (!isResearchPipelineV2Enabled()) return null;
   const last = [...input.messages].reverse().find((m) => m.role === "user")?.content ?? "";
   if (!last.trim()) return null;
-  if (shouldSkipLiveResearch(last) && !needsWebResearch(last)) return null;
+  // 與 Planner 同一剝離規則；intent=skip 時不進 pipeline（省 Flash）
+  const early = planResearch({ text: last, now: input.now, timeZone: input.timeZone });
+  if (!early.requireLive || early.intent === "skip") return null;
+  // 雙保險：剝離後仍無聯網意圖
+  const instruction = extractUserInstructionText(last);
+  if (
+    instruction &&
+    !hasExplicitLiveDemand(instruction) &&
+    shouldSkipLiveResearch(instruction) &&
+    !needsWebResearch(instruction) &&
+    early.intent !== "news" &&
+    early.intent !== "factcheck"
+  ) {
+    return null;
+  }
 
   return runResearchPipelineV2({
     messages: input.messages,

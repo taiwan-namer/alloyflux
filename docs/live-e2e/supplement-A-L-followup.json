@@ -1,0 +1,947 @@
+{
+  "measuredAt": "2026-11-15T17:22:54.313Z",
+  "fixtureInventory": {
+    "totalInMetrics": 18,
+    "liveFetchOk": 11,
+    "fetchFailedPlaceholder": 3,
+    "synthetic": 4,
+    "reutersClarification": "reuters_tech_sample：曾對真實 URL 發 SSRF，但 http_401，磁碟上是失敗占位殼（130B），不是 Reuters 真實 HTML"
+  },
+  "whyBeforeDevF1Was1": {
+    "explanation": "舊標註把多數列表／入口標成 has_body，而 before（裸 strip）只要字元≥120 就算正文。dev 的「殼」幾乎都是 fetch 失敗短殼（before=false 正確），真正難的 CSS 殼 synthetic_css_shell 在 hold-out。因此 before 在「錯誤標註標準」下對 dev 看似完美。",
+    "conclusion": "before F1=1.0 不代表抽取正確，而是標註≈『有沒有足夠文字』"
+  },
+  "metricsOldLabels": {
+    "before": {
+      "all": {
+        "n": 18,
+        "tp": 13,
+        "fp": 1,
+        "tn": 4,
+        "fn": 0,
+        "precision": 0.9286,
+        "bodyRecognitionRecall": 1,
+        "shellFalseBodyRate": 0.2,
+        "f1": 0.963
+      }
+    },
+    "after": {
+      "all": {
+        "n": 18,
+        "tp": 7,
+        "fp": 0,
+        "tn": 5,
+        "fn": 6,
+        "precision": 1,
+        "bodyRecognitionRecall": 0.5385,
+        "shellFalseBodyRate": 0,
+        "f1": 0.7
+      }
+    }
+  },
+  "metricsCorrectedLabels": {
+    "before": {
+      "all": {
+        "n": 18,
+        "tp": 2,
+        "fp": 12,
+        "tn": 4,
+        "fn": 0,
+        "precision": 0.1429,
+        "bodyRecognitionRecall": 1,
+        "shellFalseBodyRate": 0.75,
+        "f1": 0.25
+      },
+      "holdOut": {
+        "n": 5,
+        "tp": 0,
+        "fp": 4,
+        "tn": 1,
+        "fn": 0,
+        "precision": 0,
+        "bodyRecognitionRecall": 1,
+        "shellFalseBodyRate": 0.8,
+        "f1": 0
+      },
+      "dev": {
+        "n": 13,
+        "tp": 2,
+        "fp": 8,
+        "tn": 3,
+        "fn": 0,
+        "precision": 0.2,
+        "bodyRecognitionRecall": 1,
+        "shellFalseBodyRate": 0.7273,
+        "f1": 0.3333
+      }
+    },
+    "after": {
+      "all": {
+        "n": 18,
+        "tp": 2,
+        "fp": 5,
+        "tn": 11,
+        "fn": 0,
+        "precision": 0.2857,
+        "bodyRecognitionRecall": 1,
+        "shellFalseBodyRate": 0.3125,
+        "f1": 0.4444
+      },
+      "holdOut": {
+        "n": 5,
+        "tp": 0,
+        "fp": 2,
+        "tn": 3,
+        "fn": 0,
+        "precision": 0,
+        "bodyRecognitionRecall": 1,
+        "shellFalseBodyRate": 0.4,
+        "f1": 0
+      },
+      "dev": {
+        "n": 13,
+        "tp": 2,
+        "fp": 3,
+        "tn": 8,
+        "fn": 0,
+        "precision": 0.4,
+        "bodyRecognitionRecall": 1,
+        "shellFalseBodyRate": 0.2727,
+        "f1": 0.5714
+      }
+    },
+    "note": "並列 bodyRecognitionRecall（正文辨識率）與 shellFalseBodyRate（殼頁誤標率）"
+  },
+  "perFixture": [
+    {
+      "id": "reuters_tech_sample",
+      "holdOut": true,
+      "origin": "fetch_failed_placeholder",
+      "pageKind": "shell",
+      "fetchStatus": "failed",
+      "redirectHops": 0,
+      "resolvedUrl": "https://www.reuters.com/technology/",
+      "originalUrl": "https://www.reuters.com/technology/",
+      "oldExpected": "shell",
+      "correctedExpected": "shell",
+      "labelFixReason": "真實 SSRF 嘗試 reuters.com/technology → http_401；寫入 130B 失敗殼，非真實頁面 HTML",
+      "beforeIsMainBody": false,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterPublishedAt": null,
+      "htmlSha256": "4693621e20a3e0e8b0dbbaef1f9c437c41f887d1f6ccc297edf20438b457371a",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "apnews_world",
+      "holdOut": false,
+      "origin": "fetch_failed_placeholder",
+      "pageKind": "shell",
+      "fetchStatus": "failed",
+      "redirectHops": 0,
+      "resolvedUrl": "https://apnews.com/hub/world-news",
+      "originalUrl": "https://apnews.com/hub/world-news",
+      "oldExpected": "shell",
+      "correctedExpected": "shell",
+      "labelFixReason": "真實嘗試 → http_403；失敗殼",
+      "beforeIsMainBody": false,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterPublishedAt": null,
+      "htmlSha256": "5a572b5dda38f01209c0580b4d01507d9b107006d7be01e3969563c0c949e285",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "guardian_world",
+      "holdOut": true,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 0,
+      "resolvedUrl": "https://www.theguardian.com/world",
+      "originalUrl": "https://www.theguardian.com/world",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "真實抓取 /world 列表頁，非單篇文章；舊標 has_body 錯誤（hold-out 僅改標註）",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterPublishedAt": null,
+      "htmlSha256": "b0ee779d42eee416670a82ede135baac5312ae692ab027c2839a6b722ce2d712",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "cnn_world",
+      "holdOut": false,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 0,
+      "resolvedUrl": "https://edition.cnn.com/world",
+      "originalUrl": "https://edition.cnn.com/world",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "真實抓取世界新聞列表／入口，非單篇",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterPublishedAt": null,
+      "htmlSha256": "b2e128355715302f30ca3442e496b005a3c4485c0dc05d225750cbc8e0a66a35",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "cnbc_markets",
+      "holdOut": false,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 0,
+      "resolvedUrl": "https://www.cnbc.com/markets/",
+      "originalUrl": "https://www.cnbc.com/markets/",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "真實抓取 markets 入口，非單篇",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterPublishedAt": null,
+      "htmlSha256": "622f700ee5775b9fe7a2b749670052715f62338f7cee4d423c954bba5f4f93c0",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "marketwatch_home",
+      "holdOut": false,
+      "origin": "fetch_failed_placeholder",
+      "pageKind": "shell",
+      "fetchStatus": "failed",
+      "redirectHops": 0,
+      "resolvedUrl": "https://www.marketwatch.com/",
+      "originalUrl": "https://www.marketwatch.com/",
+      "oldExpected": "shell",
+      "correctedExpected": "shell",
+      "labelFixReason": "真實嘗試 → http_401；失敗殼",
+      "beforeIsMainBody": false,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterPublishedAt": null,
+      "htmlSha256": "4693621e20a3e0e8b0dbbaef1f9c437c41f887d1f6ccc297edf20438b457371a",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "cna_taiwan",
+      "holdOut": true,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 0,
+      "resolvedUrl": "https://www.cna.com.tw/",
+      "originalUrl": "https://www.cna.com.tw/",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "中央社首頁為列表／導覽聚合，非單篇正文",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterPublishedAt": null,
+      "htmlSha256": "62606b549be522cba849d6687e74460e42fa37683f7003f174d6e2f3403d689b",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "udn_money",
+      "holdOut": false,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 0,
+      "resolvedUrl": "https://money.udn.com/money/index",
+      "originalUrl": "https://money.udn.com/money/index",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "經濟日報金錢頻道首頁／列表",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "not_usable_main_body",
+      "afterPublishedAt": "2026-11-15T15:19:00.000Z",
+      "htmlSha256": "224dfec858d3ae67c93bc50e8bcb4dd3180e10e78db682abde2f988278459b0a",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "ltn_news",
+      "holdOut": false,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 0,
+      "resolvedUrl": "https://news.ltn.com.tw/",
+      "originalUrl": "https://news.ltn.com.tw/",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "自由時報新聞首頁／列表",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterPublishedAt": null,
+      "htmlSha256": "457a3946d8d103c510d855804b251a1c398d77fe737e3a78dbe59d150b2f28f9",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "microsoft_newsroom",
+      "holdOut": false,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 1,
+      "resolvedUrl": "https://news.microsoft.com/source/",
+      "originalUrl": "https://news.microsoft.com/",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "Newsroom hub（redirect→/source/），非單篇",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "not_usable_main_body",
+      "afterPublishedAt": "2021-08-04T01:28:19.000Z",
+      "htmlSha256": "0c8d15cc8c6492e199079fe8bd2e1245c2a4c384eff0cd3ec44645d3d802426c",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "apple_newsroom",
+      "holdOut": false,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 0,
+      "resolvedUrl": "https://www.apple.com/newsroom/",
+      "originalUrl": "https://www.apple.com/newsroom/",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "Apple Newsroom 列表 hub",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "not_usable_main_body",
+      "afterPublishedAt": null,
+      "htmlSha256": "50d59a915e122c5ac6bf76f22077becb6f42a1620b430c7db1c203bca7ae1ae8",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "sec_edgar_search",
+      "holdOut": false,
+      "origin": "live_fetch",
+      "pageKind": "sec_search",
+      "fetchStatus": "ok",
+      "redirectHops": 0,
+      "resolvedUrl": "https://www.sec.gov/edgar/search/",
+      "originalUrl": "https://www.sec.gov/edgar/search/",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "EDGAR 搜尋 UI，非單份 filing 正文",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterPublishedAt": null,
+      "htmlSha256": "42f619ee8d99ffcd3e8ce09d8eddcab60f20bf3264017d9ec6448354df669635",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "whitehouse_briefing",
+      "holdOut": true,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 1,
+      "resolvedUrl": "https://www.whitehouse.gov/news/",
+      "originalUrl": "https://www.whitehouse.gov/briefing-room/",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "briefing-room → /news/ 列表（redirectHops=1），非單篇",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterPublishedAt": "2026-11-13T13:10:00.000Z",
+      "htmlSha256": "4c217e6426e1dba06386207f3982c57fbf6eccef42a7ee20f93462135b5df804",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "synthetic_css_shell",
+      "holdOut": true,
+      "origin": "synthetic",
+      "pageKind": "shell",
+      "fetchStatus": "synthetic",
+      "redirectHops": 0,
+      "resolvedUrl": "https://example.com/synthetic-css-shell",
+      "originalUrl": "https://example.com/synthetic-css-shell",
+      "oldExpected": "shell",
+      "correctedExpected": "shell",
+      "labelFixReason": "合成 CSS／Skip-to 殼",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterPublishedAt": null,
+      "htmlSha256": "3c598fd93c8d53b36a43367e3e9ec9b22d496e331ba47fcfa642f5065d538138",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "synthetic_grounding_redirect",
+      "holdOut": false,
+      "origin": "synthetic",
+      "pageKind": "redirect_interstitial",
+      "fetchStatus": "synthetic",
+      "redirectHops": 0,
+      "resolvedUrl": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/synthetic-fixture",
+      "originalUrl": "https://vertexaisearch.cloud.google.com/grounding-api-redirect/synthetic-fixture",
+      "oldExpected": "shell",
+      "correctedExpected": "shell",
+      "labelFixReason": "合成 grounding redirect 中間頁",
+      "beforeIsMainBody": false,
+      "afterIsMainBody": false,
+      "afterDegradeReason": "template_or_css_pollution",
+      "afterPublishedAt": null,
+      "htmlSha256": "46ed3933f2a9f5e1049f1eb4537361e2ece580652d633e6472bc73a66d465147",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "nvidia_newsroom_hub",
+      "holdOut": false,
+      "origin": "live_fetch",
+      "pageKind": "list_hub",
+      "fetchStatus": "ok",
+      "redirectHops": 0,
+      "resolvedUrl": "https://nvidianews.nvidia.com/",
+      "originalUrl": "https://nvidianews.nvidia.com/",
+      "oldExpected": "has_body",
+      "correctedExpected": "shell",
+      "labelFixReason": "NVIDIA newsroom hub／列表",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterPublishedAt": null,
+      "htmlSha256": "5e0680b1b2a041776ec9f5c11d081c4898cf4000cee6f531dea3fb24920db8bc",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "synthetic_good_article_en",
+      "holdOut": false,
+      "origin": "synthetic",
+      "pageKind": "single_article",
+      "fetchStatus": "synthetic",
+      "redirectHops": 0,
+      "resolvedUrl": null,
+      "originalUrl": null,
+      "oldExpected": "has_body",
+      "correctedExpected": "has_body",
+      "labelFixReason": "合成單篇英文 article",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterPublishedAt": "2026-11-14T08:00:00.000Z",
+      "htmlSha256": "f754fc1deb0db309843861ed6e9b21847c5c00d379dc1890aba1e7c323d69b08",
+      "hashMatchesManifest": true
+    },
+    {
+      "id": "synthetic_good_article_zh",
+      "holdOut": false,
+      "origin": "synthetic",
+      "pageKind": "single_article",
+      "fetchStatus": "synthetic",
+      "redirectHops": 0,
+      "resolvedUrl": null,
+      "originalUrl": null,
+      "oldExpected": "has_body",
+      "correctedExpected": "has_body",
+      "labelFixReason": "合成單篇中文 article",
+      "beforeIsMainBody": true,
+      "afterIsMainBody": true,
+      "afterDegradeReason": null,
+      "afterPublishedAt": "2026-11-14T23:30:00.000Z",
+      "htmlSha256": "05a61c47103aca2cde09b8dd930295586ae588c83540050a78ff4eef2679b387",
+      "hashMatchesManifest": true
+    }
+  ],
+  "injectionDiffs": [
+    {
+      "id": "cna_taiwan",
+      "pageKind": "list_hub",
+      "beforeExcerpt": "中央社 CNA 立刻加入 本網站使用相關技術提供更好的閱讀體驗，同時尊重使用者隱私，點這裡瞭解 中央社隱私聲明 。 當您關閉此視窗，代表您同意上述規範。 Your browser does not appear to support Traditional Chinese. Would you like to go to CNA’s English website, “Focus Taiwan” ? こちらのページは繁体字版です。日本語版 「フォーカス台湾」 に移動しますか。 Focus Taiwan フォーカス台湾 Fokus Taiwan Enfoq",
+      "afterExcerpt": "本網站使用相關技術提供更好的閱讀體驗，同時尊重使用者隱私，點這裡瞭解 中央社隱私聲明 。 當您關閉此視窗，代表您同意上述規範。\nYour browser does not appear to support Traditional Chinese. Would you like to go to CNA’s English website, “Focus Taiwan” ?\nこちらのページは繁体字版です。日本語版 「フォーカス台湾」 に移動しますか。\nFocus Taiwan フォーカス台湾\n九合一 王美惠造勢晚會　蕭副總統：嘉義縣市合作帶動產業發展\n大",
+      "beforeWouldInjectAsBody": true,
+      "afterWouldInjectAsBody": true
+    },
+    {
+      "id": "synthetic_css_shell",
+      "pageKind": "shell",
+      "beforeExcerpt": "CNN Style Shell @font-face { font-family: X; src: url(a); } body { margin:0; } a { color:#00f; } @font-face { font-family: X; src: url(a); } body { margin:0; } a { color:#00f; } @font-face { font-family: X; src: url(a); } body { margin:0; } a { color:#00f; } @font-face { font-fam",
+      "afterExcerpt": "(降級：template_or_css_pollution)",
+      "beforeWouldInjectAsBody": true,
+      "afterWouldInjectAsBody": false
+    },
+    {
+      "id": "synthetic_good_article_zh",
+      "pageKind": "single_article",
+      "beforeExcerpt": "台股收盤整理：科技股領漲 訂閱 · 下載 App · 熱門新聞 台股收盤整理：科技股領漲 今日台股收盤上漲，科技權值股帶動指數走高。分析師指出，投資人關注美國利率預期與亞洲供應鏈庫存數據，短線波動可能加大。 證券商報告指出，成交量較前一交易日增加，外資買賣超呈現分歧，法人建議留意財報季後的評價修正。 市場人士表示，若隔夜美股震盪擴大，明日開盤可能出現高開低走或區間震盪的情形。",
+      "afterExcerpt": "今日台股收盤上漲，科技權值股帶動指數走高。分析師指出，投資人關注美國利率預期與亞洲供應鏈庫存數據，短線波動可能加大。\n證券商報告指出，成交量較前一交易日增加，外資買賣超呈現分歧，法人建議留意財報季後的評價修正。\n市場人士表示，若隔夜美股震盪擴大，明日開盤可能出現高開低走或區間震盪的情形。",
+      "beforeWouldInjectAsBody": true,
+      "afterWouldInjectAsBody": true
+    }
+  ],
+  "publishedAt": {
+    "fixtureExtractRate": 0.2778,
+    "fixtureWithDate": 5,
+    "fixtureTotal": 18,
+    "liveSnapshot": "未存 per-source publishedAt；對照 phase4 round1 報告先前 Live 常為 0/N 級別。本輪僅能從 warnings 見 some_events_body_missing_date。"
+  },
+  "redirect": {
+    "itemsWithRedirectHops": [
+      {
+        "id": "microsoft_newsroom",
+        "hops": 1,
+        "from": "https://news.microsoft.com/",
+        "to": "https://news.microsoft.com/source/"
+      },
+      {
+        "id": "whitehouse_briefing",
+        "hops": 1,
+        "from": "https://www.whitehouse.gov/briefing-room/",
+        "to": "https://www.whitehouse.gov/news/"
+      }
+    ],
+    "publisherHostChangedCount": 2,
+    "amongRedirected": 2,
+    "rateAmongAllFetched": 0.125,
+    "codeStatus": "完成：safeFetchText 記錄 redirectHops＋resolvedUrl；grounding redirect 中間頁仍常無法升格正文"
+  },
+  "canonicalDedup": {
+    "codeStatus": "完成：collector 以 cleanSourceUrl 正規化＋seenUri；同 canonical 不重複建 source",
+    "offlineDemo": {
+      "rawSources": 3,
+      "dedupedSources": 2,
+      "rawSourceCount": 3
+    },
+    "liveSnapshot": "快照未記 dedup 前後數；無法從 quality-live-report 還原"
+  },
+  "topic": {
+    "codeStatus": "完成：guessTopic 先匹配 CEO/執行長/resign → corporate，再匹配外交",
+    "offlineTest": {
+      "title": "NVIDIA CEO Jensen Huang resigns amid board review",
+      "topic": "corporate",
+      "expect": "corporate",
+      "pass": true
+    }
+  },
+  "liveOffline": {
+    "flashSupportsAmong6Live": {
+      "linesMatched": 7,
+      "withSupportsGt0": 7,
+      "supportCounts": [
+        5,
+        10,
+        8,
+        5,
+        10,
+        5,
+        4
+      ],
+      "note": "jsonl 另含 1 筆探測；Live 6 題皆有 supportCount>0"
+    },
+    "perQuestion": [
+      {
+        "qi": 0,
+        "text": "川普最新消息有哪些？請附來源與日期。",
+        "gate": "partial",
+        "sourceCount": 10,
+        "warningsKey": [
+          "some_events_body_missing_date",
+          "truncated_events:2"
+        ],
+        "truncatedEventsHint": "truncated_events:2",
+        "bodyMissingDateWarning": true,
+        "titleOnlyWarningInGate": false,
+        "snapshotLacksProvenanceBreakdown": true,
+        "articleBodyCount": null,
+        "publishedAtCount": null,
+        "note": "quality-live-report 未存 corpus.sources[].provenance／publishedAt；無法直接計 article_body／日期數",
+        "answers": [
+          {
+            "qi": 0,
+            "slot": "astra",
+            "completionStatus": "truncated",
+            "gate": "partial",
+            "groundingCount": 10,
+            "hedgeHits": 1,
+            "hedgeSamples": [
+              "不代表完整"
+            ],
+            "entityDates": 2,
+            "entityNums": 0,
+            "entityNames": 6,
+            "entityTotal": 8,
+            "previewChars": 360
+          },
+          {
+            "qi": 0,
+            "slot": "claude",
+            "completionStatus": "truncated",
+            "gate": "partial",
+            "groundingCount": 10,
+            "hedgeHits": 3,
+            "hedgeSamples": [
+              "部分完成",
+              "只有標題",
+              "細節請"
+            ],
+            "entityDates": 2,
+            "entityNums": 0,
+            "entityNames": 7,
+            "entityTotal": 9,
+            "previewChars": 360
+          },
+          {
+            "qi": 0,
+            "slot": "argon",
+            "completionStatus": "truncated",
+            "gate": "partial",
+            "groundingCount": 18,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 3,
+            "entityNums": 0,
+            "entityNames": 6,
+            "entityTotal": 9,
+            "previewChars": 360
+          }
+        ],
+        "hedgeTotal": 4,
+        "entityTotal": 26
+      },
+      {
+        "qi": 1,
+        "text": "明天股市預測重點是什麼？請標註不確定性。",
+        "gate": "ok",
+        "sourceCount": 12,
+        "warningsKey": [
+          "unconfirmed_claims_present",
+          "truncated_events:5",
+          "ok_does_not_guarantee_truth"
+        ],
+        "truncatedEventsHint": "truncated_events:5",
+        "bodyMissingDateWarning": false,
+        "titleOnlyWarningInGate": false,
+        "snapshotLacksProvenanceBreakdown": true,
+        "articleBodyCount": null,
+        "publishedAtCount": null,
+        "note": "quality-live-report 未存 corpus.sources[].provenance／publishedAt；無法直接計 article_body／日期數",
+        "answers": [
+          {
+            "qi": 1,
+            "slot": "astra",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 13,
+            "hedgeHits": 3,
+            "hedgeSamples": [
+              "不足以",
+              "不確定"
+            ],
+            "entityDates": 0,
+            "entityNums": 0,
+            "entityNames": 0,
+            "entityTotal": 0,
+            "previewChars": 360
+          },
+          {
+            "qi": 1,
+            "slot": "claude",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 13,
+            "hedgeHits": 3,
+            "hedgeSamples": [
+              "無法支",
+              "不確定"
+            ],
+            "entityDates": 1,
+            "entityNums": 1,
+            "entityNames": 2,
+            "entityTotal": 4,
+            "previewChars": 360
+          },
+          {
+            "qi": 1,
+            "slot": "argon",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 25,
+            "hedgeHits": 1,
+            "hedgeSamples": [
+              "不確定"
+            ],
+            "entityDates": 1,
+            "entityNums": 8,
+            "entityNames": 4,
+            "entityTotal": 13,
+            "previewChars": 360
+          }
+        ],
+        "hedgeTotal": 7,
+        "entityTotal": 17
+      },
+      {
+        "qi": 2,
+        "text": "NVIDIA 過去 7 天新聞重點，附日期與網址。",
+        "gate": "partial",
+        "sourceCount": 12,
+        "warningsKey": [
+          "some_events_body_missing_date",
+          "unconfirmed_claims_present",
+          "truncated_events:4"
+        ],
+        "truncatedEventsHint": "truncated_events:4",
+        "bodyMissingDateWarning": true,
+        "titleOnlyWarningInGate": false,
+        "snapshotLacksProvenanceBreakdown": true,
+        "articleBodyCount": null,
+        "publishedAtCount": null,
+        "note": "quality-live-report 未存 corpus.sources[].provenance／publishedAt；無法直接計 article_body／日期數",
+        "answers": [
+          {
+            "qi": 2,
+            "slot": "astra",
+            "completionStatus": "truncated",
+            "gate": "partial",
+            "groundingCount": 12,
+            "hedgeHits": 1,
+            "hedgeSamples": [
+              "尚待確認"
+            ],
+            "entityDates": 1,
+            "entityNums": 0,
+            "entityNames": 5,
+            "entityTotal": 6,
+            "previewChars": 360
+          },
+          {
+            "qi": 2,
+            "slot": "claude",
+            "completionStatus": "truncated",
+            "gate": "partial",
+            "groundingCount": 12,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 0,
+            "entityNums": 0,
+            "entityNames": 6,
+            "entityTotal": 6,
+            "previewChars": 360
+          },
+          {
+            "qi": 2,
+            "slot": "argon",
+            "completionStatus": "truncated",
+            "gate": "partial",
+            "groundingCount": 19,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 7,
+            "entityNums": 1,
+            "entityNames": 7,
+            "entityTotal": 15,
+            "previewChars": 360
+          }
+        ],
+        "hedgeTotal": 1,
+        "entityTotal": 27
+      },
+      {
+        "qi": 3,
+        "text": "台灣最近科技新聞有哪些？",
+        "gate": "ok",
+        "sourceCount": 10,
+        "warningsKey": [
+          "truncated_events:2",
+          "ok_does_not_guarantee_truth"
+        ],
+        "truncatedEventsHint": "truncated_events:2",
+        "bodyMissingDateWarning": false,
+        "titleOnlyWarningInGate": false,
+        "snapshotLacksProvenanceBreakdown": true,
+        "articleBodyCount": null,
+        "publishedAtCount": null,
+        "note": "quality-live-report 未存 corpus.sources[].provenance／publishedAt；無法直接計 article_body／日期數",
+        "answers": [
+          {
+            "qi": 3,
+            "slot": "astra",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 10,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 0,
+            "entityNums": 0,
+            "entityNames": 1,
+            "entityTotal": 1,
+            "previewChars": 360
+          },
+          {
+            "qi": 3,
+            "slot": "claude",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 10,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 1,
+            "entityNums": 0,
+            "entityNames": 0,
+            "entityTotal": 1,
+            "previewChars": 360
+          },
+          {
+            "qi": 3,
+            "slot": "argon",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 18,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 0,
+            "entityNums": 2,
+            "entityNames": 5,
+            "entityTotal": 7,
+            "previewChars": 360
+          }
+        ],
+        "hedgeTotal": 0,
+        "entityTotal": 9
+      },
+      {
+        "qi": 4,
+        "text": "今天台積電有什麼消息？",
+        "gate": "ok",
+        "sourceCount": 11,
+        "warningsKey": [
+          "unconfirmed_claims_present",
+          "truncated_events:3",
+          "ok_does_not_guarantee_truth"
+        ],
+        "truncatedEventsHint": "truncated_events:3",
+        "bodyMissingDateWarning": false,
+        "titleOnlyWarningInGate": false,
+        "snapshotLacksProvenanceBreakdown": true,
+        "articleBodyCount": null,
+        "publishedAtCount": null,
+        "note": "quality-live-report 未存 corpus.sources[].provenance／publishedAt；無法直接計 article_body／日期數",
+        "answers": [
+          {
+            "qi": 4,
+            "slot": "astra",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 11,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 1,
+            "entityNums": 2,
+            "entityNames": 1,
+            "entityTotal": 4,
+            "previewChars": 360
+          },
+          {
+            "qi": 4,
+            "slot": "claude",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 11,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 2,
+            "entityNums": 3,
+            "entityNames": 1,
+            "entityTotal": 6,
+            "previewChars": 360
+          },
+          {
+            "qi": 4,
+            "slot": "argon",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 17,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 1,
+            "entityNums": 3,
+            "entityNames": 3,
+            "entityTotal": 7,
+            "previewChars": 360
+          }
+        ],
+        "hedgeTotal": 0,
+        "entityTotal": 17
+      },
+      {
+        "qi": 5,
+        "text": "英國政局或大選最新進展？",
+        "gate": "ok",
+        "sourceCount": 7,
+        "warningsKey": [
+          "unconfirmed_claims_present",
+          "ok_does_not_guarantee_truth"
+        ],
+        "truncatedEventsHint": null,
+        "bodyMissingDateWarning": false,
+        "titleOnlyWarningInGate": false,
+        "snapshotLacksProvenanceBreakdown": true,
+        "articleBodyCount": null,
+        "publishedAtCount": null,
+        "note": "quality-live-report 未存 corpus.sources[].provenance／publishedAt；無法直接計 article_body／日期數",
+        "answers": [
+          {
+            "qi": 5,
+            "slot": "astra",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 7,
+            "hedgeHits": 1,
+            "hedgeSamples": [
+              "不足以"
+            ],
+            "entityDates": 3,
+            "entityNums": 0,
+            "entityNames": 1,
+            "entityTotal": 4,
+            "previewChars": 360
+          },
+          {
+            "qi": 5,
+            "slot": "claude",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 7,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 1,
+            "entityNums": 0,
+            "entityNames": 1,
+            "entityTotal": 2,
+            "previewChars": 360
+          },
+          {
+            "qi": 5,
+            "slot": "argon",
+            "completionStatus": "complete",
+            "gate": "ok",
+            "groundingCount": 16,
+            "hedgeHits": 0,
+            "hedgeSamples": [],
+            "entityDates": 1,
+            "entityNums": 1,
+            "entityNames": 2,
+            "entityTotal": 4,
+            "previewChars": 360
+          }
+        ],
+        "hedgeTotal": 1,
+        "entityTotal": 10
+      }
+    ],
+    "limitation": "無法計算 article_body 數／publishedAt 數／實體對應 injection 比例——快照未存 injection 全文與 provenance。下列 hedge／實體僅來自 contentPreview（截斷）。"
+  }
+}

@@ -1,0 +1,202 @@
+{
+  "measuredAt": "2026-11-15T18:26:58.642Z",
+  "allInvariant": true,
+  "results": [
+    {
+      "qi": 0,
+      "text": "川普最新消息有哪些？請附來源與日期。",
+      "frozenLiveGate": "ok",
+      "frozenSynthClaims": 3,
+      "rawSupportCount": 10,
+      "rebuiltSynthClaims": 6,
+      "truncatedSynthLikeExcluded": 0,
+      "truncatedEvents": 2,
+      "excludedSample": [
+        {
+          "eventId": "evt_9a5e131e",
+          "title": "pbs.org",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_ce016d40",
+          "title": "clickondetroit.com",
+          "reason": "max_events_cap"
+        }
+      ],
+      "gateWithSynth": "ok",
+      "gateWithoutSynth": "ok",
+      "completionWith": "complete",
+      "completionWithout": "complete",
+      "invariant": true,
+      "conflictLimitations": [
+        "synthesis_conflict_article_body_wins:evt_f75d77f2"
+      ]
+    },
+    {
+      "qi": 1,
+      "text": "明天股市預測重點是什麼？請標註不確定性。",
+      "frozenLiveGate": "ok",
+      "frozenSynthClaims": 4,
+      "rawSupportCount": 8,
+      "rebuiltSynthClaims": 6,
+      "truncatedSynthLikeExcluded": 0,
+      "truncatedEvents": 5,
+      "excludedSample": [
+        {
+          "eventId": "evt_9e3ded30",
+          "title": "anuefund.com",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_d6e3432",
+          "title": "federalreserve.gov",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_6fd18780",
+          "title": "pressplay.cc",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_2d4fd93",
+          "title": "successionwealth.co.uk",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_d1fa1d27",
+          "title": "forbes.com",
+          "reason": "max_events_cap"
+        }
+      ],
+      "gateWithSynth": "partial",
+      "gateWithoutSynth": "partial",
+      "completionWith": "truncated",
+      "completionWithout": "truncated",
+      "invariant": true,
+      "conflictLimitations": []
+    },
+    {
+      "qi": 2,
+      "text": "NVIDIA 過去 7 天新聞重點，附日期與網址。",
+      "frozenLiveGate": "ok",
+      "frozenSynthClaims": 2,
+      "rawSupportCount": 5,
+      "rebuiltSynthClaims": 4,
+      "truncatedSynthLikeExcluded": 0,
+      "truncatedEvents": 2,
+      "excludedSample": [
+        {
+          "eventId": "evt_f93ecadd",
+          "title": "aa.com.tr",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_85e7c1c",
+          "title": "mingpao.com",
+          "reason": "max_events_cap"
+        }
+      ],
+      "gateWithSynth": "ok",
+      "gateWithoutSynth": "ok",
+      "completionWith": "complete",
+      "completionWithout": "complete",
+      "invariant": true,
+      "conflictLimitations": [
+        "synthesis_conflict_article_body_wins:evt_78c5f7b7"
+      ]
+    },
+    {
+      "qi": 3,
+      "text": "台灣最近科技新聞有哪些？",
+      "frozenLiveGate": "partial",
+      "frozenSynthClaims": 0,
+      "rawSupportCount": 5,
+      "rebuiltSynthClaims": 4,
+      "truncatedSynthLikeExcluded": 0,
+      "truncatedEvents": 2,
+      "excludedSample": [
+        {
+          "eventId": "evt_8025df80",
+          "title": "內容：行政院長卓榮泰於 2026 年 11 月 12 日出席「115資訊月暨臺灣教育科技展開幕典禮」，強調政府將以國家戰略高度在未來 4 年內投入逾 1,300",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_5705dc8d",
+          "title": "ey.gov.tw",
+          "reason": "max_events_cap"
+        }
+      ],
+      "gateWithSynth": "partial",
+      "gateWithoutSynth": "partial",
+      "completionWith": "truncated",
+      "completionWithout": "truncated",
+      "invariant": true,
+      "conflictLimitations": []
+    },
+    {
+      "qi": 4,
+      "text": "今天台積電有什麼消息？",
+      "frozenLiveGate": "ok",
+      "frozenSynthClaims": 1,
+      "rawSupportCount": 5,
+      "rebuiltSynthClaims": 3,
+      "truncatedSynthLikeExcluded": 0,
+      "truncatedEvents": 0,
+      "excludedSample": [],
+      "gateWithSynth": "partial",
+      "gateWithoutSynth": "partial",
+      "completionWith": "truncated",
+      "completionWithout": "truncated",
+      "invariant": true,
+      "conflictLimitations": [
+        "synthesis_conflict_article_body_wins:evt_1de73544",
+        "synthesis_conflict_article_body_wins:evt_9e9c0131",
+        "synthesis_conflict_article_body_wins:evt_9e9c0131"
+      ]
+    },
+    {
+      "qi": 5,
+      "text": "英國政局或大選最新進展？",
+      "frozenLiveGate": "ok",
+      "frozenSynthClaims": 2,
+      "rawSupportCount": 6,
+      "rebuiltSynthClaims": 4,
+      "truncatedSynthLikeExcluded": 0,
+      "truncatedEvents": 4,
+      "excludedSample": [
+        {
+          "eventId": "evt_b628bf7",
+          "title": "首相安迪·伯恩漢出席在都柏林舉行的歐洲政治共同體（EPC）峰會，期間與義大利總理喬治婭·梅洛尼會晤，雙方就國防安全、打擊非法移民及烏克蘭局勢進行討論，並提及英國",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_3dd9d752",
+          "title": "伯恩漢隨後出席 COP31 氣候峰會，強調英國對 2050 年淨零碳排目標的承諾，並聚焦能源安全與電氣化轉型",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_679aad0a",
+          "title": "hansardsociety.org.uk",
+          "reason": "max_events_cap"
+        },
+        {
+          "eventId": "evt_e4b9defe",
+          "title": "parliament.uk",
+          "reason": "max_events_cap"
+        }
+      ],
+      "gateWithSynth": "ok",
+      "gateWithoutSynth": "ok",
+      "completionWith": "complete",
+      "completionWithout": "complete",
+      "invariant": true,
+      "conflictLimitations": []
+    }
+  ],
+  "q3Note": {
+    "rawSupportCount": 5,
+    "rebuiltSynthClaims": 4,
+    "frozenSynthClaims": 0,
+    "explanation": "Flash 有回傳 groundingSupports；synthesis 事件被建立但在 rankEventsWithDiversity（maxEvents／主題多樣性）後被截斷，未進入最終 injection。非過濾、非 Flash 未回傳。"
+  }
+}

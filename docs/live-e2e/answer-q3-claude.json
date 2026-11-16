@@ -1,0 +1,16 @@
+{
+  "qi": 3,
+  "slot": "claude",
+  "modelId": "agy-claude-opus-5-5-medium",
+  "ms": 300,
+  "completionStatus": "unknown",
+  "contentChars": 0,
+  "content": "",
+  "contentPreview": "",
+  "groundingCount": 0,
+  "gate": "partial",
+  "injectionFingerprint": "a7b4ab3e6cca5bdd",
+  "hedgeHits": 0,
+  "uiLabel": "unknown",
+  "error": "此訂閱帳號的「Claude Opus 5.5 · Medium」暫時受限（速率／短時鎖定），訂閱剩餘 % 仍可能很高。請稍後再試或換模型。"
+}

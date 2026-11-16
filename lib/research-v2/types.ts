@@ -11,6 +11,7 @@ export type EvidenceProvenance =
   | "official_document"
   | "structured_metadata"
   | "search_snippet"
+  | "search_synthesis"
   | "title_only"
   | "unknown";
 
@@ -52,6 +53,9 @@ export interface ResearchSource {
   fetchStatus: FetchStatus;
   /** 此來源摘錄的證據載體 */
   provenance: EvidenceProvenance;
+  /** 抓到的 HTML 快照相對檔名 */
+  htmlPath?: string;
+  htmlSha256?: string;
 }
 
 export interface ResearchClaim {
@@ -204,9 +208,16 @@ export interface RawSearchHit {
     originalUrl?: string;
     resolvedUrl?: string;
     fetchStatus?: FetchStatus;
+    htmlPath?: string;
+    htmlSha256?: string;
   }[];
   provider: string;
   limitations?: string[];
+  /**
+   * Flash Grounding 原始 groundingSupports。
+   * search_synthesis 由此產生，不得升格 article_body。
+   */
+  rawGroundingSupports?: unknown[];
 }
 
 /** 驗收鎖定的三模型產品路由 */

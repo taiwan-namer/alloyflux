@@ -1,7 +1,24 @@
 import { shouldSkipLiveResearch, needsWebResearch } from "../web-research";
+import {
+  didStripRemovePastedContent,
+  extractUserInstructionText,
+  hasExplicitLiveDemand,
+  hasOptOutOfLiveResearch,
+  isMetaNewsSystemsTalk,
+  isSummarizeOrTranslateOnly,
+} from "./instruction-text";
 import { fingerprintQuery } from "./sanitize";
 import { charsBudgetForTokens, injectionMaxTokens } from "./token-budget";
 import type { ResearchIntent, ResearchPlan } from "./types";
+
+export {
+  didStripRemovePastedContent,
+  extractUserInstructionText,
+  hasExplicitLiveDemand,
+  hasOptOutOfLiveResearch,
+  isMetaNewsSystemsTalk,
+  isSummarizeOrTranslateOnly,
+} from "./instruction-text";
 
 const DEFAULT_TZ = "Asia/Taipei";
 /** 規劃查詢數上限（提示用）；live 預設仍只打 1 次 Flash grounding */
@@ -63,15 +80,59 @@ function parseUserDate(text: string, now: Date, timeZone: string): string | unde
   return `${year}-${pad2(month)}-${pad2(day)}`;
 }
 
-function detectIntent(text: string): ResearchIntent {
-  const t = text.trim();
-  if (!t) return "skip";
-  if (shouldSkipLiveResearch(t) && !needsWebResearch(t)) return "skip";
-  if (FACTCHECK_RE.test(t)) return "factcheck";
-  if (NEWSY_RE.test(t) || needsWebResearch(t)) return "news";
-  if (needsWebResearch(t)) return "general";
-  // shouldSkip 已處理寒暄；其餘預設略過（規則式，不加 LLM）
-  if (shouldSkipLiveResearch(t)) return "skip";
+/**
+ * 意圖判斷：先剝離貼上內容，只對使用者指令跑 NEWSY／needsWebResearch。
+ * 明確即時需求優先；貼文＋僅整理／翻譯 → skip。
+ */
+export function detectIntent(text: string): ResearchIntent {
+  const raw = text.trim();
+  if (!raw) return "skip";
+
+  const instruction = extractUserInstructionText(raw);
+  if (!instruction) return "skip";
+
+  const stripRemovedPaste = didStripRemovePastedContent(raw, instruction);
+
+  // 明確即時需求 → 即使同時貼了文件也要 news／factcheck
+  if (hasExplicitLiveDemand(instruction)) {
+    if (FACTCHECK_RE.test(instruction)) return "factcheck";
+    return "news";
+  }
+
+  // 只貼 markdown 報告／文件、無指令
+  if (
+    /^#\s+/.test(raw) &&
+    !/^(請|请)/m.test(instruction) &&
+    (raw.match(/^#{1,3}\s/gm) || []).length >= 2
+  ) {
+    return "skip";
+  }
+
+  // 「這則新聞來源是哪裡」類：索取來源歸屬，屬查證意圖
+  if (/這則新聞來源|新聞來源是哪|來源是哪裡|where\s+(did|does)\s+.+come\s+from/i.test(instruction)) {
+    return "news";
+  }
+
+  // 貼長文後只要求整理／翻譯
+  if (isSummarizeOrTranslateOnly(instruction)) return "skip";
+
+  // 討論新聞系統本身——僅在剝離確實移除貼上時
+  if (isMetaNewsSystemsTalk(instruction, { stripRemovedPaste })) return "skip";
+
+  // 明確不要查時事／不要上網 → 不走 NEWSY
+  if (hasOptOutOfLiveResearch(instruction)) return "skip";
+
+  if (shouldSkipLiveResearch(instruction) && !needsWebResearch(instruction)) return "skip";
+  if (FACTCHECK_RE.test(instruction)) return "factcheck";
+  if (NEWSY_RE.test(instruction) || needsWebResearch(instruction)) return "news";
+  if (shouldSkipLiveResearch(instruction)) return "skip";
+  // 寒暄
+  if (/^(你好|嗨|哈囉|hello|hi|hey)[!！.。\s]*$/i.test(instruction)) return "skip";
+  // Cursor／交付指令、詢問對錯（非索取時事）
+  if (/禁止部署|完成後交付|照建議預設|你覺得這個判斷|這樣對嗎|對嗎[？?]?$/i.test(instruction)) {
+    return "skip";
+  }
+  // 其餘有內容但非即時新聞（例：英超 fixture）→ general，避免被 meta 誤 skip
   return "general";
 }
 
@@ -127,12 +188,18 @@ export function planResearch(input: PlannerInput): ResearchPlan {
   const now = input.now ?? new Date();
   const timeZone = input.timeZone?.trim() || process.env.RESEARCH_TZ?.trim() || DEFAULT_TZ;
   const text = input.text.trim();
+  const instruction = extractUserInstructionText(text);
   const intent = detectIntent(text);
-  const requireLive = intent !== "skip" && (needsWebResearch(text) || intent === "news" || intent === "factcheck" || intent === "general");
+  // 時間窗／查詢組裝以指令文字為準，避免把貼上長文塞進 query
+  const intentBasis = instruction || text;
+  const requireLive =
+    intent === "news" ||
+    intent === "factcheck" ||
+    (intent !== "skip" && hasExplicitLiveDemand(intentBasis));
 
-  if (intent === "skip" || !requireLive) {
+  if (intent === "skip" || intent === "general" || !requireLive) {
     return {
-      intent: "skip",
+      intent: intent === "general" ? "general" : "skip",
       requireLive: false,
       timeWindow: null,
       timeZone,
@@ -144,12 +211,17 @@ export function planResearch(input: PlannerInput): ResearchPlan {
         maxEvents: MAX_EVENTS,
         maxInjectionChars: charsBudgetForTokens(injectionMaxTokens()),
       },
-      skipReason: intent === "skip" ? "planner_skip_non_research" : "not_required",
+      skipReason:
+        intent === "skip"
+          ? "planner_skip_non_research"
+          : intent === "general"
+            ? "general_no_live"
+            : "not_required",
       rawUserQuery: text,
     };
   }
 
-  const userDateHint = parseUserDate(text, now, timeZone);
+  const userDateHint = parseUserDate(intentBasis, now, timeZone);
   const today = formatDateInTimeZone(now, timeZone);
 
   let timeWindow: ResearchPlan["timeWindow"] = null;
@@ -159,8 +231,8 @@ export function planResearch(input: PlannerInput): ResearchPlan {
       toIso: userDateHint,
       preferRecentHours: 24,
     };
-  } else if (NEWSY_RE.test(text) || /最新|今天|今日|近期|最近/.test(text)) {
-    // 「最新」預設 7 天窗，優先 24–72 小時
+  } else if (NEWSY_RE.test(intentBasis) || /最新|今天|今日|近期|最近/.test(intentBasis)) {
+    // 「最新」預設 7 天窗，優先 24–72 小時（錨點＝now，禁止錯用貼文內舊日期）
     timeWindow = {
       fromIso: addDaysIso(today, -7),
       toIso: today,
@@ -174,8 +246,14 @@ export function planResearch(input: PlannerInput): ResearchPlan {
     };
   }
 
-  const coverageHints = buildCoverageHints(text, intent);
-  const queries = buildQueries({ text, intent, timeWindow, userDateHint, coverageHints });
+  const coverageHints = buildCoverageHints(intentBasis, intent);
+  const queries = buildQueries({
+    text: intentBasis,
+    intent,
+    timeWindow,
+    userDateHint,
+    coverageHints,
+  });
 
   return {
     intent,

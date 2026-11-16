@@ -1,0 +1,16 @@
+{
+  "qi": 2,
+  "slot": "astra",
+  "modelId": "gpt-6-astra",
+  "ms": 18858,
+  "completionStatus": "complete",
+  "contentChars": 739,
+  "content": "**依目前提供的來源，過去 7 天可整理的 NVIDIA 重大消息集中在 CEO 人事異動；資料不足以列出完整的一週新聞清單。**以下以 **2026 年 11 月 10–16 日**為範圍，日期均指**來源發布日**，不代表事件發生日。\n\n| 發布日期 | 新聞重點 | 查證範圍與限制 | 網址 |\n|---|---|---|---|\n| **2026/11/13** | **NVIDIA 日本官方部落格發布 CEO 交接公告**，提供的內文片段載明 Jensen Huang（黃仁勳）辭任。 | 該文註明是美國時間 **11/12** 新聞稿的日文節譯。目前片段未完整呈現接任者、交接生效日及辭任原因，因此不補述這些細節。 | [NVIDIA Japan：CEO 交接公告](https://blogs.nvidia.co.jp/blog/nvidia-announces-ceo-transition) |\n\n### 其他報導：目前不宜當作已確認事實\n**11/13 的《衛報》來源項目**涉及黃仁勳的私人生活指控，但目前提供的正文片段僅介紹 NVIDIA 的企業規模，**不足以核實標題中的指控，也不足以證實它與人事異動有因果關係**，因此不將其列為已確認新聞重點。  \n來源：[The Guardian 報導](https://www.theguardian.com/technology/2026/nov/12/jensen-huang-affair-timeline)\n\n**閱讀重點：**目前最值得關注的是官方人事公告；至於接班安排、營運影響與股價反應，現有資料沒有足夠依據可供整理。這份清單是**有限來源摘要**，不表示這一週沒有其他產品、財報或合作消息。",
+  "contentPreview": "**依目前提供的來源，過去 7 天可整理的 NVIDIA 重大消息集中在 CEO 人事異動；資料不足以列出完整的一週新聞清單。**以下以 **2026 年 11 月 10–16 日**為範圍，日期均指**來源發布日**，不代表事件發生日。\n\n| 發布日期 | 新聞重點 | 查證範圍與限制 | 網址 |\n|---|---|---|---|\n| **2026/11/13** | **NVIDIA 日本官方部落格發布 CEO 交接公告**，提供的內文片段載明 Jensen Huang（黃仁勳）辭任。 | 該文註明是美國時間 **11/12** 新聞稿的日文節譯。目前片段未完整呈現接任者、交接生效日及辭任原因，因此不補述這些細節。 | [NVIDIA Japan：CEO 交接公告](https://blogs.nvid",
+  "groundingCount": 9,
+  "gate": "ok",
+  "injectionFingerprint": "6788619df0d393b3",
+  "hedgeHits": 3,
+  "uiLabel": "已上網查證",
+  "error": null
+}
