@@ -4,6 +4,8 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { slideMessagesForUpstream } from "../context-window";
+import { effectiveSourceHost, pickSourcesDiverse } from "../web-research";
 import {
   collectEventsFromHit,
   splitLongBodyExcerpt,
@@ -416,5 +418,106 @@ describe("search_synthesis Gate 不變性與衝突", () => {
     );
     const injected = formatVerdictInjection(gateEvidence({ plan, corpus }));
     assert.match(injected, /Storm-2139|coordinated disclosure|Akin Gump advised/i);
+  });
+
+  it("pickSourcesDiverse 穿透 vertexaisearch 轉址並優先挑選問題點名官網與法院卷宗", () => {
+    const sources = [
+      {
+        title: "activepieces.com",
+        uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/aaa",
+      },
+      {
+        title: "randomblog.example.org",
+        uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/bbb",
+      },
+      {
+        title: "OpenRouter Docs — Provider Routing",
+        uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/ccc",
+      },
+      {
+        title: "openrouter.ai",
+        uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/ddd",
+      },
+    ];
+    assert.equal(effectiveSourceHost(sources[0]!), "activepieces.com");
+    assert.equal(effectiveSourceHost(sources[3]!), "openrouter.ai");
+
+    const picked = pickSourcesDiverse(
+      sources,
+      2,
+      "幫我細查 OpenRouter 是如何運作的？路由機制與計費抽成方式",
+    );
+    assert.equal(picked.length, 2);
+    assert.ok(
+      picked.every((s) => /openrouter/i.test(s.title)),
+      `應優先抓 OpenRouter 官方來源而非第三方部落格，實際：${picked.map((p) => p.title).join(", ")}`,
+    );
+  });
+
+  it("深度查證：Planner 產出英文交叉查詢詞，且 >900 字層 1 brief 分段完整注入不腰斬", () => {
+    const plan = planResearch({
+      text: "幫我細查 Microsoft 起訴 Storm-2139 的訴訟判例與案號，他們具體是怎麼破解或濫用 API 的？",
+      now: new Date("2026-11-16T00:00:00.000Z"),
+      timeZone: "Asia/Taipei",
+    });
+    assert.equal(plan.intent, "factcheck");
+    assert.ok(plan.queries.length >= 2, "應同時產出中文主查詢與英文精準補充查詢");
+    assert.match(plan.queries[1]!, /Microsoft.*Storm-2139.*docket|default judgment/i);
+
+    const richBrief = [
+      "1. 案號與進度：Microsoft Corp. v. Arian Yadegarnia et al., Civil Action No. 1:24-cv-02323-MSN-WEF (E.D. Va.)，2024/12/19 秘密起訴（Filed Under Seal）並取得暫時禁制令（TRO）扣押核心網域 aitism.net。",
+      "2. 第一修正起訴狀（First Amended Complaint, Dkt. No. 41，2025/02/28）正式點名四位跨國被告：Arian Yadegarnia（化名 Fiz，伊朗）、Alan Krysiak（化名 Drago，英國）、Ricky Yuen（化名 cg-dot，香港）、Phát Phùng Tấn（化名 Asakuri，越南），另有美國境內涉案者配合刑事調查未公開。",
+      "3. 技術工具鏈（LLMjacking 雙層架構）：自動化爬蟲搜刮 GitHub 公開儲存庫誤傳之 52 字元 Azure OpenAI Service API Keys，透過 Cloudflare Tunnels 架設 oai-reverse-proxy 隱藏真實 IP 並繞過地理圍欄，搭配客製化前端工具 de3u（託管於 GitHub 與 rentry.org/de3u）進行提示詞改寫以繞過內容安全分類器。",
+      "4. 微軟主張法條（Dkt. No. 41）：CFAA（18 U.S.C. § 1030）、DMCA（17 U.S.C. § 1201(a)(1) & (a)(2)）、Lanham Act（15 U.S.C. § 1125(a) 虛假產地標示）、RICO（18 U.S.C. § 1962(c) 電信詐欺與存取設備詐欺）及普通法動產侵害與侵權干預契約。",
+      "5. 角色分類勘誤與 Akin Gump 篇幅：Akin Gump 2025/03/17 文章僅為約 220 字兩段式 Tracker 短訊；微軟官方定義三類角色為 Creators、Providers、Users（原文寫 Providers modified and supplied these tools to end users，並非把第三類命名為 Supplier）。",
+      "6. 最新法院進展（2026/05/26 Dkt. No. 71）：聯邦治安法官 William E. Fitzpatrick 已提交長達 33 頁建議書，建議法院准許微軟對違約被告作出缺席判決（Default Judgment）與永久禁制令。TAIL_DKT_71_MARKER",
+    ].join("\n");
+    assert.ok(richBrief.length > 900, `測試 brief 應超過 900 字以驗證 3 段切分，實際 ${richBrief.length}`);
+
+    const corpus = collectEventsFromHit(
+      plan,
+      {
+        provider: "test",
+        queries: plan.queries,
+        sources: [
+          {
+            title: "courtlistener.com",
+            uri: "https://vertexaisearch.cloud.google.com/grounding-api-redirect/dkt71",
+            resolvedUrl: "https://www.courtlistener.com/docket/69480000/microsoft-corporation-v-does-1-10/",
+          },
+        ],
+        pages: [],
+        brief: richBrief,
+        limitations: [],
+      },
+      { autoSynthesisFallback: true },
+    );
+
+    const injected = formatVerdictInjection(gateEvidence({ plan, corpus }));
+    assert.ok(injected.includes("TAIL_DKT_71_MARKER"), "超過 500 字的層 1 brief 尾部 Dkt. 71 不得被截斷");
+    assert.ok(
+      injected.includes("https://www.courtlistener.com/docket/69480000/microsoft-corporation-v-does-1-10"),
+      "即使防爬未抓到正文，解開後的真實 resolvedUrl 也應保留給模型與前端",
+    );
+  });
+
+  it("多輪對話滑動視窗：前幾輪 1,200 字回答完整保留，不在 300 字處腰斬名單與工具名", () => {
+    const claudeQ1 =
+      "結論：這是一件民事訴訟，案名 Microsoft Corp. v. Does 1–10，案號 1:24-cv-2323（E.D. Va.）。".repeat(5) +
+      "\n修正訴狀點名 4 人：Arian Yadegarnia、Alan Krysiak、Ricky Yuen、Phát Phùng Tấn。\n" +
+      "濫用工具鏈：自製工具 de3u 加反向代理，主張 CFAA、DMCA §1201、Lanham Act、RICO。";
+    assert.ok(claudeQ1.length > 350 && claudeQ1.length < 1800);
+
+    const msgs = slideMessagesForUpstream([
+      { role: "user", content: "問題一：Storm-2139 案號與法條？" },
+      { role: "assistant", content: claudeQ1 },
+      { role: "user", content: "問題二：Akin Gump 分析？" },
+      { role: "assistant", content: "Akin Gump 摘要說明。" },
+      { role: "user", content: "幫我對照前面回答查到與沒查到的項目" },
+    ]);
+
+    const keptQ1 = msgs[1]!.content;
+    assert.ok(keptQ1.includes("Arian Yadegarnia"), "前幾輪回答中的被告姓名不得被 300 字截斷");
+    assert.ok(keptQ1.includes("de3u"), "前幾輪回答中的具體工具名 de3u 不得被截斷");
   });
 });

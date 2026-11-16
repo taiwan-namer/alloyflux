@@ -4,22 +4,24 @@ import type { ChatMessage } from "./providers";
 export const UPSTREAM_MAX_TURNS = 8;
 export const UPSTREAM_MAX_MESSAGES = UPSTREAM_MAX_TURNS * 2;
 
-/** 緊鄰當前問題的上一則 assistant：一般頭尾保留總量 */
-export const LAST_ASSISTANT_MAX_CHARS = 1000;
-const LAST_ASSISTANT_HEAD = 650;
-const LAST_ASSISTANT_TAIL = 350;
+/** 緊鄰當前問題的上一則 assistant：頭尾保留總量（多輪深度對照需保留完整分析與結尾表格） */
+export const LAST_ASSISTANT_MAX_CHARS = 3600;
+const LAST_ASSISTANT_HEAD = 2400;
+const LAST_ASSISTANT_TAIL = 1200;
 
 /** 上一則含 ```html 預覽時放寬，避免改色／加按鈕時被迫整份重寫 */
-export const LAST_ASSISTANT_HTML_MAX_CHARS = 2400;
-const LAST_ASSISTANT_HTML_HEAD = 1600;
-const LAST_ASSISTANT_HTML_TAIL = 800;
+export const LAST_ASSISTANT_HTML_MAX_CHARS = 4800;
+const LAST_ASSISTANT_HTML_HEAD = 3200;
+const LAST_ASSISTANT_HTML_TAIL = 1600;
 
-/** 更早的舊 assistant 每則上限 */
-export const OLDER_ASSISTANT_MAX_CHARS = 300;
+/** 更早的舊 assistant 每則上限（頭尾保留，避免前幾輪名單／工具名／法條表格在 300 字處被腰斬） */
+export const OLDER_ASSISTANT_MAX_CHARS = 1800;
+const OLDER_ASSISTANT_HEAD = 1200;
+const OLDER_ASSISTANT_TAIL = 600;
 /** 一般歷史 assistant 合計硬鎖 */
-export const MAX_HISTORY_ASSISTANT_CHARS = 2200;
-/** 上一則含 HTML 時合計硬鎖（連動放寬，避免 2400 又被 2200 砍回） */
-export const MAX_HISTORY_ASSISTANT_CHARS_WITH_HTML = 3600;
+export const MAX_HISTORY_ASSISTANT_CHARS = 8000;
+/** 上一則含 HTML 時合計硬鎖（連動放寬） */
+export const MAX_HISTORY_ASSISTANT_CHARS_WITH_HTML = 10000;
 
 const FOLDED_MARK = "...[歷史長文已折疊]";
 const MIDDLE_MARK = "\n...[中略]...\n";
@@ -81,11 +83,11 @@ export function compressLastAssistant(content: string): string {
   return compressHeadTail(content, LAST_ASSISTANT_MAX_CHARS, LAST_ASSISTANT_HEAD, LAST_ASSISTANT_TAIL);
 }
 
-/** 舊長文只留開頭；已折疊則不再處理 */
+/** 舊長文採頭尾保留，避免把前幾輪中後段的關鍵名單、數據與結論整段砍掉；已折疊則不再處理 */
 export function compressOlderAssistant(content: string): string {
   const text = content ?? "";
   if (text.length <= OLDER_ASSISTANT_MAX_CHARS || alreadyFolded(text)) return text;
-  return `${text.slice(0, OLDER_ASSISTANT_MAX_CHARS)}${FOLDED_MARK}`;
+  return compressHeadTail(text, OLDER_ASSISTANT_MAX_CHARS, OLDER_ASSISTANT_HEAD, OLDER_ASSISTANT_TAIL);
 }
 
 /**

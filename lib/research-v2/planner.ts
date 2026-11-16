@@ -94,10 +94,19 @@ export function detectIntent(text: string): ResearchIntent {
   if (!instruction) return "skip";
 
   const stripRemovedPaste = didStripRemovePastedContent(raw, instruction);
+  const hasRecentWindowCue =
+    NEWSY_RE.test(instruction) ||
+    /明天|明日|最近\s*\d+\s*天|過去\s*\d+\s*天|近\s*\d+\s*天|過去一週|近一週|本週|本周|past\s+\d+\s+days?/i.test(
+      instruction,
+    );
 
-  // 明確即時需求 → 即使同時貼了文件也要 news／factcheck
+  // 明確即時／聯網需求 → 即使同時貼了文件也要 news／factcheck
   if (hasExplicitLiveDemand(instruction)) {
     if (FACTCHECK_RE.test(instruction)) return "factcheck";
+    // 判例／訴狀／全文／條款／運作機制等深度查證（且非詢問「今天／最新／近 N 天」時事）→ 走 factcheck，不硬套 7~14 天新聞窗與外交子題
+    if (!hasRecentWindowCue && hasDeepResearchDemand(instruction, { stripRemovedPaste })) {
+      return "factcheck";
+    }
     return "news";
   }
 
@@ -129,6 +138,7 @@ export function detectIntent(text: string): ResearchIntent {
     return "skip";
   }
   if (FACTCHECK_RE.test(instruction)) return "factcheck";
+  if (deepDemand && !hasRecentWindowCue) return "factcheck";
   if (NEWSY_RE.test(instruction) || needsWebResearch(instruction)) return "news";
   if (deepDemand) return "factcheck";
   if (shouldSkipLiveResearch(instruction)) return "skip";
@@ -161,6 +171,45 @@ function buildCoverageHints(text: string, intent: ResearchIntent): string[] {
   ];
 }
 
+function extractFactcheckEnglishAnchors(text: string): string[] {
+  const stop = new Set([
+    "the",
+    "and",
+    "for",
+    "with",
+    "from",
+    "how",
+    "what",
+    "why",
+    "api",
+    "http",
+    "https",
+    "creator",
+    "creators",
+    "provider",
+    "providers",
+    "supplier",
+    "suppliers",
+    "user",
+    "users",
+  ]);
+  const raw = text.match(/[A-Za-z0-9]+(?:[-.:/][A-Za-z0-9]+)*/g) ?? [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const tok of raw) {
+    const clean = tok.replace(/^[.:/-]+|[.:/-]+$/g, "");
+    if (clean.length < 3) continue;
+    const lower = clean.toLowerCase();
+    if (stop.has(lower)) continue;
+    if (/^\d{1,4}$/.test(clean)) continue;
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    out.push(clean);
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
 function buildQueries(input: {
   text: string;
   intent: ResearchIntent;
@@ -172,9 +221,25 @@ function buildQueries(input: {
   if (intent === "skip") return [];
 
   if (intent === "factcheck" && !timeWindow && !userDateHint) {
-    return [
-      `${text}（優先官方文件、法院判決／法規原文、權威機構與主流媒體；排除農場內容與 YouTube）`,
+    const queries = [
+      `${text}（優先官方原文、法院最新卷宗／docket、產品官方 Docs／Pricing／ToS、權威機構分析；排除農場內容與 YouTube）`,
     ];
+    const anchors = extractFactcheckEnglishAnchors(text);
+    if (anchors.length > 0) {
+      const anchorStr = anchors.join(" ");
+      if (/起訴|訴訟|判例|案號|訴狀|法院|法條|條款|律所|被告|分工|lawsuit|complaint|docket|ruling|court/i.test(text)) {
+        queries.push(
+          `${anchorStr} lawsuit amended complaint docket latest filing default judgment official blog`,
+        );
+      } else if (/運作|路由|計費|抽成|手續費|服務條款|合規|供應商|pricing|routing|terms|fee|provider/i.test(text)) {
+        queries.push(
+          `${anchorStr} official docs provider routing pricing fees BYOK terms of service DPA`,
+        );
+      } else {
+        queries.push(`${anchorStr} official documentation primary source full analysis`);
+      }
+    }
+    return queries.slice(0, MAX_QUERIES);
   }
 
   const windowLabel = userDateHint
@@ -252,8 +317,8 @@ export function planResearch(input: PlannerInput): ResearchPlan {
       toIso: today,
       preferRecentHours: 72,
     };
-  } else if (intent === "factcheck" && !needsWebResearch(intentBasis)) {
-    // 歷史判例／法案／條款／運作機制查證：不鎖死 14 天時間窗，以免漏掉正式法規或經典判例原文
+  } else if (intent === "factcheck") {
+    // 判例／法案／律所分析／條款／運作機制查證：不鎖死 14 天時間窗，以免漏掉 2024–2026 卷宗、官方 Docs 或經典判例原文
     timeWindow = null;
   } else {
     timeWindow = {

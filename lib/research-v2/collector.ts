@@ -607,42 +607,47 @@ export function collectEventsFromHit(
     briefSafe.length >= 40 &&
     !/^NO_SEARCH\b/i.test(briefSafe)
   ) {
-    const briefStatement = sanitizeEvidenceText(
-      `【搜尋摘要，未經原文核對】${briefSafe}`,
-      1000,
-    );
+    // 切成最多 3 段（每段連同標記 <= 490 字），避免進 inject 時被單條 500 字上限截斷後半部深度事實
+    const briefChunks = splitLongBodyExcerpt(briefSafe, {
+      threshold: 450,
+      chunkSize: 450,
+      maxParts: 3,
+      hardCap: 1350,
+    });
     const primarySrcId =
       rawSources.find((s) => s.provenance === "title_only")?.sourceId ?? rawSources[0]?.sourceId;
-    const briefMergeKey = `synth:${stableId("syn_brief", briefStatement.slice(0, 48))}`;
-    if (!byMerge.has(briefMergeKey)) {
-      const topic = guessTopic(briefStatement);
+    const briefMergeKey = `synth:${stableId("syn_brief", briefSafe.slice(0, 64))}`;
+    if (!byMerge.has(briefMergeKey) && briefChunks.length > 0) {
+      const topic = guessTopic(briefSafe);
       const briefTitleLine =
         briefSafe
           .split(/\n+/)
           .map((l) => l.replace(/^[-*•\d.)\s]+/, "").trim())
           .find((l) => l.length >= 8) ?? plan.rawUserQuery;
+      const briefClaims: ResearchClaim[] = briefChunks.map((chunk, idx) => {
+        const stmt = sanitizeEvidenceText(`【搜尋摘要，未經原文核對】${chunk}`, 495);
+        return {
+          claimId: stableId("clm", briefMergeKey, String(idx)),
+          statement: stmt,
+          claimType: inferClaimType(stmt, "search_synthesis"),
+          sourceIds: primarySrcId ? [primarySrcId] : [],
+          evidenceLevel: "insufficient",
+          provenance: "search_synthesis",
+        };
+      });
       byMerge.set(briefMergeKey, {
         eventId: stableId("evt", briefMergeKey),
         title: sanitizeEvidenceText(briefTitleLine, 120),
         topic,
-        claims: [
-          {
-            claimId: stableId("clm", briefMergeKey),
-            statement: briefStatement,
-            claimType: inferClaimType(briefStatement, "search_synthesis"),
-            sourceIds: primarySrcId ? [primarySrcId] : [],
-            evidenceLevel: "insufficient",
-            provenance: "search_synthesis",
-          },
-        ],
+        claims: briefClaims,
         sourceIds: primarySrcId ? [primarySrcId] : [],
-        relevance: 0.5,
+        relevance: 0.55,
         freshness: 0.55,
         diversityKey: topic,
         evidenceGrade: "title_only",
       });
       limitations.push(
-        `search_synthesis_from_flash_brief_fallback: auto_fallback 層1摘要保底（title_only=${titleOnlySourceCount},body_claims=${bodyClaimCount},supports=${addedSynthCount}）`,
+        `search_synthesis_from_flash_brief_fallback: auto_fallback 層1摘要保底（parts=${briefClaims.length},title_only=${titleOnlySourceCount},body_claims=${bodyClaimCount},supports=${addedSynthCount}）`,
       );
     }
   }

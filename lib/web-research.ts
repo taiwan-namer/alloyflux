@@ -35,13 +35,15 @@ export type ResearchBundle = {
 };
 
 const SEARCH_SYSTEM = [
-  "你是即時網頁查證助理（對齊 Gemini Google Search grounding）。",
-  "若問題涉及人物、事件、傳聞、新聞、數據、時事、查證、論壇／社群討論、策略分享、評價推薦、行情勝率——必須使用 Google Search。",
-  "用繁中條列關鍵事實（≤12 行）：每點寫清「誰／做了什麼／何時」，並附來源標題；查無可靠來源就明確寫「查無可靠來源」。",
-  "優先官方新聞室、投資人公告、路透／美聯社／BBC／大型報紙；不要把維基百科、YouTube、網站導覽當主要依據。",
-  "若使用者明確要求上網、搜尋、爬文、查一下、找看看——一律必須搜尋，禁止回覆 NO_SEARCH。",
+  "你是即時網頁與深度文獻查證助理（對齊 Gemini Google Search grounding）。",
+  "若問題涉及人物、事件、傳聞、新聞、數據、時事、查證、訴訟判例、法案條款、律所／機構分析、產品架構與計費條款、論壇討論——必須使用 Google Search。",
+  "【一般新聞／時事】用繁中條列關鍵事實（8～15 點）：每點寫清「誰／做了什麼／何時（明確日期）」，並附來源標題。",
+  "【深度查證（訴訟判例／案號卷宗／律所分析／運作機制／計費抽成／服務條款）】必須主動拆出英文精準關鍵字與官方網域交叉搜尋（如法院案號、最新卷宗編號 Dkt. No.／Document、最新程序如缺席判決 Default Judgment／修正訴狀 Amended Complaint、被告全名與角色分工、具體工具名／API 參數名、各方案費率 % 與免費額度門檻、官方 Docs／Pricing／ToS 原文），輸出完整高密度事實摘錄（可達 20～35 點，完整保留英文專有名詞、法條號 §、訴狀段落號 ¶、參數名與精確數字，禁止濃縮成空泛大綱）。",
+  "【交叉核對與勘誤】若問題點名特定律所／機構文章或詢問特定分類詞（如某三個角色名詞）：除查明該篇文章實際發佈日期、真實篇幅（例如是否僅為兩段短訊）與內容外，必須同時搜尋原始官方出處（如原告官方部落格、法院訴狀、官方文件）核對精確原文用語；若提問詞與原文不同（例如把動詞誤記成角色名詞），請直接寫明原文精確寫法。",
+  "優先官方文件／新聞室、法院公開卷宗（CourtListener／Justia 等）、產品官方 Docs／Pricing／ToS、路透／美聯社／BBC／大型報紙；不要把維基百科、YouTube、網站導覽當主要依據。",
+  "若使用者明確要求上網、搜尋、爬文、查一下、找看看、找全文——一律必須搜尋，禁止回覆 NO_SEARCH。",
   "若純屬閒聊、創作、程式除錯、且與外部事實完全無關——只回覆一行：NO_SEARCH",
-  "不要長篇推論，不要編造。",
+  "不要空泛推論，不要編造；若屬不公開商業機密（如內部 B2B 合約）查無公開來源，請明確標註無公開來源。",
 ].join("\n");
 
 /** 口語化／明確要求聯網或找外部即時資訊的意圖 */
@@ -120,8 +122,8 @@ export const MAX_RESEARCH_TOTAL_CHARS = 7200;
 export const MAX_PAGE_CHARS = 1800;
 /** 層 2 最多抓取篇數（優先不同網域） */
 export const MAX_RESEARCH_PAGES = 3;
-/** Flash 搜尋摘要上限（相對舊值 700 放寬 1 倍） */
-export const MAX_RESEARCH_BRIEF_CHARS = 1400;
+/** Flash 搜尋摘要上限（深度查證需完整保留多點事實、案號與費率） */
+export const MAX_RESEARCH_BRIEF_CHARS = 2400;
 
 const FINANCE_KEEP_RE = /\d|%|\$|億|萬|元|EPS|YoY|QoQ/i;
 const JUNK_NAV_RE =
@@ -162,9 +164,69 @@ function hostnameOf(uri: string): string {
 const LOW_PRIORITY_HOST_RE =
   /(^|\.)(wikipedia\.org|wikidata\.org|britannica\.com|youtube\.com|youtu\.be|bilibili\.com)$/i;
 
-/** 官方／主流媒體：抓取與挑選時優先 */
+/** 官方／法院卷宗／主流媒體：抓取與挑選時優先 */
 const PREFERRED_HOST_RE =
-  /(nvidianews\.nvidia\.com|(^|\.)nvidia\.com|sec\.gov|reuters\.com|apnews\.com|bloomberg\.com|bbc\.(com|co\.uk)|nytimes\.com|wsj\.com|ft\.com|cnbc\.com|theguardian\.com|cna\.com\.tw|udn\.com|chinatimes\.com|ltn\.com\.tw|storm\.mg|tw\.news\.yahoo\.com|news\.google\.com)/i;
+  /(nvidianews\.nvidia\.com|(^|\.)nvidia\.com|sec\.gov|courtlistener\.com|justia\.com|law\.cornell\.edu|uscourts\.gov|supremecourt\.gov|justice\.gov|microsoft\.com|openai\.com|anthropic\.com|reuters\.com|apnews\.com|bloomberg\.com|bbc\.(com|co\.uk)|nytimes\.com|wsj\.com|ft\.com|cnbc\.com|theguardian\.com|cna\.com\.tw|udn\.com|chinatimes\.com|ltn\.com\.tw|storm\.mg|tw\.news\.yahoo\.com|news\.google\.com)/i;
+
+const GOOGLE_REDIRECT_HOST_RE = /^(vertexaisearch\.cloud\.google\.com|news\.google\.com|google\.com)$/i;
+
+/**
+ * 穿透 Gemini Grounding 的 vertexaisearch 轉址，從 title 辨識真實來源網域或站名，
+ * 避免所有來源都被當成同一個 vertexaisearch 網域而失去去重與優先排序。
+ */
+export function effectiveSourceHost(s: ResearchSource): string {
+  const rawHost = hostnameOf(s.uri);
+  if (rawHost && !GOOGLE_REDIRECT_HOST_RE.test(rawHost)) return rawHost;
+  const title = (s.title || "").trim();
+  const domainMatch = title.match(/\b([a-z0-9-]+(?:\.[a-z0-9-]+)+)\b/i);
+  if (domainMatch?.[1]) return domainMatch[1].toLowerCase().replace(/^www\./, "");
+  if (title && !/^https?:\/\//i.test(title)) {
+    return `title:${title.toLowerCase().replace(/\s+/g, " ").slice(0, 48)}`;
+  }
+  return rawHost;
+}
+
+/** 從使用者問題抽出點名的英文實體／品牌／網域線索（如 Akin Gump → akingump、OpenRouter → openrouter） */
+function extractQueryTargetTokens(queryHint?: string): string[] {
+  if (!queryHint?.trim()) return [];
+  const stop = new Set([
+    "what",
+    "when",
+    "where",
+    "which",
+    "how",
+    "from",
+    "with",
+    "that",
+    "this",
+    "creator",
+    "creators",
+    "provider",
+    "providers",
+    "supplier",
+    "suppliers",
+    "user",
+    "users",
+    "news",
+    "latest",
+    "google",
+    "search",
+  ]);
+  const words = (queryHint.match(/[A-Za-z][A-Za-z0-9-]{2,}/g) ?? []).map((w) => w.toLowerCase());
+  const out = new Set<string>();
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i]!;
+    if (w.length >= 4 && !stop.has(w)) {
+      out.add(w);
+      out.add(w.replace(/-/g, ""));
+    }
+    if (i + 1 < words.length) {
+      const joined = `${w}${words[i + 1]}`.replace(/-/g, "");
+      if (joined.length >= 6 && !stop.has(w)) out.add(joined);
+    }
+  }
+  return [...out].slice(0, 12);
+}
 
 function isLowPriorityHost(host: string): boolean {
   return LOW_PRIORITY_HOST_RE.test(host);
@@ -222,26 +284,46 @@ export function displaySourceUrl(uri: string, maxLen = 64): string {
   return `${cleaned.slice(0, Math.max(1, maxLen - 1))}…`;
 }
 
-/** 優先不同 hostname：官方／主流媒體 → 一般站 → wikipedia／youtube */
-export function pickSourcesDiverse(sources: ResearchSource[], limit = MAX_RESEARCH_PAGES): ResearchSource[] {
+/** 優先問題點名的目標官網／文件 → 官方／法院／主流媒體 → 一般站 → wikipedia／youtube */
+export function pickSourcesDiverse(
+  sources: ResearchSource[],
+  limit = MAX_RESEARCH_PAGES,
+  queryHint?: string,
+): ResearchSource[] {
   const http = sources.filter((s) => /^https?:\/\//i.test(s.uri));
+  const targets = extractQueryTargetTokens(queryHint);
+  const matchesTargetOrOfficialDoc = (s: ResearchSource, effHost: string): boolean => {
+    const hay = `${effHost} ${s.title || ""} ${s.uri || ""}`.toLowerCase().replace(/-/g, "");
+    if (targets.some((tok) => hay.includes(tok))) return true;
+    if (
+      targets.length > 0 &&
+      /\b(docs|documentation|pricing|terms|privacy|docket|complaint|insights|filing)\b/i.test(
+        `${s.title || ""} ${s.uri || ""}`,
+      )
+    ) {
+      return true;
+    }
+    return false;
+  };
   const rank = (s: ResearchSource) => {
-    const host = hostnameOf(s.uri);
-    if (isPreferredHost(host)) return 0;
-    if (isLowPriorityHost(host)) return 2;
+    const effHost = effectiveSourceHost(s);
+    if (isLowPriorityHost(effHost)) return 3;
+    if (matchesTargetOrOfficialDoc(s, effHost)) return -1;
+    if (isPreferredHost(effHost)) return 0;
     return 1;
   };
   const sorted = [...http].sort((a, b) => rank(a) - rank(b));
+  const targeted = sorted.filter((s) => rank(s) === -1);
   const preferred = sorted.filter((s) => rank(s) === 0);
   const normal = sorted.filter((s) => rank(s) === 1);
-  const demoted = sorted.filter((s) => rank(s) === 2);
+  const demoted = sorted.filter((s) => rank(s) === 3);
   const picked: ResearchSource[] = [];
   const seenHost = new Set<string>();
 
   const takeDiverse = (pool: ResearchSource[]) => {
     for (const s of pool) {
       if (picked.length >= limit) break;
-      const host = hostnameOf(s.uri);
+      const host = effectiveSourceHost(s);
       if (seenHost.has(host)) continue;
       seenHost.add(host);
       picked.push(s);
@@ -253,7 +335,8 @@ export function pickSourcesDiverse(sources: ResearchSource[], limit = MAX_RESEAR
     }
   };
 
-  takeDiverse(preferred);
+  takeDiverse(targeted);
+  if (picked.length < limit) takeDiverse(preferred);
   if (picked.length < limit) takeDiverse(normal);
   if (picked.length < limit) takeDiverse(demoted);
   return picked;
@@ -373,28 +456,52 @@ export async function fetchPageExcerpt(
   };
 }
 
+export async function fetchPagesWithResolutions(
+  sources: ResearchSource[],
+  signal?: AbortSignal,
+  limit = MAX_RESEARCH_PAGES,
+  queryHint?: string,
+): Promise<{ pages: ResearchPage[]; resolvedByOriginalUri: Map<string, string> }> {
+  // 多抓幾候補選：許多網站防爬或只回導覽殼，需跳過後再補，同時保留解開後的真實 URL
+  const candidateLimit = Math.min(sources.length, Math.max(limit * 2 + 2, limit));
+  const picked = pickSourcesDiverse(sources, candidateLimit, queryHint);
+  const settled = await Promise.allSettled(picked.map((s) => fetchPageExcerpt(s.uri, signal)));
+  const pages: ResearchPage[] = [];
+  const resolvedByOriginalUri = new Map<string, string>();
+
+  for (let i = 0; i < settled.length; i++) {
+    const r = settled[i];
+    if (r.status !== "fulfilled" || !r.value) continue;
+    const page = r.value;
+    const origUri = picked[i]!.uri;
+    const resolvedCandidate = page.resolvedUrl || page.uri;
+    if (
+      resolvedCandidate &&
+      /^https:\/\//i.test(resolvedCandidate) &&
+      !GOOGLE_REDIRECT_HOST_RE.test(hostnameOf(resolvedCandidate))
+    ) {
+      resolvedByOriginalUri.set(origUri, cleanSourceUrl(resolvedCandidate));
+    }
+
+    if (pages.length >= limit) continue;
+    // 僅收可用正文；SSRF／失敗頁不進入 pages（Collector 仍可由 grounding sources + resolvedUrl 建來源）
+    if (page.fetchStatus === "ok" && isUsablePageExcerpt(page.excerpt)) {
+      pages.push({
+        ...page,
+        title: page.title && page.title !== page.uri ? page.title : picked[i]!.title,
+      });
+    }
+  }
+  return { pages, resolvedByOriginalUri };
+}
+
 export async function fetchPagesForSources(
   sources: ResearchSource[],
   signal?: AbortSignal,
   limit = MAX_RESEARCH_PAGES,
+  queryHint?: string,
 ): Promise<ResearchPage[]> {
-  // 多抓幾候補選：許多新聞站只回導覽殼，需跳過後再補
-  const picked = pickSourcesDiverse(sources, Math.min(sources.length, Math.max(limit * 2, limit)));
-  const settled = await Promise.allSettled(picked.map((s) => fetchPageExcerpt(s.uri, signal)));
-  const pages: ResearchPage[] = [];
-  for (let i = 0; i < settled.length; i++) {
-    if (pages.length >= limit) break;
-    const r = settled[i];
-    if (r.status !== "fulfilled" || !r.value) continue;
-    const page = r.value;
-    // 僅收可用正文；SSRF／失敗頁不進入 pages（Collector 仍可由 grounding sources 建 title_only）
-    if (page.fetchStatus === "ok" && isUsablePageExcerpt(page.excerpt)) {
-      pages.push({
-        ...page,
-        title: page.title || picked[i].title,
-      });
-    }
-  }
+  const { pages } = await fetchPagesWithResolutions(sources, signal, limit, queryHint);
   return pages;
 }
 
@@ -476,7 +583,7 @@ async function searchViaAntigravity(
       sessionId: `-${Math.floor(Math.random() * 9_000_000_000_000)}`,
       systemInstruction: { role: "user", parts: [{ text: SEARCH_SYSTEM }] },
       contents: [{ role: "user", parts: [{ text: query.slice(0, 4000) }] }],
-      generationConfig: { maxOutputTokens: 2048 },
+      generationConfig: { maxOutputTokens: 4096 },
       tools: [{ googleSearch: {} }],
     },
   };
@@ -562,7 +669,7 @@ async function searchViaGeminiApiKey(
         systemInstruction: { parts: [{ text: SEARCH_SYSTEM }] },
         contents: [{ role: "user", parts: [{ text: query.slice(0, 4000) }] }],
         tools: [{ googleSearch: {} }],
-        generationConfig: { maxOutputTokens: 2048 },
+        generationConfig: { maxOutputTokens: 4096 },
       }),
       signal,
     });
@@ -855,8 +962,8 @@ export async function fetchLiveResearchSearchHit(
   if (shouldSkipLiveResearch(q)) return null;
 
   const searchQuery = needsWebResearch(q)
-    ? `【必須使用 Google Search，禁止回覆 NO_SEARCH】\n${q}\n【優先】官方新聞室、投資人公告、路透／美聯社／BBC／大型報紙；排除維基百科與 YouTube。`
-    : `${q}\n【查證時優先官方與主流媒體新聞，排除維基百科與 YouTube。】`;
+    ? `【必須使用 Google Search，禁止回覆 NO_SEARCH】\n${q}\n【優先】官方文件／新聞室、法院公開卷宗、產品官方 Docs／Pricing／ToS、路透／美聯社／BBC／大型報紙；排除維基百科與 YouTube。`
+    : `${q}\n【查證時優先官方文件、法院卷宗、產品官方 Docs 與主流媒體，排除維基百科與 YouTube。】`;
 
   let hit: {
     brief: string;
@@ -907,7 +1014,7 @@ export async function runLiveResearch(
   const hit = await fetchLiveResearchSearchHit(query, opts);
   if (!hit) return null;
 
-  const pages = await fetchPagesForSources(hit.sources, opts?.signal, MAX_RESEARCH_PAGES);
+  const pages = await fetchPagesForSources(hit.sources, opts?.signal, MAX_RESEARCH_PAGES, query);
   return {
     brief: hit.brief,
     sources: hit.sources,

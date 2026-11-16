@@ -1,6 +1,6 @@
 import {
   fetchLiveResearchSearchHit,
-  fetchPagesForSources,
+  fetchPagesWithResolutions,
   type ResearchBundle,
 } from "../web-research";
 import { collectEventsFromHit } from "./collector";
@@ -45,6 +45,11 @@ function lastUserText(messages: ChatTurn[]): string {
 
 function composeLiveQuery(plan: ResearchPlan): string {
   const primary = plan.queries[0] || plan.rawUserQuery;
+  const subQueries = plan.queries.slice(1);
+  const subHint =
+    subQueries.length > 0
+      ? `\n【建議同步交叉檢索（含英文精準詞）】${subQueries.join(" ｜ ")}`
+      : "";
   const cover =
     plan.coverageHints.length > 0
       ? `\n【盡量涵蓋不同主題，勿只報單一熱點】${plan.coverageHints.join("；")}`
@@ -52,7 +57,10 @@ function composeLiveQuery(plan: ResearchPlan): string {
   const window = plan.timeWindow
     ? `\n【時間窗】${plan.timeWindow.fromIso}～${plan.timeWindow.toIso}，優先近 ${plan.timeWindow.preferRecentHours} 小時內重要事件`
     : "";
-  return `${primary}${window}${cover}\n【多事件並列】若同窗內有多起重大新聞請條列，保留「尚未確認」等限定條件。`;
+  if (plan.intent === "factcheck") {
+    return `${primary}${subHint}${window}${cover}\n【深度查證要求】請拆解多組中英文精準關鍵字交叉核對官方原文、最新進度（含 2025–2026 最新法院卷宗 Dkt.／文件改版）、精確法條／API 參數名稱、費率門檻與角色分工；若點名的文章本身僅為短訊或未出現提問中的預設分類詞，請寫明其真實篇幅並對照原始官方出處補齊正確用語。`;
+  }
+  return `${primary}${subHint}${window}${cover}\n【多事件並列】若同窗內有多起重大新聞請條列，保留「尚未確認」等限定條件。`;
 }
 
 async function liveFetchHit(
@@ -69,11 +77,12 @@ async function liveFetchHit(
     });
     if (!searchHit) return { hit: null, modelCallCount, error: "live_search_hit_null" };
 
-    // 層 2：由 V2 plan.limits.maxPages 控制（預設 4），不再鎖死 V1 的 3 頁
-    const pages = await fetchPagesForSources(
+    // 層 2：由 V2 plan.limits.maxPages 控制（預設 4），傳入原始問題供官網優先排序，並回填轉址後的真實 URL
+    const { pages, resolvedByOriginalUri } = await fetchPagesWithResolutions(
       searchHit.sources,
       opts.signal,
       plan.limits.maxPages,
+      plan.rawUserQuery,
     );
 
     const hit: RawSearchHit = {
@@ -82,6 +91,7 @@ async function liveFetchHit(
         title: s.title,
         uri: s.uri,
         originalUrl: s.uri,
+        resolvedUrl: resolvedByOriginalUri.get(s.uri),
       })),
       queries: searchHit.queries.length ? searchHit.queries : plan.queries,
       pages: pages.map((p) => ({

@@ -362,16 +362,27 @@ function SourceChip({ href, label }: { href: string; label?: string }) {
 
 function renderInline(text: string): ReactNode[] {
   const nodes: ReactNode[] = [];
-  // 順序：粗體 → 行內碼 → Markdown 連結 → 裸 URL
-  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>\[\]（）]+)/g;
+  // 順序：<br> 換行 → 粗斜體 → 粗體 → 斜體 → 行內碼 → Markdown 連結 → 裸 URL
+  const re =
+    /(<br\s*\/?>|\*\*\*[^*\n]+\*\*\*|\*\*[^*\n]+\*\*|(?<!\*)\*(?!\s)([^*\n]+?)(?<!\s)\*(?!\*)|`[^`]+`|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>\[\]（）]+)/gi;
   let last = 0;
   let m: RegExpExecArray | null;
   let key = 0;
   while ((m = re.exec(text))) {
     if (m.index > last) nodes.push(text.slice(last, m.index));
     const token = m[0];
-    if (token.startsWith("**")) {
+    if (/^<br\s*\/?>$/i.test(token)) {
+      nodes.push(<br key={`br${key++}`} />);
+    } else if (token.startsWith("***") && token.endsWith("***")) {
+      nodes.push(
+        <strong key={`bi${key++}`}>
+          <em>{token.slice(3, -3)}</em>
+        </strong>,
+      );
+    } else if (token.startsWith("**") && token.endsWith("**")) {
       nodes.push(<strong key={`b${key++}`}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith("*") && token.endsWith("*")) {
+      nodes.push(<em key={`i${key++}`}>{token.slice(1, -1)}</em>);
     } else if (token.startsWith("`")) {
       nodes.push(
         <code key={`c${key++}`} className="inline">
@@ -2097,9 +2108,7 @@ export default function ChatPage() {
                           : m.completionStatus === "truncated" ||
                               m.completionStatus === "unknown"
                             ? " · 部分查證"
-                            : m.completionStatus === "complete"
-                              ? " · 已上網查證"
-                              : " · 部分查證"
+                            : " · 已上網查證"
                         : ""}
                     </span>
                   </div>
