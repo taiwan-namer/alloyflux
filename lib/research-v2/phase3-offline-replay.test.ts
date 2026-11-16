@@ -50,8 +50,8 @@ function countTopicsInV2Injection(text: string): number {
 }
 
 describe("Phase3 離線：Token 控制機制", () => {
-  it("預設注入上限約 1500 估算 tokens（非官方 tokenizer）", () => {
-    assert.equal(injectionMaxTokens(), 1500);
+  it("預設注入上限約 3000 估算 tokens（非官方 tokenizer）", () => {
+    assert.equal(injectionMaxTokens(), 3000);
   });
 
   it("V2 注入估算 tokens ≤ 上限（同來源 B）", async () => {

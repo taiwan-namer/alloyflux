@@ -7,7 +7,7 @@ import {
 } from "./token-budget";
 import type { ResearchCorpus, ResearchEvent, ResearchVerdict } from "./types";
 
-function eventBlock(ev: ResearchEvent, corpus: ResearchCorpus, claimMax = 160): string[] {
+function eventBlock(ev: ResearchEvent, corpus: ResearchCorpus, claimMax = 320): string[] {
   const lines: string[] = [`### ${ev.title}`, `主題：${ev.topic}`];
   if (ev.publishedAt) lines.push(`來源發布日：${ev.publishedAt}`);
   if (ev.eventAt) lines.push(`事件日：${ev.eventAt}`);
@@ -103,7 +103,7 @@ export function formatVerdictInjection(verdict: ResearchVerdict): string {
     const trial = [...head, ...body, ...block].join("\n");
     if (estimateTokensApprox(trial) > maxTok || trial.length > charHardCap) {
       if (included.length === 0) {
-        const compact = eventBlock(ev, corpus, 80);
+        const compact = eventBlock(ev, corpus, 160);
         const t2 = [...head, ...body, ...compact].join("\n");
         if (estimateTokensApprox(t2) <= maxTok && t2.length <= charHardCap) {
           body.push(...compact);

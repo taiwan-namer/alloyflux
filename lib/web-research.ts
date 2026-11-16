@@ -114,14 +114,14 @@ export function persistRawGroundingSupportsLog(entry: {
   }
 }
 
-/** 注入主模型的查證全文硬上限（字元）；摘要＋來源＋各篇摘錄合計 */
-export const MAX_RESEARCH_TOTAL_CHARS = 3600;
-/** 單篇淨化後正文上限 */
-export const MAX_PAGE_CHARS = 900;
+/** 注入主模型的查證全文硬上限（字元）；摘要＋來源＋各篇摘錄合計（相對舊值 3600 放寬 1 倍） */
+export const MAX_RESEARCH_TOTAL_CHARS = 7200;
+/** 單篇淨化後正文上限（相對舊值 900 放寬 1 倍） */
+export const MAX_PAGE_CHARS = 1800;
 /** 層 2 最多抓取篇數（優先不同網域） */
 export const MAX_RESEARCH_PAGES = 3;
-/** Flash 搜尋摘要上限 */
-export const MAX_RESEARCH_BRIEF_CHARS = 700;
+/** Flash 搜尋摘要上限（相對舊值 700 放寬 1 倍） */
+export const MAX_RESEARCH_BRIEF_CHARS = 1400;
 
 const FINANCE_KEEP_RE = /\d|%|\$|億|萬|元|EPS|YoY|QoQ/i;
 const JUNK_NAV_RE =

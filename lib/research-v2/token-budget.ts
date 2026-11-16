@@ -5,7 +5,7 @@
  * 估算 Token：CJK ≈ 1.5 字／tok → tok≈字/1.5；拉丁 ≈ 4 字／tok
  */
 
-export const DEFAULT_INJECTION_MAX_TOKENS = 1500;
+export const DEFAULT_INJECTION_MAX_TOKENS = 3000;
 
 /** 可由 RESEARCH_INJECTION_MAX_TOKENS 覆寫 */
 export function injectionMaxTokens(): number {
@@ -26,7 +26,7 @@ export function estimateTokensApprox(text: string): number {
 
 /**
  * 字元硬上限（給舊介面相容）：以「全 CJK」最壞情況反推，
- * 1500 tok × 1.5 ≈ 2250 字；再留一點英文標題空間 → 2400。
+ * 3000 tok × 1.5 ≈ 4500 字；×1.6 約 4800。
  */
 export function charsBudgetForTokens(maxTokens: number): number {
   return Math.max(800, Math.ceil(maxTokens * 1.6));

@@ -275,7 +275,7 @@ export function extractArticleFromHtml(
   html: string,
   opts?: { url?: string; titleHint?: string; maxChars?: number },
 ): ArticleExtractResult {
-  const maxChars = opts?.maxChars ?? 900;
+  const maxChars = opts?.maxChars ?? 1800;
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   const title = (opts?.titleHint || titleMatch?.[1] || "")
     .replace(/\s+/g, " ")

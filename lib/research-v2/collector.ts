@@ -307,7 +307,7 @@ export function collectEventsFromHit(
       resolvedUrl: resolvedUrl || (page?.resolvedUrl ? cleanSourceUrl(page.resolvedUrl) : undefined),
       host,
       publishedAt,
-      excerpt: hasBody ? sanitizeEvidenceText(excerptRaw, 900) : undefined,
+      excerpt: hasBody ? sanitizeEvidenceText(excerptRaw, 1800) : undefined,
       quality: sourceQuality(host),
       fetchStatus,
       provenance,
@@ -338,7 +338,7 @@ export function collectEventsFromHit(
       resolvedUrl,
       host,
       publishedAt: p.publishedAt || undefined,
-      excerpt: hasBody ? sanitizeEvidenceText(excerptRaw, 900) : undefined,
+      excerpt: hasBody ? sanitizeEvidenceText(excerptRaw, 1800) : undefined,
       quality: sourceQuality(host),
       fetchStatus,
       provenance: provenanceForSource({ hasBody, host, fetchStatus }),
@@ -349,7 +349,7 @@ export function collectEventsFromHit(
 
   const byMerge = new Map<string, ResearchEvent>();
   // brief 僅作 search_snippet 線索，不用來當 article_body claim
-  const briefSafe = sanitizeEvidenceText(hit.brief, 2000);
+  const briefSafe = sanitizeEvidenceText(hit.brief, 4000);
 
   for (const src of rawSources) {
     const topic = guessTopic(`${src.title} ${src.excerpt ?? ""}`);
@@ -362,8 +362,8 @@ export function collectEventsFromHit(
     const claimType = inferClaimType(claimText, src.provenance);
     const attribution = inferAttribution(claimText, src.provenance);
     const statement = sanitizeEvidenceText(
-      src.excerpt?.slice(0, 280) || src.title,
-      280,
+      src.excerpt?.slice(0, 560) || src.title,
+      560,
     );
     const claim: ResearchClaim = {
       claimId: stableId("clm", src.sourceId, statement.slice(0, 40)),
@@ -468,7 +468,7 @@ export function collectEventsFromHit(
       }
       const statement = sanitizeEvidenceText(
         `【搜尋摘要，未經原文核對】${seg.trim()}`,
-        280,
+        560,
       );
       const topic = guessTopic(statement);
       const mergeKey = `synth:${stableId("syn", statement.slice(0, 48))}`;
