@@ -218,9 +218,13 @@ CREATE TABLE IF NOT EXISTS user_memories (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   fact TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'fact',
   updated_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_user_memories_user_cat ON user_memories(user_id, category, updated_at DESC);
+-- 既有庫升級（可重跑）
+ALTER TABLE user_memories ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'fact';
 
 -- 本串對話狀態筆記（不跟 8 輪視窗丟棄；每輪注入上游）
 CREATE TABLE IF NOT EXISTS conversation_states (

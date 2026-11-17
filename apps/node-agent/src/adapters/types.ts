@@ -27,6 +27,7 @@ export interface ProviderAdapter {
     messages: ChatMessage[];
     extraSystemContext?: string;
     customSystemPrompt?: string;
+    styleOverrideContext?: string;
     signal?: AbortSignal;
   }): AsyncGenerator<AdapterEvent>;
 }

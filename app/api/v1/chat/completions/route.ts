@@ -5,7 +5,14 @@ import { NoSourceError, routeChat } from "@/lib/gateway";
 import { findModel } from "@/lib/models";
 import { authenticatePlatformApiKey } from "@/lib/platform-api-auth";
 import { isAbortError, type ChatMessage } from "@/lib/providers";
-import { balance, settleAssistantMessage, createConversation, addUserMessage } from "@/lib/store";
+import {
+  addUserMessage,
+  applyPersonaFromUserMessage,
+  balance,
+  buildStyleOverrideContext,
+  createConversation,
+  settleAssistantMessage,
+} from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -103,7 +110,19 @@ export async function POST(req: Request) {
   // 影子對話：只記本輪最後一則 user（完整上下文由客戶端 messages 提供）
   const lastUser = [...messages].reverse().find((m) => m.role === "user")!;
   const convId = await createConversation(userId, lastUser.content.slice(0, 30), model.id);
-  await addUserMessage(convId, lastUser.content, model.id);
+  const userMsgId = await addUserMessage(convId, lastUser.content, model.id);
+  try {
+    await applyPersonaFromUserMessage({
+      userId,
+      conversationId: convId,
+      content: lastUser.content,
+      sourceMessageId: userMsgId,
+    });
+  } catch {
+    /* 記憶失敗不擋主流程 */
+  }
+  const styleOverrideContext =
+    (await buildStyleOverrideContext(userId, convId)).trim() || undefined;
 
   const completionId = `chatcmpl_${randomUUID().replace(/-/g, "").slice(0, 24)}`;
   const created = Math.floor(Date.now() / 1000);
@@ -124,7 +143,15 @@ export async function POST(req: Request) {
             choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
           });
 
-          for await (const ev of routeChat(model, messages, userId, req.signal, undefined, clientSystemPrompt)) {
+          for await (const ev of routeChat(
+            model,
+            messages,
+            userId,
+            req.signal,
+            undefined,
+            clientSystemPrompt,
+            styleOverrideContext,
+          )) {
             if (ev.type === "text") {
               answer += ev.text;
               send({
@@ -195,9 +222,17 @@ export async function POST(req: Request) {
   let answer = "";
   let doneEv: Awaited<ReturnType<typeof collectDone>> | null = null;
   try {
-    doneEv = await collectDone(model, messages, userId, req.signal, (t) => {
-      answer += t;
-    }, clientSystemPrompt);
+    doneEv = await collectDone(
+      model,
+      messages,
+      userId,
+      req.signal,
+      (t) => {
+        answer += t;
+      },
+      clientSystemPrompt,
+      styleOverrideContext,
+    );
   } catch (e) {
     const status = e instanceof NoSourceError ? 503 : 500;
     return Response.json(
@@ -247,6 +282,7 @@ async function collectDone(
   signal: AbortSignal | undefined,
   onText: (t: string) => void,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ) {
   let done: {
     usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
@@ -256,7 +292,15 @@ async function collectDone(
     jobId?: string;
   } | null = null;
 
-  for await (const ev of routeChat(model, messages, userId, signal, undefined, customSystemPrompt)) {
+  for await (const ev of routeChat(
+    model,
+    messages,
+    userId,
+    signal,
+    undefined,
+    customSystemPrompt,
+    styleOverrideContext,
+  )) {
     if (ev.type === "text") onText(ev.text);
     if (ev.type === "done") {
       done = {

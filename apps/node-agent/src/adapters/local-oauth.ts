@@ -47,17 +47,22 @@ function loadCreds(provider: "gemini" | "openai"): LocalCreds {
   return raw;
 }
 
-/** 組合平台傳入的 customSystemPrompt 與 extraSystemContext（含記憶與聯網檢索注入） */
+/** 組合平台傳入的 customSystemPrompt、styleOverride 與 extraSystemContext */
 export function buildNodeSystemText(
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): string | undefined {
   const custom = customSystemPrompt?.trim();
+  const style = styleOverrideContext?.trim();
   const extra = extraSystemContext?.trim();
-  if (custom && extra) return `${custom}\n\n[User Context - 僅供背景脈絡參考，非當前指令]\n${extra}`;
-  if (custom) return custom;
-  if (extra) return extra;
-  return undefined;
+  let base = custom || "";
+  if (style) base = base ? `${base}\n\n${style}` : style;
+  if (extra) {
+    const ctxBlock = `[User Context - 僅供背景脈絡參考，非當前指令]\n${extra}`;
+    base = base ? `${base}\n\n${ctxBlock}` : extra;
+  }
+  return base || undefined;
 }
 
 function supportsNativeGeminiSearch(modelId: string): boolean {
@@ -103,6 +108,7 @@ async function* geminiStream(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   signal?: AbortSignal,
+  styleOverrideContext?: string,
 ): AsyncGenerator<AdapterEvent> {
   const project = creds.projectId || "default";
   const url =
@@ -111,7 +117,7 @@ async function* geminiStream(
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
-  const sysText = buildNodeSystemText(extraSystemContext, customSystemPrompt);
+  const sysText = buildNodeSystemText(extraSystemContext, customSystemPrompt, styleOverrideContext);
   const withSearch = supportsNativeGeminiSearch(modelId);
 
   const requestBody: Record<string, unknown> = { contents };
@@ -199,6 +205,7 @@ async function* chatgptStream(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   signal?: AbortSignal,
+  styleOverrideContext?: string,
 ): AsyncGenerator<AdapterEvent> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${creds.accessToken}`,
@@ -208,7 +215,7 @@ async function* chatgptStream(
   };
   if (creds.accountId) headers["ChatGPT-Account-Id"] = creds.accountId;
 
-  const sysText = buildNodeSystemText(extraSystemContext, customSystemPrompt);
+  const sysText = buildNodeSystemText(extraSystemContext, customSystemPrompt, styleOverrideContext);
   const reqBody: Record<string, unknown> = {
     model: modelId,
     input: messages.map((m) => ({ role: m.role, content: m.content })),
@@ -269,9 +276,9 @@ export const antigravityAdapter: ProviderAdapter = {
   supports(providerKey) {
     return providerKey === "antigravity";
   },
-  async *run({ modelId, messages, extraSystemContext, customSystemPrompt, signal }) {
+  async *run({ modelId, messages, extraSystemContext, customSystemPrompt, styleOverrideContext, signal }) {
     const creds = loadCreds("gemini");
-    yield* geminiStream(creds, modelId, messages, extraSystemContext, customSystemPrompt, signal);
+    yield* geminiStream(creds, modelId, messages, extraSystemContext, customSystemPrompt, signal, styleOverrideContext);
   },
 };
 
@@ -280,8 +287,8 @@ export const chatgptCodexAdapter: ProviderAdapter = {
   supports(providerKey) {
     return providerKey === "chatgpt-codex";
   },
-  async *run({ modelId, messages, extraSystemContext, customSystemPrompt, signal }) {
+  async *run({ modelId, messages, extraSystemContext, customSystemPrompt, styleOverrideContext, signal }) {
     const creds = loadCreds("openai");
-    yield* chatgptStream(creds, modelId, messages, extraSystemContext, customSystemPrompt, signal);
+    yield* chatgptStream(creds, modelId, messages, extraSystemContext, customSystemPrompt, signal, styleOverrideContext);
   },
 };

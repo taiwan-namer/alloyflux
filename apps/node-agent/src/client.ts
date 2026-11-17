@@ -41,6 +41,7 @@ export class AgentApi {
         messages: { role: "user" | "assistant"; content: string }[];
         extraSystemContext?: string;
         customSystemPrompt?: string;
+        styleOverrideContext?: string;
         payloadSha256: string;
       };
       signature?: string;
@@ -83,6 +84,7 @@ export function verifyJobSignature(
     messages: unknown;
     extraSystemContext?: string;
     customSystemPrompt?: string;
+    styleOverrideContext?: string;
   },
   signature: string,
   payloadSha256: string,
@@ -93,6 +95,7 @@ export function verifyJobSignature(
     messages: job.messages,
     extraSystemContext: job.extraSystemContext?.trim() || undefined,
     customSystemPrompt: job.customSystemPrompt?.trim() || undefined,
+    styleOverrideContext: job.styleOverrideContext?.trim() || undefined,
   });
   if (createHash("sha256").update(payload).digest("hex") !== payloadSha256) return false;
   const expected = createHmac("sha256", hashCredential(credential)).update(payload).digest("hex");

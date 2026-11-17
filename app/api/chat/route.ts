@@ -12,14 +12,15 @@ import { cloudDbProxy } from "@/lib/cloud-api";
 import { getFreeDailyStatus, getOrCreateGuestIdentity, isFreeTierModel } from "@/lib/free-tier";
 import {
   addUserMessage,
+  applyPersonaFromUserMessage,
   balance,
+  buildStyleOverrideContext,
   buildUserMemoryContext,
   createConversation,
   deleteConversation,
   deleteMessage,
   getConversation,
   listMessages,
-  maybeRememberFromUserMessage,
   settleAssistantMessage,
 } from "@/lib/store";
 
@@ -179,14 +180,26 @@ export async function POST(req: Request) {
       }
     }
 
-    const [, userMemoryCtx, stateNoteCtx] = await Promise.all([
-      sessionUser ? maybeRememberFromUserMessage(userId, upstreamContent) : Promise.resolve(),
-      sessionUser
-        ? buildUserMemoryContext(userId, convId).then((s) => s || "")
-        : Promise.resolve(""),
+    // 先寫入本輪語氣／事實記憶，再組裝注入（避免本輪 style 趕不上注入）
+    try {
+      await applyPersonaFromUserMessage({
+        userId: sessionUser ? userId : null,
+        conversationId: convId,
+        content: upstreamContent,
+        sourceMessageId: userMsgId,
+      });
+    } catch (memErr) {
+      console.warn("[chat] persona remember failed", memErr instanceof Error ? memErr.message : memErr);
+    }
+
+    const [userMemoryCtx, styleOverrideCtx, stateNoteCtx] = await Promise.all([
+      sessionUser ? buildUserMemoryContext(userId, convId).then((s) => s || "") : Promise.resolve(""),
+      buildStyleOverrideContext(sessionUser ? userId : null, convId),
       buildConversationStateContext(convId),
     ]);
+    // 事實／狀態 → 非當前指令；語氣 → 獨立 styleOverride 通道
     const extraSystemContext = [stateNoteCtx, userMemoryCtx].filter((s) => s.trim()).join("\n\n") || undefined;
+    const styleOverrideContext = styleOverrideCtx.trim() || undefined;
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
@@ -211,7 +224,15 @@ export async function POST(req: Request) {
           for (;;) {
             let streamed = false;
             try {
-              for await (const ev of routeChat(model, history, userId, req.signal, extraSystemContext)) {
+              for await (const ev of routeChat(
+                model,
+                history,
+                userId,
+                req.signal,
+                extraSystemContext,
+                undefined,
+                styleOverrideContext,
+              )) {
                 if (ev.type === "text" || ev.type === "thinking") streamed = true;
                 if (ev.type === "text") answer += ev.text;
                 if (ev.type !== "done") {

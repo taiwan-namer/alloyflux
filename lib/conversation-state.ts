@@ -5,6 +5,8 @@
  */
 import { UPSTREAM_MAX_TURNS } from "./context-window";
 import { db, newId } from "./db";
+import { sameTopicLoose } from "./memory-topic";
+import { isSessionStyleConstraintText } from "./persona-style";
 import { estimateTokensApprox } from "./research-v2/token-budget";
 import type { StoredMessage } from "./store";
 
@@ -141,36 +143,8 @@ function activeEntries(list: StateEntry[]): StateEntry[] {
   return list.filter((e) => e.status !== "superseded");
 }
 
-/** 主題重疊粗判：英文詞或中文 bigram 共享 ≥2 視為同主題（供取代） */
 function sameTopic(a: string, b: string): boolean {
-  const tok = (s: string): string[] => {
-    const cleaned = s
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}]+/gu, " ")
-      .trim();
-    if (!cleaned) return [];
-    const out: string[] = [];
-    for (const part of cleaned.split(/\s+/).filter(Boolean)) {
-      if (/[\u4e00-\u9fff]/.test(part)) {
-        if (part.length <= 2) {
-          if (part.length >= 2) out.push(part);
-          continue;
-        }
-        for (let i = 0; i < part.length - 1; i++) out.push(part.slice(i, i + 2));
-      } else if (part.length >= 2) {
-        out.push(part);
-      }
-    }
-    return out;
-  };
-  const A = new Set(tok(a));
-  if (!A.size) return a.toLowerCase() === b.toLowerCase();
-  let hits = 0;
-  for (const t of tok(b)) {
-    if (A.has(t)) hits += 1;
-    if (hits >= 2) return true;
-  }
-  return a.toLowerCase() === b.toLowerCase();
+  return sameTopicLoose(a, b);
 }
 
 /**
@@ -362,7 +336,8 @@ export function formatConversationStateForInject(note: ConversationStateNote): s
     "【本串對話狀態筆記｜須遵守；與近期聊天衝突時以較新「已確認決策」為準；推測不可覆蓋使用者硬約束】",
   ];
   if (note.goal.trim()) lines.push(`目標：${note.goal.trim()}`);
-  const hc = activeEntries(note.hardConstraints);
+  // 語氣約束改由 styleOverride 通道注入，避免掉進「非當前指令」
+  const hc = activeEntries(note.hardConstraints).filter((c) => !isSessionStyleConstraintText(c.text));
   if (hc.length) {
     lines.push("硬性約束：");
     for (const c of hc) lines.push(formatEntryLine(c));

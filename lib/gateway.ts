@@ -82,6 +82,7 @@ async function* streamViaNodeAgent(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<GatewayEvent> {
   const route = resolveNodeRoute(model);
   if (!route) throw new UpstreamError(400, "此模型未設定 Node Agent 路由");
@@ -98,6 +99,7 @@ async function* streamViaNodeAgent(
     upstreamModel: route.upstreamModel,
     messages,
     extraSystemContext,
+    styleOverrideContext,
     customSystemPrompt,
   });
 
@@ -152,10 +154,12 @@ export async function* routeChat(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<GatewayEvent> {
   const upstreamMessages = slideMessagesForUpstream(messages);
   const ctx = extraSystemContext?.trim() || undefined;
   const customSys = customSystemPrompt?.trim() || undefined;
+  const styleCtx = styleOverrideContext?.trim() || undefined;
 
   const route = resolveNodeRoute(model);
   const nodeAvailable =
@@ -187,6 +191,7 @@ export async function* routeChat(
           signal,
           ctxForNode,
           customSys,
+          styleCtx,
         )) {
           yield attachResearchToDone(ev, prepared);
         }
@@ -199,7 +204,7 @@ export async function* routeChat(
       }
     }
 
-    yield* routeLocalCandidates(model, upstreamMessages, userId, signal, ctxForLocal, customSys, prepared);
+    yield* routeLocalCandidates(model, upstreamMessages, userId, signal, ctxForLocal, customSys, prepared, styleCtx);
   }
 
   yield* withPlatformResearchScope(prepared, supplyPath, routeBody());
@@ -213,6 +218,7 @@ async function* routeLocalCandidates(
   ctx: string | undefined,
   customSys: string | undefined,
   prepared: ResearchVerdict | null,
+  styleCtx?: string,
 ): AsyncGenerator<GatewayEvent> {
   // 混合水庫：含 oauth_sub；candidatesFor 已過濾 share_limit / cooldown
   const allCandidates = await candidatesFor(model);
@@ -243,7 +249,7 @@ async function* routeLocalCandidates(
     let started = false;
     let usage: Usage | null = null;
     try {
-      for await (const ev of streamFrom(c, model, upstreamMessages, safetyId, signal, ctx, customSys)) {
+      for await (const ev of streamFrom(c, model, upstreamMessages, safetyId, signal, ctx, customSys, styleCtx)) {
         if (ev.type === "text" || ev.type === "thinking") {
           if (!started) {
             started = true;

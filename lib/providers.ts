@@ -25,6 +25,7 @@ import {
   verdictToLegacyBundle,
   type ResearchVerdict,
 } from "./research-v2";
+import { appendStyleOverride } from "./persona-style";
 
 export interface ChatImage {
   mimeType: string;
@@ -288,57 +289,64 @@ function withResearchSystem(
 /**
  * @param customSystemPrompt 外部 API（/api/v1）客戶端 system／developer 合併結果；
  *   若有值則優先作為上游 System，不套用網頁版下載卡片等引導詞。
+ * @param styleOverrideContext 使用者語氣／排版覆蓋；接在預設【說話方式】【排版】（或 custom）之後，
+ *   且「絕對不」包進「非當前指令」。
  */
-function systemPromptFor(
+export function systemPromptFor(
   model: ModelInfo,
   upstreamId: string,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): string {
   const custom = customSystemPrompt?.trim();
+  let base: string;
   if (custom) {
-    return appendUserContext(custom.slice(0, 20_000), extraSystemContext);
+    base = custom.slice(0, 20_000);
+  } else {
+    const brand =
+      model.category === "chatgpt"
+        ? "OpenAI ChatGPT"
+        : model.category === "grok"
+          ? "xAI Grok"
+          : model.category.startsWith("antigravity")
+            ? "Google Antigravity"
+            : model.provider === "anthropic"
+              ? "Anthropic Claude"
+              : "Google Gemini";
+    base = [
+      `你是 ${brand} 的「${model.label}」（上游代號 ${upstreamId}）。`,
+      `若使用者問你是誰／哪個模型，請據實回答上述名稱與代號，不要否認或改稱成其他產品名。`,
+      `請使用繁體中文回答，除非使用者使用其他語言。`,
+      ``,
+      `【說話方式】`,
+      `- 像會聊天的資深顧問，不是寫論文或新聞稿。先給結論，再視需要展開。`,
+      `- 不要長篇開場白、不要情緒緩衝、不要硬湊「三種可能性」長文；不確定就直接說不確定，並反問來源。`,
+      `- 閒聊就短回；深度分析再用標題與條列拆解，避免文字高牆。`,
+      `- 遇到需要推理的題目，先在內部思考再給答案；思考過程可能會顯示給使用者看。`,
+      ``,
+      `【排版】`,
+      `- 使用 Markdown：##／### 標題、**粗體**、條列（-）、編號清單（1.）、表格。`,
+      `- 比較／數據優先用表格；程式用 fenced code block。`,
+      `- 你無法輸出 Cursor 的 GenerateWidget／LMDX 互動元件；改以 Markdown 表格或清晰條列呈現。`,
+      `- 引用外部來源時，請用 Markdown 短連結：\`[網站名或簡短標題](https://完整網址)\`，不要把帶一長串 utm 參數的裸 URL 直接貼在句中。`,
+      ``,
+      `【可下載檔案】`,
+      `- 當使用者上傳檔案要求修改回傳、或要求你產出可下載的檔案（如 CSV/Excel 表格、Markdown 報告、HTML 網頁、JSON、程式碼等）時，請務必將完整檔案內容包在三個反引號的程式碼區塊內，並在第一行標註檔名，格式為：\`\`\`語言:檔名.副檔名（例如 \`\`\`csv:修改後報表.csv 或 \`\`\`html:index.html）。`,
+      `- 若使用者要求製作小遊戲、互動工具、視覺化圖表或網頁示範，請優先輸出單一完整的 HTML 檔案（將 CSS 與 JavaScript 內嵌於同一個檔案中），並標註為 \`\`\`html:preview.html，以便前端直接渲染互動預覽。`,
+      `- 產出單頁 HTML 預覽時，請保持 CSS 與 JS 結構緊湊精煉（目標控制在 220 行以內），避免冗長重複樣式與無用註解，以兼顧載入速度與精準度。`,
+      ``,
+      `【即時查證】`,
+      searchCapabilityLine(model),
+      `- 系統後台具備自動聯網檢索能力（當判定需要外部即時資訊時，系統會自動將檢索結果注入於背景提示中）。若本輪未注入檢索資料，代表問題屬於通用專業知識與架構設計，請直接以你的專業知識庫完整解答，切勿向使用者抱怨「我沒有即時瀏覽工具」或「我無法上網」。`,
+      `- 若本輪 System 已附上即時檢索結果：請直接整理回答並附來源連結；禁止要求使用者另行貼連結，禁止說「這不是已完成的即時查詢」或「我無法自行搜尋」。`,
+      `- 若前幾輪對話中你已引用即時檢索回答了最新時事數據，後續追問時請維持前後文事實連貫，切勿因為當輪歷史訊息經過摘要壓縮而懷疑自己上一輪的查證結果並主動撤回。`,
+      `- 若歷史中曾出現撤回／「未證實」語氣，但本輪已有新的檢索注入，以本輪檢索為準重新作答，不要延續撤回。`,
+      `- 搜尋不到就直說「查無可靠來源」，不要硬編三種猜測長文。`,
+    ].join("\n");
   }
-  const brand =
-    model.category === "chatgpt"
-      ? "OpenAI ChatGPT"
-      : model.category === "grok"
-        ? "xAI Grok"
-        : model.category.startsWith("antigravity")
-          ? "Google Antigravity"
-          : model.provider === "anthropic"
-            ? "Anthropic Claude"
-            : "Google Gemini";
-  const base = [
-    `你是 ${brand} 的「${model.label}」（上游代號 ${upstreamId}）。`,
-    `若使用者問你是誰／哪個模型，請據實回答上述名稱與代號，不要否認或改稱成其他產品名。`,
-    `請使用繁體中文回答，除非使用者使用其他語言。`,
-    ``,
-    `【說話方式】`,
-    `- 像會聊天的資深顧問，不是寫論文或新聞稿。先給結論，再視需要展開。`,
-    `- 不要長篇開場白、不要情緒緩衝、不要硬湊「三種可能性」長文；不確定就直接說不確定，並反問來源。`,
-    `- 閒聊就短回；深度分析再用標題與條列拆解，避免文字高牆。`,
-    `- 遇到需要推理的題目，先在內部思考再給答案；思考過程可能會顯示給使用者看。`,
-    ``,
-    `【排版】`,
-    `- 使用 Markdown：##／### 標題、**粗體**、條列（-）、編號清單（1.）、表格。`,
-    `- 比較／數據優先用表格；程式用 fenced code block。`,
-    `- 你無法輸出 Cursor 的 GenerateWidget／LMDX 互動元件；改以 Markdown 表格或清晰條列呈現。`,
-    `- 引用外部來源時，請用 Markdown 短連結：\`[網站名或簡短標題](https://完整網址)\`，不要把帶一長串 utm 參數的裸 URL 直接貼在句中。`,
-    ``,
-    `【可下載檔案】`,
-    `- 當使用者上傳檔案要求修改回傳、或要求你產出可下載的檔案（如 CSV/Excel 表格、Markdown 報告、HTML 網頁、JSON、程式碼等）時，請務必將完整檔案內容包在三個反引號的程式碼區塊內，並在第一行標註檔名，格式為：\`\`\`語言:檔名.副檔名（例如 \`\`\`csv:修改後報表.csv 或 \`\`\`html:index.html）。`,
-    `- 若使用者要求製作小遊戲、互動工具、視覺化圖表或網頁示範，請優先輸出單一完整的 HTML 檔案（將 CSS 與 JavaScript 內嵌於同一個檔案中），並標註為 \`\`\`html:preview.html，以便前端直接渲染互動預覽。`,
-    `- 產出單頁 HTML 預覽時，請保持 CSS 與 JS 結構緊湊精煉（目標控制在 220 行以內），避免冗長重複樣式與無用註解，以兼顧載入速度與精準度。`,
-    ``,
-    `【即時查證】`,
-    searchCapabilityLine(model),
-    `- 系統後台具備自動聯網檢索能力（當判定需要外部即時資訊時，系統會自動將檢索結果注入於背景提示中）。若本輪未注入檢索資料，代表問題屬於通用專業知識與架構設計，請直接以你的專業知識庫完整解答，切勿向使用者抱怨「我沒有即時瀏覽工具」或「我無法上網」。`,
-    `- 若本輪 System 已附上即時檢索結果：請直接整理回答並附來源連結；禁止要求使用者另行貼連結，禁止說「這不是已完成的即時查詢」或「我無法自行搜尋」。`,
-    `- 若前幾輪對話中你已引用即時檢索回答了最新時事數據，後續追問時請維持前後文事實連貫，切勿因為當輪歷史訊息經過摘要壓縮而懷疑自己上一輪的查證結果並主動撤回。`,
-    `- 若歷史中曾出現撤回／「未證實」語氣，但本輪已有新的檢索注入，以本輪檢索為準重新作答，不要延續撤回。`,
-    `- 搜尋不到就直說「查無可靠來源」，不要硬編三種猜測長文。`,
-  ].join("\n");
+  // 語氣覆蓋緊接在預設說話方式／排版（或 custom）之後；事實背景仍走「非當前指令」
+  base = appendStyleOverride(base, styleOverrideContext);
   return appendUserContext(base, extraSystemContext);
 }
 
@@ -542,10 +550,11 @@ async function* geminiSubscriptionStream(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<StreamEvent> {
   let creds = await ensureFreshOAuth(c.source.id, c.oauthCreds!);
   try {
-    yield* geminiSubscriptionStreamOnce(c, model, messages, creds, signal, extraSystemContext, customSystemPrompt);
+    yield* geminiSubscriptionStreamOnce(c, model, messages, creds, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
     return;
   } catch (e) {
     const err = e instanceof UpstreamError ? e : new UpstreamError(0, e instanceof Error ? e.message : String(e));
@@ -554,7 +563,7 @@ async function* geminiSubscriptionStream(
   // Token／專案失效：強制 refresh + 重抓 projectId，再試一次
   creds = await forceRefreshGeminiOAuth(c.source.id, creds);
   try {
-    yield* geminiSubscriptionStreamOnce(c, model, messages, creds, signal, extraSystemContext, customSystemPrompt);
+    yield* geminiSubscriptionStreamOnce(c, model, messages, creds, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
   } catch (e) {
     const err = e instanceof UpstreamError ? e : new UpstreamError(0, e instanceof Error ? e.message : String(e));
     throw humanizeGeminiAuthError(err);
@@ -706,6 +715,7 @@ async function* geminiSubscriptionStreamOnce(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<StreamEvent> {
   const catalogBefore = await loadAntigravityCatalog(c.source.id, creds);
   logAntigravityCatalogIds(catalogBefore);
@@ -746,7 +756,7 @@ async function* geminiSubscriptionStreamOnce(
       parts: [
         {
           text: withResearchSystem(
-            systemPromptFor(model, upstreamModel, extraSystemContext, customSystemPrompt),
+            systemPromptFor(model, upstreamModel, extraSystemContext, customSystemPrompt, styleOverrideContext),
             researchAttach,
           ),
         },
@@ -901,6 +911,7 @@ async function* chatgptSubscriptionStream(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<StreamEvent> {
   const creds = await ensureFreshOAuth(c.source.id, c.oauthCreds!);
   const upstreamModel = model.codexId ?? model.id;
@@ -927,7 +938,7 @@ async function* chatgptSubscriptionStream(
   const body: Record<string, unknown> = {
     model: upstreamModel,
     instructions: withResearchSystem(
-      systemPromptFor(model, upstreamModel, extraSystemContext, customSystemPrompt),
+      systemPromptFor(model, upstreamModel, extraSystemContext, customSystemPrompt, styleOverrideContext),
       research,
     ),
     input,
@@ -1091,6 +1102,7 @@ async function* grokSubscriptionStream(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<StreamEvent> {
   const creds = await ensureFreshOAuth(c.source.id, c.oauthCreds!);
   const upstreamModel = model.grokId ?? model.id;
@@ -1112,7 +1124,7 @@ async function* grokSubscriptionStream(
   const body: Record<string, unknown> = {
     model: upstreamModel,
     instructions: withResearchSystem(
-      systemPromptFor(model, upstreamModel, extraSystemContext, customSystemPrompt),
+      systemPromptFor(model, upstreamModel, extraSystemContext, customSystemPrompt, styleOverrideContext),
       research,
     ),
     input,
@@ -1225,6 +1237,7 @@ async function* geminiApiKeyStream(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<StreamEvent> {
   const apiModel = model.geminiApiId ?? model.id;
   const res = await post(
@@ -1232,7 +1245,7 @@ async function* geminiApiKeyStream(
     {},
     {
       systemInstruction: {
-        parts: [{ text: systemPromptFor(model, apiModel, extraSystemContext, customSystemPrompt) }],
+        parts: [{ text: systemPromptFor(model, apiModel, extraSystemContext, customSystemPrompt, styleOverrideContext) }],
       },
       contents: messages.map((m) => ({
         role: m.role === "assistant" ? "model" : "user",
@@ -1273,6 +1286,7 @@ async function* openaiCompatible(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<StreamEvent> {
   const isOpenRouter = c.source.provider === "openrouter";
   const isXai = c.source.provider === "xai";
@@ -1287,7 +1301,7 @@ async function* openaiCompatible(
       {
         role: "system",
         content: withResearchSystem(
-          systemPromptFor(model, upstream, extraSystemContext, customSystemPrompt),
+          systemPromptFor(model, upstream, extraSystemContext, customSystemPrompt, styleOverrideContext),
           research,
         ),
       },
@@ -1349,6 +1363,7 @@ async function* anthropic(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<StreamEvent> {
   const effort = normalizeEffort(model.effort);
   const budget = thinkingBudgetFor(effort);
@@ -1359,7 +1374,7 @@ async function* anthropic(
     model: model.id,
     max_tokens: maxOutputTokensFor(effort),
     system: withResearchSystem(
-      systemPromptFor(model, model.id, extraSystemContext, customSystemPrompt),
+      systemPromptFor(model, model.id, extraSystemContext, customSystemPrompt, styleOverrideContext),
       research,
     ),
     messages: messages.map((m) => ({
@@ -1443,24 +1458,25 @@ export function streamFrom(
   signal?: AbortSignal,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): AsyncGenerator<StreamEvent> {
   if (c.source.authType === "oauth_sub") {
     // 研究／相容路徑：平台持有的訂閱 OAuth（與 Node Agent 買家任務隔離）
     if (c.source.provider === "gemini" && model.antigravityId) {
-      return geminiSubscriptionStream(c, model, messages, signal, extraSystemContext, customSystemPrompt);
+      return geminiSubscriptionStream(c, model, messages, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
     }
     if (c.source.provider === "openai") {
-      return chatgptSubscriptionStream(c, model, messages, signal, extraSystemContext, customSystemPrompt);
+      return chatgptSubscriptionStream(c, model, messages, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
     }
     if (c.source.provider === "xai") {
-      return grokSubscriptionStream(c, model, messages, signal, extraSystemContext, customSystemPrompt);
+      return grokSubscriptionStream(c, model, messages, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
     }
   }
   if (c.source.provider === "gemini") {
-    return geminiApiKeyStream(c, model, messages, signal, extraSystemContext, customSystemPrompt);
+    return geminiApiKeyStream(c, model, messages, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
   }
   if (c.source.provider === "anthropic") {
-    return anthropic(c, model, messages, safetyId, signal, extraSystemContext, customSystemPrompt);
+    return anthropic(c, model, messages, safetyId, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
   }
-  return openaiCompatible(c, model, messages, safetyId, signal, extraSystemContext, customSystemPrompt);
+  return openaiCompatible(c, model, messages, safetyId, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
 }

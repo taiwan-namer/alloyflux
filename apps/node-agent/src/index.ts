@@ -163,6 +163,7 @@ async function start() {
         messages: job.messages,
         extraSystemContext: job.extraSystemContext,
         customSystemPrompt: job.customSystemPrompt,
+        styleOverrideContext: job.styleOverrideContext,
       })) {
         if (ev.type === "text") {
           await api.result({ action: "event", jobId: job.id, event: { type: "text", text: ev.text } });

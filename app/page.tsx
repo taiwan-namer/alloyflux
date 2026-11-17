@@ -96,6 +96,21 @@ interface ApiKeyRow {
   createdAt: number;
 }
 
+interface UserMemoryItem {
+  id: string;
+  fact: string;
+  category: "fact" | "style";
+  updatedAt: number;
+}
+
+/** 語氣快速範本：點選後寫入全局 style 記憶 */
+const STYLE_QUICK_TEMPLATES: { label: string; text: string }[] = [
+  { label: "⚡ 極簡重點（不講廢話）", text: "回答極簡重點，不講廢話，先給結論" },
+  { label: "👨‍💻 資深工程師（先給 Code）", text: "用資深工程師口吻；先給程式碼，少解釋" },
+  { label: "🔥 毒舌顧問（直接點出盲點）", text: "毒舌顧問口吻，直接點出盲點與風險，不要客套" },
+  { label: "🧒 白話文（像對國中生解釋）", text: "用白話文、像對國中生解釋，避免術語堆疊" },
+];
+
 const fmt = (n: number | null | undefined, digits = 2) =>
   (n ?? 0).toLocaleString("zh-TW", { maximumFractionDigits: digits });
 
@@ -1012,6 +1027,12 @@ export default function ChatPage() {
   const [freshApiKey, setFreshApiKey] = useState<string | null>(null);
   const [apiKeysBusy, setApiKeysBusy] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [memories, setMemories] = useState<UserMemoryItem[]>([]);
+  const [memoryBusy, setMemoryBusy] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState("");
+  const [memoryCategory, setMemoryCategory] = useState<"style" | "fact">("style");
+  const [memoryMsg, setMemoryMsg] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [mintedCode, setMintedCode] = useState<string | null>(null);
   const [mintMsg, setMintMsg] = useState<string | null>(null);
@@ -1334,6 +1355,8 @@ export default function ChatPage() {
     setMessages([]);
     setActiveId(null);
     setAccountOpen(false);
+    setMemoryOpen(false);
+    setMemories([]);
     setSidebarOpen(false);
     if (currentLocked) setFamilyId(AUTO_FAMILY_ID);
     void refreshMe();
@@ -1471,6 +1494,61 @@ export default function ChatPage() {
   useEffect(() => {
     if (accountOpen && authUser) void refreshApiKeys();
   }, [accountOpen, authUser?.id]);
+
+  async function refreshMemories() {
+    if (!authUser) return;
+    try {
+      const res = await fetch("/api/user-memories");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "讀取記憶失敗");
+      setMemories(Array.isArray(data.memories) ? (data.memories as UserMemoryItem[]) : []);
+    } catch (e) {
+      setMemoryMsg(e instanceof Error ? e.message : "讀取記憶失敗");
+    }
+  }
+
+  async function addMemory(text: string, category: "style" | "fact") {
+    const trimmed = text.trim();
+    if (!trimmed || memoryBusy) return;
+    setMemoryBusy(true);
+    setMemoryMsg(null);
+    try {
+      const res = await fetch("/api/user-memories", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: trimmed, category }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "新增失敗");
+      setMemoryDraft("");
+      setMemoryMsg(category === "style" ? "已記住語氣偏好（跨模型生效）" : "已記住背景事實");
+      await refreshMemories();
+    } catch (e) {
+      setMemoryMsg(e instanceof Error ? e.message : "新增失敗");
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
+
+  async function removeMemory(id: string) {
+    if (memoryBusy) return;
+    setMemoryBusy(true);
+    setMemoryMsg(null);
+    try {
+      const res = await fetch(`/api/user-memories?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error || "刪除失敗");
+      setMemories((prev) => prev.filter((m) => m.id !== id));
+    } catch (e) {
+      setMemoryMsg(e instanceof Error ? e.message : "刪除失敗");
+    } finally {
+      setMemoryBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (memoryOpen && authUser) void refreshMemories();
+  }, [memoryOpen, authUser?.id]);
 
   function resizeTextarea() {
     const el = textareaRef.current;
@@ -1968,9 +2046,22 @@ export default function ChatPage() {
                     </div>
                   </div>
                 )}
-                <div className="row" style={{ justifyContent: "space-between", fontSize: 12, marginTop: 4 }}>
-                  <Link href="/vendor">算力節點夥伴 →</Link>
-                  {authUser.isAdmin && <Link href="/admin">管理後台 →</Link>}
+                <div className="row" style={{ justifyContent: "space-between", fontSize: 12, marginTop: 4, gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="ghost memory-entry-btn"
+                    onClick={() => {
+                      setMemoryMsg(null);
+                      setMemoryOpen(true);
+                    }}
+                    title="跨模型生效的語氣與背景記憶"
+                  >
+                    🧠 記憶與語氣
+                  </button>
+                  <span className="row" style={{ gap: 10 }}>
+                    <Link href="/vendor">算力節點夥伴 →</Link>
+                    {authUser.isAdmin && <Link href="/admin">管理後台 →</Link>}
+                  </span>
                 </div>
               </>
             ) : (
@@ -2475,6 +2566,151 @@ export default function ChatPage() {
           </div>
         </div>
       </main>
+
+      {memoryOpen && authUser && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setMemoryOpen(false);
+          }}
+        >
+          <div
+            className="modal-panel memory-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="memory-modal-title"
+          >
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+              <div>
+                <h2 id="memory-modal-title">🧠 記憶與語氣</h2>
+                <p className="muted memory-hint">
+                  💡 這裡設定的語氣與記憶會跨模型生效（切換 GPT、Claude、Gemini 皆會自動套用）。你也可以直接在對話中說「以後都用某某語氣回我」讓系統自動記住。
+                </p>
+              </div>
+              <button type="button" className="ghost" onClick={() => setMemoryOpen(false)}>
+                關閉
+              </button>
+            </div>
+
+            <div className="modal-section">
+              <h3>快速新增</h3>
+              <div className="memory-templates">
+                {STYLE_QUICK_TEMPLATES.map((t) => (
+                  <button
+                    key={t.label}
+                    type="button"
+                    className="memory-chip"
+                    disabled={memoryBusy}
+                    title={`新增語氣：${t.text}`}
+                    onClick={() => {
+                      setMemoryCategory("style");
+                      setMemoryDraft(t.text);
+                      void addMemory(t.text, "style");
+                    }}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <div className="memory-add-row">
+                <select
+                  className="memory-cat-select"
+                  value={memoryCategory}
+                  disabled={memoryBusy}
+                  onChange={(e) => setMemoryCategory(e.target.value === "fact" ? "fact" : "style")}
+                  title="記憶類別"
+                >
+                  <option value="style">語氣偏好</option>
+                  <option value="fact">背景事實</option>
+                </select>
+                <input
+                  value={memoryDraft}
+                  disabled={memoryBusy}
+                  onChange={(e) => setMemoryDraft(e.target.value)}
+                  placeholder={
+                    memoryCategory === "style"
+                      ? "例如：回答簡短、叫我老闆、先給程式碼"
+                      : "例如：我是前端工程師、專案叫 AlloyFlux"
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                      e.preventDefault();
+                      void addMemory(memoryDraft, memoryCategory);
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={memoryBusy || !memoryDraft.trim()}
+                  onClick={() => void addMemory(memoryDraft, memoryCategory)}
+                >
+                  新增
+                </button>
+              </div>
+              {memoryMsg && <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>{memoryMsg}</p>}
+            </div>
+
+            <div className="modal-section">
+              <h3>語氣與排版偏好 (style)</h3>
+              {memories.filter((m) => m.category === "style").length === 0 ? (
+                <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                  尚無語氣偏好。點上方範本，或輸入後新增。
+                </p>
+              ) : (
+                <ul className="memory-list">
+                  {memories
+                    .filter((m) => m.category === "style")
+                    .map((m) => (
+                      <li key={m.id} className="memory-item">
+                        <span className="memory-item-text">{m.fact}</span>
+                        <button
+                          type="button"
+                          className="memory-del"
+                          title="刪除"
+                          disabled={memoryBusy}
+                          aria-label={`刪除語氣：${m.fact}`}
+                          onClick={() => void removeMemory(m.id)}
+                        >
+                          ×
+                        </button>
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="modal-section">
+              <h3>個人背景記憶 (fact)</h3>
+              {memories.filter((m) => m.category === "fact").length === 0 ? (
+                <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                  尚無背景記憶。可在對話自述，或於此手動新增。
+                </p>
+              ) : (
+                <ul className="memory-list">
+                  {memories
+                    .filter((m) => m.category === "fact")
+                    .map((m) => (
+                      <li key={m.id} className="memory-item">
+                        <span className="memory-item-text">{m.fact}</span>
+                        <button
+                          type="button"
+                          className="memory-del"
+                          title="刪除"
+                          disabled={memoryBusy}
+                          aria-label={`刪除背景：${m.fact}`}
+                          onClick={() => void removeMemory(m.id)}
+                        >
+                          ×
+                        </button>
+                      </li>
+                    ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {accountOpen && authUser && (
         <div

@@ -53,10 +53,12 @@ export interface InferenceJob {
   providerKey: string;
   upstreamModel: string;
   messages: ChatMessage[];
-  /** 原生 system 通道附加脈絡（不進 messages） */
+  /** 原生 system 通道附加脈絡（不進 messages；僅供背景，非當前指令） */
   extraSystemContext?: string;
   /** 外部 API 客戶端 system／developer（優先於平台網頁版 prompt） */
   customSystemPrompt?: string;
+  /** 使用者語氣／排版覆蓋（最高優先；不包「非當前指令」） */
+  styleOverrideContext?: string;
   status: JobStatus;
   assignedNodeId: string | null;
   resultText: string;
@@ -96,6 +98,7 @@ function payloadCanonical(
   upstreamModel: string,
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): string {
   return JSON.stringify({
     modelId,
@@ -103,6 +106,7 @@ function payloadCanonical(
     messages,
     extraSystemContext: extraSystemContext?.trim() || undefined,
     customSystemPrompt: customSystemPrompt?.trim() || undefined,
+    styleOverrideContext: styleOverrideContext?.trim() || undefined,
   });
 }
 
@@ -110,20 +114,27 @@ function sha256(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
-/** messages_json：舊格式為陣列；新格式為 { messages, extraSystemContext?, customSystemPrompt? } */
+/** messages_json：舊格式為陣列；新格式為 { messages, extraSystemContext?, customSystemPrompt?, styleOverrideContext? } */
 function parseJobMessagesJson(raw: string): {
   messages: ChatMessage[];
   extraSystemContext?: string;
   customSystemPrompt?: string;
+  styleOverrideContext?: string;
 } {
   const parsed = JSON.parse(raw) as
     | ChatMessage[]
-    | { messages?: ChatMessage[]; extraSystemContext?: string; customSystemPrompt?: string };
+    | {
+        messages?: ChatMessage[];
+        extraSystemContext?: string;
+        customSystemPrompt?: string;
+        styleOverrideContext?: string;
+      };
   if (Array.isArray(parsed)) return { messages: parsed };
   return {
     messages: Array.isArray(parsed.messages) ? parsed.messages : [],
     extraSystemContext: parsed.extraSystemContext?.trim() || undefined,
     customSystemPrompt: parsed.customSystemPrompt?.trim() || undefined,
+    styleOverrideContext: parsed.styleOverrideContext?.trim() || undefined,
   };
 }
 
@@ -131,14 +142,17 @@ function serializeJobMessagesJson(
   messages: ChatMessage[],
   extraSystemContext?: string,
   customSystemPrompt?: string,
+  styleOverrideContext?: string,
 ): string {
   const ctx = extraSystemContext?.trim();
   const custom = customSystemPrompt?.trim();
-  if (ctx || custom) {
+  const style = styleOverrideContext?.trim();
+  if (ctx || custom || style) {
     return JSON.stringify({
       messages,
       extraSystemContext: ctx || undefined,
       customSystemPrompt: custom || undefined,
+      styleOverrideContext: style || undefined,
     });
   }
   return JSON.stringify(messages);
@@ -155,6 +169,7 @@ function rowToJob(r: Record<string, unknown>): InferenceJob {
     messages: parsed.messages,
     extraSystemContext: parsed.extraSystemContext,
     customSystemPrompt: parsed.customSystemPrompt,
+    styleOverrideContext: parsed.styleOverrideContext,
     status: r.status as JobStatus,
     assignedNodeId: (r.assigned_node_id as string) ?? null,
     resultText: (r.result_text as string) ?? "",
@@ -228,10 +243,12 @@ export async function enqueueInferenceJob(input: {
   messages: ChatMessage[];
   extraSystemContext?: string;
   customSystemPrompt?: string;
+  styleOverrideContext?: string;
 }): Promise<InferenceJob> {
   const ctx = input.extraSystemContext?.trim() || undefined;
   const custom = input.customSystemPrompt?.trim() || undefined;
-  const payload = payloadCanonical(input.messages, input.modelId, input.upstreamModel, ctx, custom);
+  const style = input.styleOverrideContext?.trim() || undefined;
+  const payload = payloadCanonical(input.messages, input.modelId, input.upstreamModel, ctx, custom, style);
   if (Buffer.byteLength(payload, "utf8") > MAX_MESSAGES_BYTES) {
     throw Object.assign(new Error("訊息過大"), { status: 413 });
   }
@@ -251,7 +268,7 @@ export async function enqueueInferenceJob(input: {
       input.modelId,
       input.providerKey,
       input.upstreamModel,
-      serializeJobMessagesJson(input.messages, ctx, custom),
+      serializeJobMessagesJson(input.messages, ctx, custom, style),
       `settle:${id}`,
       now,
       now + JOB_TIMEOUT_MS,
@@ -323,6 +340,7 @@ export async function sweepStaleJobs(): Promise<void> {
           job.upstreamModel,
           job.extraSystemContext,
           job.customSystemPrompt,
+          job.styleOverrideContext,
         );
         await assignJobToNode(job.id, node, payload);
       } else {
@@ -342,6 +360,7 @@ export async function sweepStaleJobs(): Promise<void> {
           job.upstreamModel,
           job.extraSystemContext,
           job.customSystemPrompt,
+          job.styleOverrideContext,
         );
         await assignJobToNode(job.id, node, payload);
       } else {
@@ -503,6 +522,7 @@ export async function failJob(jobId: string, nodeId: string, message: string, st
         job.upstreamModel,
         job.extraSystemContext,
         job.customSystemPrompt,
+        job.styleOverrideContext,
       );
       await assignJobToNode(jobId, node, payload);
       return true;
@@ -575,6 +595,7 @@ export function jobPublicForNode(job: InferenceJob) {
     messages: job.messages,
     extraSystemContext: job.extraSystemContext,
     customSystemPrompt: job.customSystemPrompt,
+    styleOverrideContext: job.styleOverrideContext,
     payloadSha256: job.payloadSha256,
     timeoutAt: job.timeoutAt,
   };

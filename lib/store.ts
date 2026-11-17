@@ -1,5 +1,19 @@
+import {
+  getConversationState,
+  mergeStateNote,
+  upsertConversationState,
+  type StateEntry,
+} from "./conversation-state";
 import { hintOf, randomToken } from "./crypto";
 import { db, newId, type Db } from "./db";
+import {
+  extractStyleDirectives,
+  formatStyleOverrideBlock,
+  isSessionStyleConstraintText,
+  resolveStyleConflicts,
+  toSessionStyleConstraintText,
+  USER_STYLE_CAP,
+} from "./persona-style";
 import { chargeBuyerForJobIdempotent } from "./supplier-settlement";
 
 /** @deprecated 多租戶後僅供 smoke／遷移參考；業務路徑請用 Session user.id */
@@ -257,12 +271,21 @@ export async function usageSummary(
   };
 }
 
-/** 注入 system 的總字元硬上限（約等於短背景，避免佔滿上下文） */
+/** 注入 system 的事實背景字元硬上限（與 style 額度分離） */
 export const MAX_MEMORY_CHARS = 800;
 const USER_MEMORY_CAP = 15;
 const CROSS_CHAT_LIMIT = 6;
 const FACT_MIN_LEN = 6;
 const FACT_MAX_LEN = 120;
+
+export type MemoryCategory = "fact" | "style";
+
+export type UserMemoryRow = {
+  id: string;
+  fact: string;
+  category: MemoryCategory;
+  updatedAt: number;
+};
 
 const SENSITIVE_RE =
   /sk[_-]|password|密碼|驗證碼|token|bearer|api[_-]?key|secret|私钥|私鑰|access[_-]?key/i;
@@ -272,14 +295,12 @@ export function looksSensitive(text: string): boolean {
   return SENSITIVE_RE.test(text);
 }
 
+/** 事實擷取（語氣改由 persona-style；此處不再把「請用…語氣」當 fact） */
 const MEMORY_EXTRACT_RES: RegExp[] = [
   /我是[^。！？\n]{2,80}/,
   /我的職業[是為][^。！？\n]{2,80}/,
   /我做[的]?[是為][^。！？\n]{2,80}/,
   /我的專案[是為叫名稱]?[^。！？\n]{2,80}/,
-  /請用[^。！？\n]{1,40}(?:語氣|語言|回覆|回答)/,
-  /記住[：:\s]?[^。！？\n]{2,80}/,
-  /請記住[^。！？\n]{2,80}/,
 ];
 
 function normalizeFact(raw: string): string | null {
@@ -289,51 +310,157 @@ function normalizeFact(raw: string): string | null {
   return fact;
 }
 
-async function pruneUserMemories(userId: string): Promise<void> {
-  // 用 OFFSET 淘汰超過上限的最舊列（依 updated_at DESC 保留前 N）；Postgres 不需 LIMIT -1
+function normalizeCategory(raw: string | null | undefined): MemoryCategory {
+  return raw === "style" ? "style" : "fact";
+}
+
+let memoriesSchemaReady = false;
+
+/** 確保 user_memories.category 存在（舊庫升級；可重跑） */
+export async function ensureUserMemoriesSchema(): Promise<void> {
+  if (memoriesSchemaReady) return;
+  try {
+    await db().exec(
+      `ALTER TABLE user_memories ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'fact'`,
+    );
+    await db().exec(
+      `CREATE INDEX IF NOT EXISTS idx_user_memories_user_cat ON user_memories(user_id, category, updated_at DESC)`,
+    );
+    memoriesSchemaReady = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/does not exist|relation/i.test(msg)) {
+      console.warn("[user_memories] table missing; skip schema ensure");
+      return;
+    }
+    // 欄位已存在等可忽略
+    memoriesSchemaReady = true;
+  }
+}
+
+async function pruneUserMemories(userId: string, category: MemoryCategory): Promise<void> {
+  const cap = category === "style" ? USER_STYLE_CAP : USER_MEMORY_CAP;
   await db()
     .prepare(
       `DELETE FROM user_memories
        WHERE id IN (
          SELECT id FROM user_memories
-         WHERE user_id = ?
+         WHERE user_id = ? AND category = ?
          ORDER BY updated_at DESC
          OFFSET ?
        )`,
     )
-    .run(userId, USER_MEMORY_CAP);
+    .run(userId, category, cap);
 }
 
-/** 寫入／去重更新一條長期事實；每人最多保留最近 USER_MEMORY_CAP 條 */
-export async function upsertUserMemory(userId: string, fact: string): Promise<void> {
+/** 寫入／去重更新一條長期記憶；style 會覆蓋同主題舊條目 */
+export async function upsertUserMemory(
+  userId: string,
+  fact: string,
+  category: MemoryCategory = "fact",
+): Promise<UserMemoryRow | null> {
+  await ensureUserMemoriesSchema();
   const normalized = normalizeFact(fact);
-  if (!normalized) return;
+  if (!normalized) return null;
+  const cat = normalizeCategory(category);
   const now = Date.now();
-  const existing = (await db()
-    .prepare("SELECT id FROM user_memories WHERE user_id = ? AND fact = ?")
-    .get(userId, normalized)) as { id: string } | undefined;
-  if (existing) {
-    await db().prepare("UPDATE user_memories SET updated_at = ? WHERE id = ?").run(now, existing.id);
-  } else {
-    await db()
-      .prepare("INSERT INTO user_memories (id, user_id, fact, updated_at) VALUES (?, ?, ?, ?)")
-      .run(newId(), userId, normalized, now);
+
+  if (cat === "style") {
+    const existingStyles = await listUserMemoryRows(userId, "style", USER_STYLE_CAP);
+    const { superseded } = resolveStyleConflicts(
+      existingStyles.map((r) => r.fact),
+      normalized,
+    );
+    for (const old of superseded) {
+      const row = existingStyles.find((r) => r.fact === old);
+      if (row) {
+        await db().prepare("DELETE FROM user_memories WHERE id = ? AND user_id = ?").run(row.id, userId);
+      }
+    }
   }
-  await pruneUserMemories(userId);
+
+  const existing = (await db()
+    .prepare("SELECT id FROM user_memories WHERE user_id = ? AND fact = ? AND category = ?")
+    .get(userId, normalized, cat)) as { id: string } | undefined;
+  let id: string;
+  if (existing) {
+    id = existing.id;
+    await db()
+      .prepare("UPDATE user_memories SET updated_at = ?, category = ? WHERE id = ?")
+      .run(now, cat, id);
+  } else {
+    id = newId();
+    await db()
+      .prepare("INSERT INTO user_memories (id, user_id, fact, category, updated_at) VALUES (?, ?, ?, ?, ?)")
+      .run(id, userId, normalized, cat, now);
+  }
+  await pruneUserMemories(userId, cat);
+  return { id, fact: normalized, category: cat, updatedAt: now };
+}
+
+export async function listUserMemoryRows(
+  userId: string,
+  category?: MemoryCategory,
+  limit = USER_MEMORY_CAP,
+): Promise<UserMemoryRow[]> {
+  await ensureUserMemoriesSchema();
+  const cap = category === "style" ? Math.min(limit, USER_STYLE_CAP) : limit;
+  const rows = category
+    ? ((await db()
+        .prepare(
+          `SELECT id, fact, category, updated_at AS "updatedAt"
+           FROM user_memories
+           WHERE user_id = ? AND category = ?
+           ORDER BY updated_at DESC
+           LIMIT ?`,
+        )
+        .all(userId, category, cap)) as {
+        id: string;
+        fact: string;
+        category: string;
+        updatedAt: number;
+      }[])
+    : ((await db()
+        .prepare(
+          `SELECT id, fact, category, updated_at AS "updatedAt"
+           FROM user_memories
+           WHERE user_id = ?
+           ORDER BY updated_at DESC
+           LIMIT ?`,
+        )
+        .all(userId, cap)) as {
+        id: string;
+        fact: string;
+        category: string;
+        updatedAt: number;
+      }[]);
+  return rows
+    .map((r) => ({
+      id: r.id,
+      fact: r.fact,
+      category: normalizeCategory(r.category),
+      updatedAt: Number(r.updatedAt) || 0,
+    }))
+    .filter((r) => !looksSensitive(r.fact));
 }
 
 export async function listUserMemories(userId: string, limit = USER_MEMORY_CAP): Promise<string[]> {
-  const rows = (await db()
-    .prepare(
-      `SELECT fact FROM user_memories WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?`,
-    )
-    .all(userId, limit)) as { fact: string }[];
-  return rows.map((r) => r.fact).filter((f) => !looksSensitive(f));
+  const rows = await listUserMemoryRows(userId, "fact", limit);
+  return rows.map((r) => r.fact);
+}
+
+export async function deleteUserMemory(userId: string, memoryId: string): Promise<boolean> {
+  await ensureUserMemoriesSchema();
+  const existing = (await db()
+    .prepare("SELECT id FROM user_memories WHERE id = ? AND user_id = ?")
+    .get(memoryId, userId)) as { id: string } | undefined;
+  if (!existing) return false;
+  await db().prepare("DELETE FROM user_memories WHERE id = ? AND user_id = ?").run(memoryId, userId);
+  return true;
 }
 
 /**
- * 零成本規則擷取：從本輪 user 訊息抽出自述背景／偏好，寫入 user_memories。
- * 不呼叫任何模型。
+ * 零成本規則擷取：自述背景 → fact；語氣偏好由 applyPersonaFromUserMessage 處理。
  */
 export async function maybeRememberFromUserMessage(userId: string, content: string): Promise<void> {
   const text = content?.trim();
@@ -345,8 +472,84 @@ export async function maybeRememberFromUserMessage(userId: string, content: stri
     const fact = normalizeFact(m[0]);
     if (!fact || seen.has(fact)) continue;
     seen.add(fact);
-    await upsertUserMemory(userId, fact);
+    await upsertUserMemory(userId, fact, "fact");
   }
+}
+
+function makeStyleConstraintEntry(text: string, sourceMessageId?: string): StateEntry {
+  return {
+    id: newId(),
+    text: toSessionStyleConstraintText(text),
+    provenance: "user",
+    status: "confirmed",
+    sourceMessageId,
+    createdAt: Date.now(),
+  };
+}
+
+/**
+ * 對話中自動捕捉語氣：全局 → user_memories(style)；本串 → hardConstraints【語氣】。
+ * 登入使用者同時擷取 fact；訪客僅寫本串語氣。
+ */
+export async function applyPersonaFromUserMessage(input: {
+  userId: string | null;
+  conversationId: string;
+  content: string;
+  sourceMessageId?: string;
+}): Promise<void> {
+  const text = input.content?.trim();
+  if (!text || looksSensitive(text)) return;
+
+  const directives = extractStyleDirectives(text);
+  for (const d of directives) {
+    if (d.scope === "global" && input.userId) {
+      await upsertUserMemory(input.userId, d.text, "style");
+    } else if (d.scope === "session" || (d.scope === "global" && !input.userId)) {
+      const note =
+        (await getConversationState(input.conversationId)) ??
+        ({
+          conversationId: input.conversationId,
+          goal: "",
+          hardConstraints: [],
+          decisions: [],
+          progress: [],
+          openQuestions: [],
+          sourceMessageIds: [],
+          coveredThroughCreatedAt: 0,
+          revision: 0,
+          updatedAt: 0,
+        } as const);
+      const merged = mergeStateNote(
+        { ...note, conversationId: input.conversationId },
+        {
+          hardConstraints: [makeStyleConstraintEntry(d.text, input.sourceMessageId)],
+        },
+      );
+      await upsertConversationState(merged);
+    }
+  }
+
+  if (input.userId) {
+    await maybeRememberFromUserMessage(input.userId, text);
+  }
+}
+
+/** 組裝最高優先級語氣覆蓋區塊（獨立字數額度；不進「非當前指令」） */
+export async function buildStyleOverrideContext(
+  userId: string | null,
+  conversationId: string,
+): Promise<string> {
+  const note = await getConversationState(conversationId);
+  const sessionStyles =
+    note?.hardConstraints
+      .filter((e) => e.status !== "superseded" && isSessionStyleConstraintText(e.text))
+      .map((e) => e.text) ?? [];
+
+  const globalStyles = userId
+    ? (await listUserMemoryRows(userId, "style", USER_STYLE_CAP)).map((r) => r.fact)
+    : [];
+
+  return formatStyleOverrideBlock({ sessionStyles, globalStyles });
 }
 
 /** 其他對話視窗最近 N 則 user 訊息摘要（截斷至 120 字；敏感內容跳過） */
@@ -381,7 +584,7 @@ export async function getRecentCrossConversationContext(
 
 /**
  * 合併長期事實 + 跨對話近期提問，字元硬上限 MAX_MEMORY_CHARS。
- * 回傳空字串表示無需注入。
+ * 不含 style（style 走 buildStyleOverrideContext）。
  */
 export async function buildUserMemoryContext(userId: string, conversationId: string): Promise<string> {
   const memories = await listUserMemories(userId);
