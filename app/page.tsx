@@ -896,8 +896,10 @@ const MAX_FILE_CHARS = 15_000;
 /** 貼上／輸入超過此字數 → 自動收成 TXT 附件（避免對話欄變文字牆） */
 const LONG_PASTE_TO_FILE_CHARS = 8_000;
 const TEXT_FILE_RE = /\.(txt|csv|md|json|js|ts|tsx|jsx|py|html|htm|xml|log|css|sql|yaml|yml)$/i;
-const FILE_ACCEPT =
-  "image/*,.txt,.csv,.md,.json,.js,.ts,.tsx,.jsx,.py,.html,.htm,.xml,.log,.css,.sql,.yaml,.yml,.pdf,.docx,.xlsx,.xls";
+/** 純圖片：Android 才會走相簿／相機，勿與文件副檔名混在同一個 accept */
+const IMAGE_ACCEPT = "image/*";
+const DOC_ACCEPT =
+  ".txt,.csv,.md,.json,.js,.ts,.tsx,.jsx,.py,.html,.htm,.xml,.log,.css,.sql,.yaml,.yml,.pdf,.docx,.xlsx,.xls";
 
 function formatCharCount(n: number): string {
   return n.toLocaleString("zh-TW");
@@ -1040,6 +1042,7 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<{ stop: () => void } | null>(null);
   /** Windows 注音等 IME：compositionend 後同一下 Enter 常會再觸發送出 */
@@ -2376,9 +2379,20 @@ export default function ChatPage() {
               }}
             >
               <input
+                ref={imageInputRef}
+                type="file"
+                accept={IMAGE_ACCEPT}
+                multiple
+                hidden
+                onChange={(e) => {
+                  if (e.target.files?.length) void ingestFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <input
                 ref={fileInputRef}
                 type="file"
-                accept={FILE_ACCEPT}
+                accept={DOC_ACCEPT}
                 multiple
                 hidden
                 onChange={(e) => {
@@ -2460,13 +2474,28 @@ export default function ChatPage() {
               <button
                 type="button"
                 className="composer-icon-btn"
-                title="上傳圖片、文字檔、PDF、Word、Excel"
+                title="上傳圖片（相簿／相機）"
                 disabled={busy}
-                aria-label="上傳圖片、文字檔、PDF、Word、Excel"
+                aria-label="上傳圖片"
+                onClick={() => imageInputRef.current?.click()}
+              >
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="3" y="5" width="18" height="14" rx="2" />
+                  <circle cx="8.5" cy="10.5" r="1.5" />
+                  <path d="M21 16l-5-5-4 4-2-2-5 5" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className="composer-icon-btn"
+                title="上傳檔案（文字、PDF、Word、Excel）"
+                disabled={busy}
+                aria-label="上傳檔案"
                 onClick={() => fileInputRef.current?.click()}
               >
-                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-                  <path d="M12 5v14M5 12h14" />
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+                  <path d="M14 3v5h5" />
                 </svg>
               </button>
               <select
