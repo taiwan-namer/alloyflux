@@ -2403,7 +2403,7 @@ export default function ChatPage() {
               <textarea
                 ref={textareaRef}
                 value={input}
-                placeholder="輸入訊息（Enter 送出，Shift+Enter 換行；可貼上截圖）"
+                placeholder="輸入訊息（手機：換行鍵換行；電腦：Enter 送出／Shift+Enter 換行；可貼圖）"
                 onChange={(e) => setInput(e.target.value)}
                 onCompositionStart={() => {
                   imeComposingRef.current = true;
@@ -2465,6 +2465,11 @@ export default function ChatPage() {
                   ) {
                     return;
                   }
+                  // 手機／觸控：軟體鍵盤「換行」會變成 Enter 且無 Shift → 只插入換行，改點「送出」
+                  const touchComposer =
+                    typeof window !== "undefined" &&
+                    window.matchMedia("(hover: none), (pointer: coarse)").matches;
+                  if (touchComposer) return;
                   e.preventDefault();
                   if (busy) return;
                   void send();
