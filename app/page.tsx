@@ -2389,7 +2389,7 @@ export default function ChatPage() {
               <textarea
                 ref={textareaRef}
                 value={input}
-                placeholder="輸入訊息（Enter 送出，Shift+Enter 換行；可貼上截圖）"
+                placeholder="輸入訊息（Enter 換行，Ctrl／⌘+Enter 送出；可貼上截圖）"
                 onChange={(e) => setInput(e.target.value)}
                 onCompositionStart={() => {
                   imeComposingRef.current = true;
@@ -2441,8 +2441,8 @@ export default function ChatPage() {
                   }
                 }}
                 onKeyDown={(e) => {
-                  if (e.key !== "Enter" || e.shiftKey) return;
-                  // 注音／IME：組字中或剛結束組字的 Enter 只確認候選，不要送出
+                  // Enter／Shift+Enter = 換行；僅 Ctrl／⌘+Enter 送出（避免想換行卻送出）
+                  if (e.key !== "Enter" || !(e.ctrlKey || e.metaKey)) return;
                   if (
                     e.nativeEvent.isComposing ||
                     imeComposingRef.current ||
