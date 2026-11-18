@@ -6,6 +6,7 @@ import {
   shouldCollapseUserText,
   USER_TEXT_COLLAPSE_CHARS,
   USER_TEXT_PREVIEW_CHARS,
+  USER_TEXT_PREVIEW_LINES,
 } from "./user-message-display";
 
 describe("parseUserMessageContent", () => {
@@ -52,6 +53,24 @@ describe("parseUserMessageContent", () => {
     assert.equal(parsed.text, "你好，幫我寫一封信");
     assert.equal(parsed.attachments.length, 0);
   });
+
+  it("結尾無換行、半形冒號也能剝離", () => {
+    const raw = "請看\n\n--- [附件檔案: note.txt] ---\nline1\nline2--- [附件結束] ---";
+    const parsed = parseUserMessageContent(raw);
+    assert.equal(parsed.text, "請看");
+    assert.equal(parsed.attachments.length, 1);
+    assert.equal(parsed.attachments[0]?.name, "note.txt");
+    assert.match(parsed.attachments[0]?.text ?? "", /line1/);
+  });
+
+  it("有開頭無結尾時仍收成附件，避免文字牆", () => {
+    const raw = `指令\n\n--- [附件檔案：broken.txt] ---\n${"X".repeat(2000)}`;
+    const parsed = parseUserMessageContent(raw);
+    assert.equal(parsed.text, "指令");
+    assert.equal(parsed.attachments.length, 1);
+    assert.equal(parsed.attachments[0]?.name, "broken.txt");
+    assert.equal(parsed.attachments[0]?.charCount, 2000);
+  });
 });
 
 describe("shouldCollapseUserText / previewUserText", () => {
@@ -72,6 +91,6 @@ describe("shouldCollapseUserText / previewUserText", () => {
     const manyLines = Array.from({ length: 12 }, (_, i) => `第 ${i + 1} 行`).join("\n");
     assert.equal(shouldCollapseUserText(manyLines), true);
     const preview = previewUserText(manyLines);
-    assert.ok(preview.split("\n").length <= 7);
+    assert.ok(preview.split("\n").length <= USER_TEXT_PREVIEW_LINES + 1);
   });
 });
