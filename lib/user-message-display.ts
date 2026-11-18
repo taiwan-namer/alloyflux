@@ -4,17 +4,20 @@
  * - 過長本文預設收合，避免歷史捲軸被文字牆拖長
  */
 
+/** 容許結尾前換行可有可無；全形／半形冒號都認 */
 export const ATTACHMENT_BLOCK_RE =
-  /\n*--- \[附件檔案：([^\]]+)\] ---\n([\s\S]*?)\n--- \[附件結束\] ---/g;
+  /\n*--- \[附件檔案[:：]([^\]]+)\] ---\r?\n([\s\S]*?)\r?\n?--- \[附件結束\] ---/g;
 
 const IMAGE_UPLOAD_PREFIX_RE = /^\[已上傳 \d+ 張圖片\]\n?/;
+const ATTACHMENT_START_RE = /--- \[附件檔案[:：]([^\]]+)\] ---/;
+const ATTACHMENT_END_MARK = "--- [附件結束] ---";
 
 /** 超過此字數（或行數）→ 對話氣泡預設收合 */
-export const USER_TEXT_COLLAPSE_CHARS = 480;
-export const USER_TEXT_COLLAPSE_LINES = 8;
+export const USER_TEXT_COLLAPSE_CHARS = 360;
+export const USER_TEXT_COLLAPSE_LINES = 6;
 /** 收合時預覽長度 */
-export const USER_TEXT_PREVIEW_CHARS = 280;
-export const USER_TEXT_PREVIEW_LINES = 6;
+export const USER_TEXT_PREVIEW_CHARS = 160;
+export const USER_TEXT_PREVIEW_LINES = 4;
 
 export type ParsedUserAttachment = {
   name: string;
@@ -30,6 +33,42 @@ export type ParsedUserMessage = {
   attachments: ParsedUserAttachment[];
 };
 
+function pushAttachment(attachments: ParsedUserAttachment[], name: string, body: string) {
+  const text = String(body ?? "");
+  attachments.push({
+    name: String(name ?? "").trim() || "未命名附件",
+    text,
+    charCount: text.length,
+  });
+}
+
+/** 正則失敗時用掃行／標記位置再剝一次，避免附件正文漏網 */
+function stripAttachmentsFallback(raw: string, attachments: ParsedUserAttachment[]): string {
+  let rest = raw;
+  // 若正文裡仍看得到標記，逐段切除
+  while (true) {
+    const start = rest.search(ATTACHMENT_START_RE);
+    if (start < 0) break;
+    const startMatch = rest.slice(start).match(ATTACHMENT_START_RE);
+    if (!startMatch) break;
+    const name = startMatch[1] ?? "";
+    const afterHeader = start + startMatch[0].length;
+    // 跳過 header 後的單一換行
+    const bodyStart =
+      rest[afterHeader] === "\n" ? afterHeader + 1 : afterHeader;
+    const end = rest.indexOf(ATTACHMENT_END_MARK, bodyStart);
+    if (end < 0) {
+      // 有開頭無結尾：整段後面當附件，避免文字牆
+      pushAttachment(attachments, name, rest.slice(bodyStart));
+      rest = rest.slice(0, start);
+      break;
+    }
+    pushAttachment(attachments, name, rest.slice(bodyStart, end).replace(/\n$/, ""));
+    rest = `${rest.slice(0, start)}${rest.slice(end + ATTACHMENT_END_MARK.length)}`;
+  }
+  return rest;
+}
+
 export function parseUserMessageContent(raw: string): ParsedUserMessage {
   const source = (raw ?? "").replace(/\r\n/g, "\n");
   let rest = source;
@@ -42,17 +81,15 @@ export function parseUserMessageContent(raw: string): ParsedUserMessage {
   }
 
   const attachments: ParsedUserAttachment[] = [];
-  // 每次新建，避免全域 /g 的 lastIndex 殘留
   const blockRe = new RegExp(ATTACHMENT_BLOCK_RE.source, "g");
-  const withoutAttachments = rest.replace(blockRe, (_, name: string, body: string) => {
-    const text = String(body ?? "");
-    attachments.push({
-      name: String(name ?? "").trim() || "未命名附件",
-      text,
-      charCount: text.length,
-    });
+  let withoutAttachments = rest.replace(blockRe, (_, name: string, body: string) => {
+    pushAttachment(attachments, name, body);
     return "";
   });
+
+  if (ATTACHMENT_START_RE.test(withoutAttachments) || withoutAttachments.includes(ATTACHMENT_END_MARK)) {
+    withoutAttachments = stripAttachmentsFallback(withoutAttachments, attachments);
+  }
 
   return {
     imageNote,

@@ -818,11 +818,16 @@ function CopyIconButton({ text, label = "複製" }: { text: string; label?: stri
   );
 }
 
-/** 使用者氣泡：附件只顯示檔名；過長本文預設收合（原生 details，免依賴額外 state） */
+/** 使用者氣泡：附件只顯示檔名；過長本文預設收合（收合時不把全文掛進 DOM） */
 function UserMessageBubble({ content }: { content: string }) {
   const parsed = useMemo(() => parseUserMessageContent(content), [content]);
   const collapse = shouldCollapseUserText(parsed.text);
+  const [expanded, setExpanded] = useState(false);
   const preview = collapse ? previewUserText(parsed.text) : parsed.text;
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [content]);
 
   return (
     <div className="user-msg-body">
@@ -844,25 +849,17 @@ function UserMessageBubble({ content }: { content: string }) {
       ) : null}
       {parsed.text ? (
         collapse ? (
-          <details className="user-msg-details">
-            <summary className="user-msg-summary">
-              <span className="user-msg-text user-msg-preview">{preview}</span>
-              <span className="user-msg-collapse-btn">
-                展開全文（{formatCharCount(parsed.text.length)} 字）
-              </span>
-            </summary>
-            <div className="user-msg-text user-msg-full">{parsed.text}</div>
+          <div className="user-msg-collapse">
+            <div className="user-msg-text">{expanded ? parsed.text : preview}</div>
             <button
               type="button"
-              className="ghost user-msg-collapse-btn user-msg-collapse-hint"
-              onClick={(e) => {
-                const root = (e.currentTarget as HTMLElement).closest("details");
-                if (root) root.open = false;
-              }}
+              className="ghost user-msg-collapse-btn"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((v) => !v)}
             >
-              收合
+              {expanded ? "收合" : `展開全文（${formatCharCount(parsed.text.length)} 字）`}
             </button>
-          </details>
+          </div>
         ) : (
           <div className="user-msg-text">{parsed.text}</div>
         )
@@ -952,8 +949,8 @@ const MAX_PENDING_FILES = 3;
 const MAX_FILE_BYTES = 100 * 1024;
 /** 單個文字附件淨化後上限 */
 const MAX_FILE_CHARS = 15_000;
-/** 貼上／輸入超過此字數 → 自動收成 TXT 附件（避免對話欄變文字牆） */
-const LONG_PASTE_TO_FILE_CHARS = 8_000;
+/** 貼上／輸入超過此字數 → 自動收成 TXT 附件（避免對話欄／氣泡變文字牆） */
+const LONG_PASTE_TO_FILE_CHARS = 1_500;
 const TEXT_FILE_RE = /\.(txt|csv|md|json|js|ts|tsx|jsx|py|html|htm|xml|log|css|sql|yaml|yml)$/i;
 /** 純圖片：Android 才會走相簿／相機，勿與文件副檔名混在同一個 accept */
 const IMAGE_ACCEPT = "image/*";

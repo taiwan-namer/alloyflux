@@ -807,22 +807,13 @@ a {
   max-width: 100%;
 }
 
-.user-msg-details {
-  width: 100%;
-  min-width: 0;
-}
-
-.user-msg-summary {
-  list-style: none;
-  cursor: pointer;
+.user-msg-collapse {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
-}
-
-.user-msg-summary::-webkit-details-marker {
-  display: none;
+  width: 100%;
+  min-width: 0;
 }
 
 .user-msg-collapse-btn {
@@ -831,33 +822,16 @@ a {
   color: var(--muted);
   text-decoration: underline;
   text-underline-offset: 2px;
-  padding: 2px 0;
-  border: none;
-  background: transparent;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 40%, var(--panel-2));
+  border-radius: 8px;
+  cursor: pointer;
 }
 
-.user-msg-summary:hover .user-msg-collapse-btn,
-.user-msg-collapse-btn:hover {
+.user-msg-collapse-btn:hover:not(:disabled) {
   color: var(--text);
-}
-
-.user-msg-details[open] > .user-msg-summary {
-  display: none;
-}
-
-.user-msg-details[open] > .user-msg-full {
-  display: block;
-}
-
-.user-msg-collapse-hint {
-  display: none;
-  align-self: flex-start;
-  margin-top: 6px;
-  padding: 4px 8px;
-}
-
-.user-msg-details[open] > .user-msg-collapse-hint {
-  display: inline-flex;
+  border-color: var(--accent);
 }
 
 .msg.assistant .bubble {
