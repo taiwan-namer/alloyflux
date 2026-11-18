@@ -3,6 +3,11 @@
 import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { extractOfficeAttachmentText, isOfficeAttachment } from "@/lib/office-attachments";
+import {
+  parseUserMessageContent,
+  previewUserText,
+  shouldCollapseUserText,
+} from "@/lib/user-message-display";
 
 type Effort = "low" | "medium" | "high";
 type Brand = "gpt" | "claude" | "gemini" | "grok";
@@ -810,6 +815,60 @@ function CopyIconButton({ text, label = "複製" }: { text: string; label?: stri
         </svg>
       )}
     </button>
+  );
+}
+
+/** 使用者氣泡：附件只顯示檔名；過長本文預設收合（原生 details，免依賴額外 state） */
+function UserMessageBubble({ content }: { content: string }) {
+  const parsed = useMemo(() => parseUserMessageContent(content), [content]);
+  const collapse = shouldCollapseUserText(parsed.text);
+  const preview = collapse ? previewUserText(parsed.text) : parsed.text;
+
+  return (
+    <div className="user-msg-body">
+      {parsed.imageNote ? <div className="user-msg-note">{parsed.imageNote}</div> : null}
+      {parsed.attachments.length > 0 ? (
+        <div className="user-msg-attachments" aria-label="附件">
+          {parsed.attachments.map((a, i) => (
+            <span className="user-msg-file-chip" key={`${a.name}-${i}`} title={a.name}>
+              <span className="user-msg-file-icon" aria-hidden>
+                📄
+              </span>
+              <span className="user-msg-file-name">{a.name}</span>
+              {a.charCount > 0 ? (
+                <span className="user-msg-file-meta">{formatCharCount(a.charCount)} 字</span>
+              ) : null}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {parsed.text ? (
+        collapse ? (
+          <details className="user-msg-details">
+            <summary className="user-msg-summary">
+              <span className="user-msg-text user-msg-preview">{preview}</span>
+              <span className="user-msg-collapse-btn">
+                展開全文（{formatCharCount(parsed.text.length)} 字）
+              </span>
+            </summary>
+            <div className="user-msg-text user-msg-full">{parsed.text}</div>
+            <button
+              type="button"
+              className="ghost user-msg-collapse-btn user-msg-collapse-hint"
+              onClick={(e) => {
+                const root = (e.currentTarget as HTMLElement).closest("details");
+                if (root) root.open = false;
+              }}
+            >
+              收合
+            </button>
+          </details>
+        ) : (
+          <div className="user-msg-text">{parsed.text}</div>
+        )
+      ) : null}
+      {!parsed.text && parsed.attachments.length === 0 && !parsed.imageNote ? content : null}
+    </div>
   );
 }
 
@@ -2211,7 +2270,7 @@ export default function ChatPage() {
                       ) : null}
                     </>
                   ) : (
-                    m.content
+                    <UserMessageBubble content={m.content} />
                   )}
                 </div>
                 {m.role === "user" && m.content && (
