@@ -173,7 +173,7 @@ export async function resolveAutoModel(input: {
  * 有 -low/-medium 變體就換變體；沒有變體（如 Astra）則複製一份 effort=medium。
  */
 export function applyDeepThink(model: ModelInfo, deepThink: boolean): ModelInfo {
-  const family = model.effort ? model.id.replace(/-(low|medium|high)$/, "") : null;
+  const family = model.effort ? model.id.replace(/-(low|medium|high|xhigh)$/, "") : null;
   if (deepThink && model.tier === "top") {
     if (family) return findModel(`${family}-medium`) ?? model;
     return { ...model, effort: "medium" };

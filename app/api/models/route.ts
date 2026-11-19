@@ -70,8 +70,8 @@ export async function GET(req: Request) {
       }
 
       const effort = m.effort ?? null;
-      const familyId = effort ? m.id.replace(/-(low|medium|high)$/, "") : m.id;
-      const baseFamily = m.label.replace(/\s*·\s*(Low|Medium|High)\s*/g, "").trim();
+      const familyId = effort ? m.id.replace(/-(low|medium|high|xhigh)$/, "") : m.id;
+      const baseFamily = m.label.replace(/\s*·\s*(Low|Medium|High|Extra High)\s*/g, "").trim();
       const familyLabel = m.blurb ? `${baseFamily}（${m.blurb}）` : baseFamily;
 
       return {
