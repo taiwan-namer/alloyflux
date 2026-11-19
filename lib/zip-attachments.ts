@@ -6,9 +6,14 @@
 import { unzipSync, strFromU8 } from "fflate";
 import { extractOfficeAttachmentText, OFFICE_FILE_RE } from "./office-attachments";
 
-export const MAX_ZIP_FILE_BYTES = 8 * 1024 * 1024;
-export const MAX_ZIP_ENTRIES = 40;
-export const MAX_ZIP_UNCOMPRESSED_BYTES = 16 * 1024 * 1024;
+/**
+ * 壓縮檔大小上限：對齊 Gemini Apps ZIP 100MB（ChatGPT／Claude 單檔約 500–512MB，
+ * 但瀏覽器端 fflate 全量解壓記憶體壓力大，採 100MB 較穩）。
+ */
+export const MAX_ZIP_FILE_BYTES = 100 * 1024 * 1024;
+export const MAX_ZIP_ENTRIES = 100;
+/** 解壓後總量上限（防 zip bomb；約為壓縮上限的 2 倍） */
+export const MAX_ZIP_UNCOMPRESSED_BYTES = 200 * 1024 * 1024;
 export const ZIP_FILE_RE = /\.zip$/i;
 
 const ZIP_MIME = new Set(["application/zip", "application/x-zip-compressed", "multipart/x-zip"]);
