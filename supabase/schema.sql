@@ -212,6 +212,14 @@ CREATE TABLE IF NOT EXISTS redeem_redemptions (
   created_at BIGINT NOT NULL,
   UNIQUE (code, user_id)
 );
+
+-- 管理員「一鍵更新模型」探測快照（四大訂閱池上游目錄 vs 平台 MODELS）
+CREATE TABLE IF NOT EXISTS model_catalog_snapshots (
+  id TEXT PRIMARY KEY,
+  fetched_at BIGINT NOT NULL,
+  payload_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_model_catalog_snapshots_at ON model_catalog_snapshots(fetched_at DESC);
 CREATE INDEX IF NOT EXISTS idx_redeem_user ON redeem_redemptions(user_id, created_at);
 
 CREATE TABLE IF NOT EXISTS user_memories (
