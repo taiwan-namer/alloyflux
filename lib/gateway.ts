@@ -26,8 +26,8 @@ import {
 async function tryAcquireSourceLockBriefly(
   sourceId: string,
   signal?: AbortSignal,
-  attempts = 8,
-  gapMs = 40,
+  attempts = 24,
+  gapMs = 50,
 ): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
     if (signal?.aborted) return false;
@@ -35,6 +35,26 @@ async function tryAcquireSourceLockBriefly(
     await new Promise((r) => setTimeout(r, gapMs));
   }
   return false;
+}
+
+/**
+ * 停止後立刻重送：上一輪 job 可能尚佔 concurrency（cancel 寫庫競態）。
+ * 短暫重試等節點空位，避免誤報「沒有可用貨源」。
+ */
+async function listOnlineNodesBriefly(
+  providerKey: string,
+  modelId: string,
+  signal?: AbortSignal,
+  attempts = 16,
+  gapMs = 50,
+): Promise<Awaited<ReturnType<typeof listOnlineNodesForModel>>> {
+  for (let i = 0; i < attempts; i++) {
+    if (signal?.aborted) return [];
+    const nodes = await listOnlineNodesForModel(providerKey, modelId);
+    if (nodes.length) return nodes;
+    if (i + 1 < attempts) await new Promise((r) => setTimeout(r, gapMs));
+  }
+  return [];
 }
 
 export type GatewayEvent =
@@ -87,7 +107,7 @@ async function* streamViaNodeAgent(
   const route = resolveNodeRoute(model);
   if (!route) throw new UpstreamError(400, "此模型未設定 Node Agent 路由");
 
-  const nodes = await listOnlineNodesForModel(route.providerKey, route.upstreamModel);
+  const nodes = await listOnlineNodesBriefly(route.providerKey, route.upstreamModel, signal);
   if (!nodes.length) {
     throw new UpstreamError(503, `沒有在線節點可執行 ${route.providerKey}:${route.upstreamModel}`);
   }
@@ -163,7 +183,8 @@ export async function* routeChat(
 
   const route = resolveNodeRoute(model);
   const nodeAvailable =
-    route && (await listOnlineNodesForModel(route.providerKey, route.upstreamModel)).length > 0;
+    route &&
+    (await listOnlineNodesBriefly(route.providerKey, route.upstreamModel, signal)).length > 0;
 
   const supplyPath = nodeAvailable || model.category === "node-agent" ? "node" : "local";
   const prepared = modelNeedsPlatformResearch(model)
@@ -197,6 +218,10 @@ export async function* routeChat(
         }
         return;
       } catch (e) {
+        // 買家停止：不可包成 retryable UpstreamError 再去打本地貨源（易誤冷卻／空貨源）
+        if (signal?.aborted || isAbortError(e)) {
+          throw e instanceof ClientAbortError ? e : new ClientAbortError();
+        }
         const err =
           e instanceof UpstreamError ? e : new UpstreamError(0, e instanceof Error ? e.message : String(e));
         if (model.category === "node-agent" || !err.retryable) throw err;
@@ -220,11 +245,11 @@ async function* routeLocalCandidates(
   prepared: ResearchVerdict | null,
   styleCtx?: string,
 ): AsyncGenerator<GatewayEvent> {
-  // 混合水庫：含 oauth_sub；candidatesFor 已過濾 share_limit / cooldown
+  // 混合水庫：含 oauth_sub；candidatesFor 已過濾 share_limit / cooldown／delegatedToNode
   const allCandidates = await candidatesFor(model);
   if (allCandidates.length === 0) {
     throw new NoSourceError(
-      "目前沒有可用貨源。請綁定訂閱／API Key，或啟動 Node Agent。",
+      "目前沒有可用貨源。若剛按停止，請稍候再送；並確認已綁定訂閱／API Key，或 Node Agent 在線。",
     );
   }
   const candidates = allCandidates.filter((c) => !sourceCatalogLacksModel(c.source.id, model));

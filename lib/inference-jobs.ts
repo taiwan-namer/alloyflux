@@ -543,13 +543,25 @@ export async function* streamJobResult(
   jobId: string,
   signal?: AbortSignal,
 ): AsyncGenerator<JobStreamEvent> {
+  /** 停止時必須等 cancel 寫入 DB，否則下一輪仍算 concurrency 佔用 → 誤報沒有貨源 */
+  let cancelPromise: Promise<boolean> | null = null;
+  const ensureCancelled = (): Promise<boolean> => {
+    if (!cancelPromise) {
+      cancelPromise = cancelJob(jobId, "client aborted").catch(() => false);
+    }
+    return cancelPromise;
+  };
   const onAbort = () => {
-    void cancelJob(jobId, "client aborted").catch(() => {});
+    void ensureCancelled();
   };
   signal?.addEventListener("abort", onAbort, { once: true });
   let idx = 0;
   try {
     while (true) {
+      if (signal?.aborted) {
+        await ensureCancelled();
+        throw Object.assign(new Error("client aborted"), { name: "AbortError" });
+      }
       await sweepStaleJobs();
       const l = live.get(jobId);
       const job = await getJob(jobId);
@@ -558,13 +570,25 @@ export async function* streamJobResult(
       if (l) {
         while (idx < l.events.length) yield l.events[idx++];
         if (l.ended) {
-          if (l.failed) throw Object.assign(new Error(l.failed.message), { status: l.failed.status });
+          if (l.failed) {
+            const msg = l.failed.message || "failed";
+            if (signal?.aborted || /aborted|abort/i.test(msg)) {
+              await ensureCancelled();
+              throw Object.assign(new Error("client aborted"), { name: "AbortError" });
+            }
+            throw Object.assign(new Error(msg), { status: l.failed.status });
+          }
           break;
         }
       }
 
       if (["failed", "cancelled", "timeout"].includes(job.status)) {
-        throw Object.assign(new Error(job.errorMessage || job.status), { status: 502 });
+        const msg = job.errorMessage || job.status;
+        if (signal?.aborted || /aborted|abort|cancelled/i.test(msg)) {
+          await ensureCancelled();
+          throw Object.assign(new Error("client aborted"), { name: "AbortError" });
+        }
+        throw Object.assign(new Error(msg), { status: 502 });
       }
       if (job.status === "completed") break;
 
@@ -581,6 +605,9 @@ export async function* streamJobResult(
     }
   } finally {
     signal?.removeEventListener("abort", onAbort);
+    if (signal?.aborted) {
+      await ensureCancelled();
+    }
     // 延遲清理 live buffer
     setTimeout(() => live.delete(jobId), 60_000);
   }

@@ -685,7 +685,7 @@ export function clearSourceCooldown(sourceId: string): void {
 
 export function markFailure(sourceId: string, status: number, message: string): void {
   // 客戶端停止／中止不應把貨源打進冷卻（雙保險；gateway 層已應攔截）
-  if (/aborted|abort|client aborted/i.test(message)) return;
+  if (status === 499 || /aborted|abort|client aborted|cancelled/i.test(message)) return;
   const cooldownMs = status === 401 || status === 403 ? 5 * 60_000 : status === 429 || status === 402 ? 60_000 : 30_000;
   health.set(sourceId, { cooldownUntil: Date.now() + cooldownMs, lastError: `${status} ${message}`.slice(0, 300) });
 }
