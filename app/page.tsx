@@ -3,6 +3,11 @@
 import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { extractOfficeAttachmentText, isOfficeAttachment } from "@/lib/office-attachments";
+import {
+  DEFAULT_MAX_CHARS_PER_PART,
+  splitTextAttachHint,
+  splitTextIntoAttachmentParts,
+} from "@/lib/split-text-attachments";
 import { extractZipAttachmentText, isZipAttachment } from "@/lib/zip-attachments";
 import {
   parseUserMessageContent,
@@ -946,10 +951,11 @@ type PendingImage = { id: string; mimeType: string; data: string; previewUrl: st
 type PendingFile = { id: string; name: string; size: number; text: string };
 
 const MAX_PENDING_IMAGES = 3;
-const MAX_PENDING_FILES = 3;
-const MAX_FILE_BYTES = 100 * 1024;
+const MAX_PENDING_FILES = 5;
+/** 文字檔上傳位元組上限（超長會再拆成多個 ≤15,000 字附件） */
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
 /** 單個文字附件淨化後上限 */
-const MAX_FILE_CHARS = 15_000;
+const MAX_FILE_CHARS = DEFAULT_MAX_CHARS_PER_PART;
 /** 貼上／輸入超過此字數 → 自動收成 TXT 附件（避免對話欄／氣泡變文字牆） */
 const LONG_PASTE_TO_FILE_CHARS = 1_500;
 const TEXT_FILE_RE = /\.(txt|csv|md|json|js|ts|tsx|jsx|py|html|htm|xml|log|css|sql|yaml|yml)$/i;
@@ -962,27 +968,33 @@ function formatCharCount(n: number): string {
   return n.toLocaleString("zh-TW");
 }
 
-function pendingFileFromLongText(raw: string): PendingFile {
-  let text = raw;
-  if (text.length > MAX_FILE_CHARS) {
-    text = `${text.slice(0, MAX_FILE_CHARS)}\n...[檔案過長已截斷]`;
-  }
+function pasteBaseFileName(): string {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
-  const name = `貼上文字_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
-  return {
-    id: crypto.randomUUID(),
-    name,
-    size: new Blob([text], { type: "text/plain;charset=utf-8" }).size,
-    text,
-  };
+  return `貼上文字_${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.txt`;
 }
 
-function longTextAttachHint(fileName: string, originalLen: number): string {
-  if (originalLen > MAX_FILE_CHARS) {
-    return `長文已轉成附件「${fileName}」（${formatCharCount(originalLen)} 字 → 保留前 ${formatCharCount(MAX_FILE_CHARS)} 字）`;
-  }
-  return `長文已轉成附件「${fileName}」（${formatCharCount(originalLen)} 字）`;
+function pendingFilesFromLongText(raw: string, maxParts: number, baseName?: string): {
+  files: PendingFile[];
+  hint: string;
+} {
+  const result = splitTextIntoAttachmentParts({
+    text: raw,
+    baseName: baseName || pasteBaseFileName(),
+    maxCharsPerPart: MAX_FILE_CHARS,
+    maxParts,
+  });
+  const files: PendingFile[] = result.parts.map((p) => ({
+    id: crypto.randomUUID(),
+    name: p.name,
+    size: p.size,
+    text: p.text,
+  }));
+  return { files, hint: splitTextAttachHint(result) };
+}
+
+function pendingFilesFromRawText(raw: string, baseName: string, maxParts: number): PendingFile[] {
+  return pendingFilesFromLongText(raw, maxParts, baseName).files;
 }
 
 function formatBytes(n: number) {
@@ -1031,34 +1043,28 @@ function compressImageFile(file: File): Promise<PendingImage> {
   });
 }
 
-async function readTextAttachment(file: File): Promise<PendingFile> {
+async function readTextAttachment(file: File, maxParts: number): Promise<PendingFile[]> {
   if (file.size > MAX_FILE_BYTES) {
-    throw new Error(`「${file.name}」超過 100KB 上限`);
+    throw new Error(`「${file.name}」超過 ${Math.round(MAX_FILE_BYTES / (1024 * 1024))}MB 上限`);
   }
-  let text = await file.text();
-  if (text.length > MAX_FILE_CHARS) {
-    text = `${text.slice(0, MAX_FILE_CHARS)}\n...[檔案過長已截斷]`;
-  }
-  return { id: crypto.randomUUID(), name: file.name, size: file.size, text };
+  const text = await file.text();
+  return pendingFilesFromRawText(text, file.name, maxParts);
 }
 
-async function readOfficeAttachment(file: File): Promise<PendingFile> {
-  const text = await extractOfficeAttachmentText(file, MAX_FILE_CHARS);
-  return { id: crypto.randomUUID(), name: file.name, size: file.size, text };
+async function readOfficeAttachment(file: File, maxParts: number): Promise<PendingFile[]> {
+  const budget = Math.max(MAX_FILE_CHARS, maxParts * MAX_FILE_CHARS);
+  const text = await extractOfficeAttachmentText(file, budget);
+  return pendingFilesFromRawText(text, file.name, maxParts);
 }
 
-async function readZipAttachment(file: File): Promise<PendingFile> {
-  const { text, fileCount, skipped } = await extractZipAttachmentText(file, MAX_FILE_CHARS);
+async function readZipAttachment(file: File, maxParts: number): Promise<PendingFile[]> {
+  const budget = Math.max(MAX_FILE_CHARS, maxParts * MAX_FILE_CHARS);
+  const { text, fileCount, skipped } = await extractZipAttachmentText(file, budget);
   const note =
     skipped.length > 0
       ? `\n\n（已讀 ${fileCount} 個檔；略過：${skipped.slice(0, 8).join("、")}）`
       : `\n\n（已讀 ${fileCount} 個檔）`;
-  return {
-    id: crypto.randomUUID(),
-    name: file.name,
-    size: file.size,
-    text: `${text}${note}`.slice(0, MAX_FILE_CHARS + 200),
-  };
+  return pendingFilesFromRawText(`${text}${note}`, file.name, maxParts);
 }
 
 export default function ChatPage() {
@@ -1644,18 +1650,39 @@ export default function ChatPage() {
     const files = Array.from(fileList);
     const addImgs: PendingImage[] = [];
     const addFiles: PendingFile[] = [];
+    let splitHint: string | null = null;
+    // 預留目前已掛的附件格數，超長檔依剩餘格數拆段
+    let room = Math.max(0, MAX_PENDING_FILES - pendingFiles.length);
     for (const file of files) {
       try {
         if (file.type.startsWith("image/")) {
           addImgs.push(await compressImageFile(file));
+        } else if (room <= 0) {
+          flashComposerHint(`附件最多 ${MAX_PENDING_FILES} 個`);
+          break;
         } else if (isZipAttachment(file)) {
           flashComposerHint(`正在解壓「${file.name}」…`);
-          addFiles.push(await readZipAttachment(file));
+          const parts = await readZipAttachment(file, room);
+          addFiles.push(...parts);
+          room -= parts.length;
+          if (parts.length > 1) {
+            splitHint = `「${file.name}」已拆成 ${parts.length} 個附件`;
+          }
         } else if (isOfficeAttachment(file)) {
           flashComposerHint(`正在解析「${file.name}」…`);
-          addFiles.push(await readOfficeAttachment(file));
+          const parts = await readOfficeAttachment(file, room);
+          addFiles.push(...parts);
+          room -= parts.length;
+          if (parts.length > 1) {
+            splitHint = `「${file.name}」已拆成 ${parts.length} 個附件`;
+          }
         } else if (TEXT_FILE_RE.test(file.name) || file.type.startsWith("text/") || file.type === "application/json") {
-          addFiles.push(await readTextAttachment(file));
+          const parts = await readTextAttachment(file, room);
+          addFiles.push(...parts);
+          room -= parts.length;
+          if (parts.length > 1) {
+            splitHint = `「${file.name}」已拆成 ${parts.length} 個附件（每段最多 ${formatCharCount(MAX_FILE_CHARS)} 字）`;
+          }
         } else {
           flashComposerHint(
             `不支援的檔案類型：${file.name}（可上傳圖片、文字檔、PDF、Word .docx、Excel、ZIP）`,
@@ -1679,6 +1706,8 @@ export default function ChatPage() {
         const next = [...prev, ...addFiles].slice(0, MAX_PENDING_FILES);
         if (prev.length + addFiles.length > MAX_PENDING_FILES) {
           flashComposerHint(`附件最多 ${MAX_PENDING_FILES} 個`);
+        } else if (splitHint) {
+          flashComposerHint(splitHint);
         }
         return next;
       });
@@ -1765,16 +1794,21 @@ export default function ChatPage() {
     let files = opts?.regenerate ? [] : (opts?.files ?? pendingFiles);
     let boxText = opts?.text ?? input;
 
-    // 送出前雙保險：對話欄仍有超長本文 → 收成 TXT
+    // 送出前雙保險：對話欄仍有超長本文 → 收成 TXT（可拆多段）
     if (!opts?.regenerate && !opts?.files && boxText.trim().length >= LONG_PASTE_TO_FILE_CHARS) {
-      if (files.length >= MAX_PENDING_FILES) {
+      const room = MAX_PENDING_FILES - files.length;
+      if (room <= 0) {
         flashComposerHint(`文字過長且附件已滿（最多 ${MAX_PENDING_FILES} 個），請縮短或移除附件`);
         return;
       }
-      const file = pendingFileFromLongText(boxText.trim());
-      files = [...files, file];
-      boxText = `請依附件「${file.name}」內容處理。`;
-      flashComposerHint(longTextAttachHint(file.name, (opts?.text ?? input).trim().length));
+      const { files: parts, hint } = pendingFilesFromLongText(boxText.trim(), room);
+      if (parts.length === 0) return;
+      files = [...files, ...parts];
+      boxText =
+        parts.length === 1
+          ? `請依附件「${parts[0]!.name}」內容處理。`
+          : `請依附件 ${parts.map((p) => `「${p.name}」`).join("、")} 內容處理。`;
+      flashComposerHint(hint);
     }
 
     const content = buildOutgoingContent(boxText, files);
@@ -2512,15 +2546,17 @@ export default function ChatPage() {
                   if (pastedText.length >= LONG_PASTE_TO_FILE_CHARS) {
                     e.preventDefault();
                     if (imageFiles.length) void ingestFiles(imageFiles);
-                    if (pendingFiles.length >= MAX_PENDING_FILES) {
+                    const room = MAX_PENDING_FILES - pendingFiles.length;
+                    if (room <= 0) {
                       flashComposerHint(`文字過長且附件已滿（最多 ${MAX_PENDING_FILES} 個），請先移除再貼上`);
                       return;
                     }
-                    const file = pendingFileFromLongText(pastedText);
-                    setPendingFiles((prev) =>
-                      prev.length >= MAX_PENDING_FILES ? prev : [...prev, file],
-                    );
-                    flashComposerHint(longTextAttachHint(file.name, pastedText.length));
+                    const { files: parts, hint } = pendingFilesFromLongText(pastedText, room);
+                    setPendingFiles((prev) => {
+                      const left = MAX_PENDING_FILES - prev.length;
+                      return left <= 0 ? prev : [...prev, ...parts.slice(0, left)];
+                    });
+                    flashComposerHint(hint);
                     return;
                   }
                   if (imageFiles.length) {
