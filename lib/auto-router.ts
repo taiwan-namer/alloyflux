@@ -7,11 +7,15 @@ import { candidatesFor } from "./sources";
 /** 前端虛擬選項：依問題自動派發實際模型（照實際模型扣點） */
 export const AUTO_MODEL_ID = "auto";
 
-/** L2 輕量高速：日常問答／翻譯／OCR／一般查證 */
-export const AUTO_LIGHT_MODEL_IDS = ["gemini-3.8-flash-low", "gemini-3.5-flash-lite"];
+/** L2 輕量高速：日常問答／翻譯／OCR／一般查證（Hydrogen 為 Flash 級日常） */
+export const AUTO_LIGHT_MODEL_IDS = [
+  "gemini-4-hydrogen-high",
+  "gemini-3.8-flash-low",
+  "gemini-3.5-flash-lite",
+];
 
-/** L3 主力：跨家族依水庫剩餘量輪替（3.1 Pro 目錄常未開，改 Argon） */
-export const AUTO_MAIN_MODEL_IDS = ["agy-claude-sonnet-5-5-low", "gemini-4-argon-low", "gpt-6.1-terra"];
+/** L3 主力：跨家族依水庫剩餘量輪替（Neon 取代 Argon 為預設深度日常） */
+export const AUTO_MAIN_MODEL_IDS = ["agy-claude-sonnet-5-5-low", "gemini-4-neon-high", "gpt-6.1-terra"];
 
 export type AutoLane = "light" | "main";
 

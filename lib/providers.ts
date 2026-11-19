@@ -410,6 +410,17 @@ function pickAntigravityWireId(allIds: string[], model: ModelInfo): string | nul
   if (ids.includes(preferred)) return preferred;
 
   const fallbacks: Record<string, string[]> = {
+    "gemini-4-neon-xhigh": ["gemini-4-neon-xhigh"],
+    "gemini-4-neon-high": ["gemini-4-neon-high"],
+    "gemini-4-neon-medium": ["gemini-4-neon-medium"],
+    "gemini-4-neon-low": ["gemini-4-neon-low"],
+    "gemini-4-carbon-high": ["gemini-4-carbon-high"],
+    "gemini-4-carbon-medium": ["gemini-4-carbon-medium"],
+    "gemini-4-carbon-low": ["gemini-4-carbon-low"],
+    "gemini-4-hydrogen-xhigh": ["gemini-4-hydrogen-xhigh"],
+    "gemini-4-hydrogen-high": ["gemini-4-hydrogen-high"],
+    "gemini-4-hydrogen-medium": ["gemini-4-hydrogen-medium"],
+    "gemini-4-hydrogen-low": ["gemini-4-hydrogen-low"],
     "gemini-4-argon-high": ["gemini-4-argon-high"],
     "gemini-4-argon-medium": ["gemini-4-argon-medium"],
     "gemini-4-argon-low": ["gemini-4-argon-low"],

@@ -117,6 +117,9 @@ function pctFromFraction(fraction: number): {
 
 function modelKeyFromText(text: string): string {
   const t = text.toLowerCase();
+  if (/neon/.test(t)) return "neon";
+  if (/carbon/.test(t)) return "carbon";
+  if (/hydrogen/.test(t)) return "hydrogen";
   if (/argon/.test(t)) return "argon";
   if (/grok|xai|supergrok/.test(t)) return "grok";
   if (/claude|gpt-oss|\bgpt\b|3p-|third.?party|openai|anthropic/.test(t) && !/gemini/.test(t)) return "third_party";
@@ -133,22 +136,36 @@ export function quotaWindowForModel(quota: SubscriptionQuota, modelId: string): 
   if (!quota.windows.length) return null;
   const id = modelId.toLowerCase();
   const prefer =
-    /argon/.test(id)
-      ? "argon"
-      : /grok/.test(id)
-        ? "grok"
-        : /claude|gpt-oss|agy-claude|agy-gpt/.test(id)
-          ? "third_party"
-          : /flash-lite|3\.5-flash-lite/.test(id)
-            ? "flash-lite"
-            : /3\.8-flash/.test(id)
-              ? "3.8-flash"
-              : /3\.1-pro|2\.5-pro/.test(id)
-                ? "3.1-pro"
-                : "shared";
+    /neon/.test(id)
+      ? "neon"
+      : /carbon/.test(id)
+        ? "carbon"
+        : /hydrogen/.test(id)
+          ? "hydrogen"
+          : /argon/.test(id)
+            ? "argon"
+            : /grok/.test(id)
+              ? "grok"
+              : /claude|gpt-oss|agy-claude|agy-gpt/.test(id)
+                ? "third_party"
+                : /flash-lite|3\.5-flash-lite/.test(id)
+                  ? "flash-lite"
+                  : /3\.8-flash/.test(id)
+                    ? "3.8-flash"
+                    : /3\.1-pro|2\.5-pro/.test(id)
+                      ? "3.1-pro"
+                      : "shared";
   const matched = quota.windows.filter((w) => w.modelKey === prefer);
-  // 第三方／Argon／Grok 沒對應窗就不要退回 Gemini 總額，避免誤熔斷
-  if (!matched.length && (prefer === "third_party" || prefer === "argon" || prefer === "grok")) {
+  // 第三方／Gemini 4 專池／Grok 沒對應窗就不要退回 Gemini 總額，避免誤熔斷
+  if (
+    !matched.length &&
+    (prefer === "third_party" ||
+      prefer === "argon" ||
+      prefer === "neon" ||
+      prefer === "carbon" ||
+      prefer === "hydrogen" ||
+      prefer === "grok")
+  ) {
     return null;
   }
   const pool = matched.length ? matched : quota.windows.filter((w) => w.modelKey === "shared" || !w.modelKey);
@@ -963,15 +980,18 @@ export async function fetchSubscriptionQuota(creds: OAuthCredentials): Promise<S
 /** 是否納入 Antigravity 用量顯示（含 Gemini + Claude/GPT 第三方池） */
 function isAntigravityQuotaGroup(groupName: string, bucketName: string): boolean {
   const text = `${groupName} ${bucketName}`.toLowerCase();
-  return /gemini|argon|flash|gemma|claude|\bgpt\b|3p-|openai|anthropic/.test(text);
+  return /gemini|argon|neon|carbon|hydrogen|flash|gemma|claude|\bgpt\b|3p-|openai|anthropic/.test(text);
 }
 
 function antigravityQuotaLabel(groupName: string, bucketName: string, window?: string): string {
   const raw = `${groupName} ${bucketName} ${window ?? ""}`.trim();
   let niceModel = "Gemini 總額";
-  if (/claude and gpt|3p-|claude|\bgpt\b/i.test(raw) && !/gemini|argon/i.test(raw)) {
+  if (/claude and gpt|3p-|claude|\bgpt\b/i.test(raw) && !/gemini|argon|neon|carbon|hydrogen/i.test(raw)) {
     niceModel = "Claude／GPT 第三方（Antigravity）";
-  } else if (/argon/i.test(raw)) niceModel = "Gemini 4 Argon";
+  } else if (/neon/i.test(raw)) niceModel = "Gemini 4 Neon";
+  else if (/carbon/i.test(raw)) niceModel = "Gemini 4 Carbon";
+  else if (/hydrogen/i.test(raw)) niceModel = "Gemini 4 Hydrogen";
+  else if (/argon/i.test(raw)) niceModel = "Gemini 4 Argon";
   else if (/3\.1.*pro|pro-agent/i.test(raw)) niceModel = "Gemini 3.1 Pro";
   else if (/3\.8.*flash/i.test(raw)) niceModel = "Gemini 3.8 Flash";
   else if (/flash.?lite|3\.5.*flash/i.test(raw)) niceModel = "Gemini Flash-Lite";
@@ -991,7 +1011,10 @@ function antigravityBucketPriority(groupName: string, bucketName: string, bucket
   const raw = `${groupName} ${bucketName} ${bucketId ?? ""}`.toLowerCase();
   if (/claude and gpt models/.test(raw)) return 100;
   if (/^gemini models$/.test(groupName.trim().toLowerCase()) || /gemini models/.test(raw)) return 95;
+  if (/neon/.test(raw)) return 93;
+  if (/carbon/.test(raw)) return 92;
   if (/argon/.test(raw)) return 90;
+  if (/hydrogen/.test(raw)) return 88;
   if (/3p-weekly|3p-5h|gemini-weekly|gemini-5h|wtu-weekly/.test(raw)) return 70;
   if (/claude|gpt-oss|\bgpt\b|openai|anthropic/.test(raw)) return 40;
   return 20;
@@ -1007,9 +1030,11 @@ function preferQuotaWindow(
 }
 
 function pickGeminiPrimary(windows: QuotaWindow[]): QuotaWindow {
-  // 與 Antigravity 主畫面對齊：優先顯示 Argon 週額度；沒有再看 5 小時總額
-  const argonWeekly = windows.filter((w) => w.modelKey === "argon" && /週/.test(w.label) && !/即時/.test(w.label));
-  if (argonWeekly.length) return argonWeekly.reduce((a, b) => (a.remainingPercent <= b.remainingPercent ? a : b));
+  // 與 Antigravity 主畫面對齊：優先 Neon／Carbon／Argon 週額度；沒有再看 5 小時總額
+  for (const key of ["neon", "carbon", "argon", "hydrogen"] as const) {
+    const weekly = windows.filter((w) => w.modelKey === key && /週/.test(w.label) && !/即時/.test(w.label));
+    if (weekly.length) return weekly.reduce((a, b) => (a.remainingPercent <= b.remainingPercent ? a : b));
+  }
   const fiveHour = windows.filter((w) => /5\s*小時/.test(w.label));
   const pool = fiveHour.length > 0 ? fiveHour : windows;
   return pool.reduce((a, b) => (a.remainingPercent <= b.remainingPercent ? a : b));

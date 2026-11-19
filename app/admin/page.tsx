@@ -437,6 +437,20 @@ export default function AdminPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [refreshingModels, setRefreshingModels] = useState(false);
+  const [catalogReport, setCatalogReport] = useState<{
+    fetchedAt: number;
+    summary: { discovered: number; newUpstream: number; matched: number; missing: number };
+    families: {
+      family: string;
+      ok: boolean;
+      error?: string;
+      newUpstreamIds: string[];
+      missingUpstreamIds: string[];
+      matchedCatalogIds: string[];
+      discovered: { id: string; displayName?: string }[];
+    }[];
+  } | null>(null);
 
   const refreshCodes = useCallback(async () => {
     try {
@@ -587,6 +601,31 @@ export default function AdminPage() {
     }
   }
 
+  async function refreshModelCatalog() {
+    setRefreshingModels(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/admin/models/refresh", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) {
+        setMsg(data.error || "模型目錄更新失敗");
+        return;
+      }
+      const report = data.report as NonNullable<typeof catalogReport>;
+      setCatalogReport(report);
+      const newN = report.summary.newUpstream;
+      setMsg(
+        newN > 0
+          ? `已探測四大訂閱池：發現 ${newN} 個上游新模型（尚未寫入平台 MODELS，見下方清單）`
+          : `已探測四大訂閱池：與平台清單對齊（發現 ${report.summary.discovered}、匹配 ${report.summary.matched}）`,
+      );
+    } catch {
+      setMsg("模型目錄更新失敗：網路錯誤");
+    } finally {
+      setRefreshingModels(false);
+    }
+  }
+
   async function toggleSource(s: SourceRow) {
     setBusyId(s.id);
     setMsg(null);
@@ -669,6 +708,15 @@ export default function AdminPage() {
           <button type="button" className="adm-btn adm-btn-primary" onClick={() => void syncQuotas()} disabled={syncing}>
             {syncing ? "同步中…" : "同步各水庫容量（sync_quotas）"}
           </button>
+          <button
+            type="button"
+            className="adm-btn adm-btn-primary"
+            onClick={() => void refreshModelCatalog()}
+            disabled={refreshingModels}
+            title="探測 Gemini／ChatGPT／Grok／Claude（Antigravity）上游目錄並與平台 MODELS 對照"
+          >
+            {refreshingModels ? "探測中…" : "一鍵更新模型（四大）"}
+          </button>
           <button type="button" className="adm-btn" onClick={() => void refreshOverview()} disabled={loadingOv}>
             {loadingOv ? "更新中…" : "重新整理"}
           </button>
@@ -677,6 +725,52 @@ export default function AdminPage() {
           </Link>
           <span className="adm-pill adm-pill-ok">資料來源：雲端 Supabase（本機無 DB 時自動代理）</span>
         </div>
+
+        {catalogReport ? (
+          <section className="adm-section">
+            <h3 className="adm-section-title">
+              模型目錄探測結果
+              <span className="adm-count">
+                {new Date(catalogReport.fetchedAt).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" })}
+              </span>
+            </h3>
+            <p className="adm-note" style={{ marginBottom: 12 }}>
+              發現 {catalogReport.summary.discovered}｜匹配 {catalogReport.summary.matched}｜上游新模型{" "}
+              {catalogReport.summary.newUpstream}｜平台有但上游未見 {catalogReport.summary.missing}
+              。「一鍵更新」會寫入探測快照；要把新 id 上架到買家選單仍需把 MODELS 寫進程式碼再部署。
+            </p>
+            <div className="adm-table-wrap">
+              <table className="adm-table">
+                <thead>
+                  <tr>
+                    <th>家族</th>
+                    <th>狀態</th>
+                    <th>匹配</th>
+                    <th>上游新模型</th>
+                    <th>平台缺席</th>
+                    <th>備註</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {catalogReport.families.map((f) => (
+                    <tr key={f.family}>
+                      <td>{f.family}</td>
+                      <td>{f.ok ? "OK" : "失敗"}</td>
+                      <td>{f.matchedCatalogIds.length}</td>
+                      <td style={{ maxWidth: 280, wordBreak: "break-all" }}>
+                        {f.newUpstreamIds.length ? f.newUpstreamIds.join(", ") : "—"}
+                      </td>
+                      <td style={{ maxWidth: 280, wordBreak: "break-all" }}>
+                        {f.missingUpstreamIds.length ? f.missingUpstreamIds.join(", ") : "—"}
+                      </td>
+                      <td>{f.error || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ) : null}
 
         <section className="adm-section">
           <h3 className="adm-section-title">

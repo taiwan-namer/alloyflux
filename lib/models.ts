@@ -11,7 +11,19 @@ export type ModelCategory =
   | "node-agent";
 
 /** 對應 Antigravity Models & Usage 的額度池 */
-export type QuotaPool = "shared" | "argon" | "third_party" | "chatgpt" | "grok" | "other" | "node";
+export type QuotaPool =
+  | "shared"
+  | "argon"
+  | "neon"
+  | "carbon"
+  | "hydrogen"
+  | "third_party"
+  | "chatgpt"
+  | "grok"
+  | "other"
+  | "node";
+
+export type ModelEffort = "xhigh" | "high" | "medium" | "low";
 
 export interface ModelInfo {
   id: string;
@@ -37,7 +49,7 @@ export interface ModelInfo {
   /** Gemini API Key 路徑的正式 model 名 */
   geminiApiId?: string;
   /** 思考強度（Antigravity wire 後綴） */
-  effort?: "high" | "medium" | "low";
+  effort?: ModelEffort;
   /** 走供給者 Node Agent 時的 providerKey／upstream model */
   nodeProviderKey?: string;
   nodeUpstreamModel?: string;
@@ -179,6 +191,163 @@ export const MODELS: ModelInfo[] = [
     antigravityId: "gemini-4-argon-high",
     geminiApiId: "gemini-4-argon",
     openrouterId: "google/gemini-2.5-pro",
+  },
+  // === Gemini 4 Neon（2026-11-18；Antigravity 預設主力，含 Extra／xhigh）===
+  {
+    id: "gemini-4-neon-low",
+    label: "Gemini 4 Neon · Low",
+    blurb: "深度日常",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "neon",
+    tier: "top",
+    effort: "low",
+    price: { input: 3.0, cachedInput: 0.15, output: 15.0 },
+    antigravityId: "gemini-4-neon-low",
+    geminiApiId: "gemini-4-neon",
+    openrouterId: "google/gemini-2.5-pro",
+  },
+  {
+    id: "gemini-4-neon-medium",
+    label: "Gemini 4 Neon · Medium",
+    blurb: "深度日常",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "neon",
+    tier: "top",
+    effort: "medium",
+    price: { input: 3.0, cachedInput: 0.15, output: 15.0 },
+    antigravityId: "gemini-4-neon-medium",
+    geminiApiId: "gemini-4-neon",
+    openrouterId: "google/gemini-2.5-pro",
+  },
+  {
+    id: "gemini-4-neon-high",
+    label: "Gemini 4 Neon · High",
+    blurb: "深度日常（預設）",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "neon",
+    tier: "top",
+    effort: "high",
+    price: { input: 3.0, cachedInput: 0.15, output: 15.0 },
+    antigravityId: "gemini-4-neon-high",
+    geminiApiId: "gemini-4-neon",
+    openrouterId: "google/gemini-2.5-pro",
+  },
+  {
+    id: "gemini-4-neon-xhigh",
+    label: "Gemini 4 Neon · Extra High",
+    blurb: "最深推理",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "neon",
+    tier: "top",
+    effort: "xhigh",
+    price: { input: 3.0, cachedInput: 0.15, output: 15.0 },
+    antigravityId: "gemini-4-neon-xhigh",
+    geminiApiId: "gemini-4-neon",
+    openrouterId: "google/gemini-2.5-pro",
+  },
+  // === Gemini 4 Carbon（Ultra 長程最深）===
+  {
+    id: "gemini-4-carbon-low",
+    label: "Gemini 4 Carbon · Low",
+    blurb: "長程頂規",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "carbon",
+    tier: "top",
+    effort: "low",
+    price: { input: 4.0, cachedInput: 0.2, output: 20.0 },
+    antigravityId: "gemini-4-carbon-low",
+    geminiApiId: "gemini-4-carbon",
+    openrouterId: "google/gemini-2.5-pro",
+  },
+  {
+    id: "gemini-4-carbon-medium",
+    label: "Gemini 4 Carbon · Medium",
+    blurb: "長程頂規",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "carbon",
+    tier: "top",
+    effort: "medium",
+    price: { input: 4.0, cachedInput: 0.2, output: 20.0 },
+    antigravityId: "gemini-4-carbon-medium",
+    geminiApiId: "gemini-4-carbon",
+    openrouterId: "google/gemini-2.5-pro",
+  },
+  {
+    id: "gemini-4-carbon-high",
+    label: "Gemini 4 Carbon · High",
+    blurb: "長程頂規",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "carbon",
+    tier: "top",
+    effort: "high",
+    price: { input: 4.0, cachedInput: 0.2, output: 20.0 },
+    antigravityId: "gemini-4-carbon-high",
+    geminiApiId: "gemini-4-carbon",
+    openrouterId: "google/gemini-2.5-pro",
+  },
+  // === Gemini 4 Hydrogen（日常高速執行）===
+  {
+    id: "gemini-4-hydrogen-low",
+    label: "Gemini 4 Hydrogen · Low",
+    blurb: "高速日常",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "hydrogen",
+    tier: "main",
+    effort: "low",
+    price: { input: 1.5, cachedInput: 0.075, output: 7.5 },
+    antigravityId: "gemini-4-hydrogen-low",
+    geminiApiId: "gemini-4-hydrogen",
+    openrouterId: "google/gemini-2.5-flash",
+  },
+  {
+    id: "gemini-4-hydrogen-medium",
+    label: "Gemini 4 Hydrogen · Medium",
+    blurb: "高速日常",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "hydrogen",
+    tier: "main",
+    effort: "medium",
+    price: { input: 1.5, cachedInput: 0.075, output: 7.5 },
+    antigravityId: "gemini-4-hydrogen-medium",
+    geminiApiId: "gemini-4-hydrogen",
+    openrouterId: "google/gemini-2.5-flash",
+  },
+  {
+    id: "gemini-4-hydrogen-high",
+    label: "Gemini 4 Hydrogen · High",
+    blurb: "高速日常（預設）",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "hydrogen",
+    tier: "main",
+    effort: "high",
+    price: { input: 1.5, cachedInput: 0.075, output: 7.5 },
+    antigravityId: "gemini-4-hydrogen-high",
+    geminiApiId: "gemini-4-hydrogen",
+    openrouterId: "google/gemini-2.5-flash",
+  },
+  {
+    id: "gemini-4-hydrogen-xhigh",
+    label: "Gemini 4 Hydrogen · Extra High",
+    blurb: "高速深思",
+    provider: "gemini",
+    category: "gemini",
+    quotaPool: "hydrogen",
+    tier: "main",
+    effort: "xhigh",
+    price: { input: 1.5, cachedInput: 0.075, output: 7.5 },
+    antigravityId: "gemini-4-hydrogen-xhigh",
+    geminiApiId: "gemini-4-hydrogen",
+    openrouterId: "google/gemini-2.5-flash",
   },
 
   // === Claude via Antigravity（內部：扣 Google「Claude and GPT models」池；買家端不顯示）===
@@ -448,6 +617,9 @@ export function findModel(id: string): ModelInfo | undefined {
   return (
     MODELS.find((m) => m.id === id) ??
     MODELS.find((m) => m.antigravityId === id) ??
+    (id === "gemini-4-neon" ? MODELS.find((m) => m.id === "gemini-4-neon-high") : undefined) ??
+    (id === "gemini-4-carbon" ? MODELS.find((m) => m.id === "gemini-4-carbon-high") : undefined) ??
+    (id === "gemini-4-hydrogen" ? MODELS.find((m) => m.id === "gemini-4-hydrogen-high") : undefined) ??
     (id === "gemini-4-argon" ? MODELS.find((m) => m.id === "gemini-4-argon-low") : undefined) ??
     (id === "gemini-3.8-flash" ? MODELS.find((m) => m.id === "gemini-3.8-flash-low") : undefined)
   );
@@ -512,7 +684,7 @@ function roundPoints(n: number): number {
 export function perTurnChargedPointsCap(tier: ModelInfo["tier"], effort?: ModelInfo["effort"]): number {
   if (tier === "light") return 5;
   if (tier === "main") return 15;
-  if (effort === "medium" || effort === "high") return 45;
+  if (effort === "medium" || effort === "high" || effort === "xhigh") return 45;
   return 25; // top
 }
 
