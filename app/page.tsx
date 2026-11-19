@@ -951,7 +951,7 @@ type PendingImage = { id: string; mimeType: string; data: string; previewUrl: st
 type PendingFile = { id: string; name: string; size: number; text: string };
 
 const MAX_PENDING_IMAGES = 3;
-const MAX_PENDING_FILES = 5;
+const MAX_PENDING_FILES = 10;
 /** 文字檔上傳位元組上限（超長會再拆成多個 ≤15,000 字附件） */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 /** 單個文字附件淨化後上限 */
