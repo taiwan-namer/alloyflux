@@ -958,11 +958,12 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_FILE_CHARS = DEFAULT_MAX_CHARS_PER_PART;
 /** 貼上／輸入超過此字數 → 自動收成 TXT 附件（避免對話欄／氣泡變文字牆） */
 const LONG_PASTE_TO_FILE_CHARS = 1_500;
-const TEXT_FILE_RE = /\.(txt|csv|md|json|js|ts|tsx|jsx|py|html|htm|xml|log|css|sql|yaml|yml)$/i;
+const TEXT_FILE_RE =
+  /\.(txt|csv|md|json|jsonl|js|ts|tsx|jsx|py|html|htm|xml|log|css|sql|yaml|yml)$/i;
 /** 純圖片：Android 才會走相簿／相機，勿與文件副檔名混在同一個 accept */
 const IMAGE_ACCEPT = "image/*";
 const DOC_ACCEPT =
-  ".txt,.csv,.md,.json,.js,.ts,.tsx,.jsx,.py,.html,.htm,.xml,.log,.css,.sql,.yaml,.yml,.pdf,.docx,.xlsx,.xls,.zip";
+  ".txt,.csv,.md,.json,.jsonl,.js,.ts,.tsx,.jsx,.py,.html,.htm,.xml,.log,.css,.sql,.yaml,.yml,.pdf,.docx,.xlsx,.xls,.zip";
 
 function formatCharCount(n: number): string {
   return n.toLocaleString("zh-TW");
@@ -1676,7 +1677,13 @@ export default function ChatPage() {
           if (parts.length > 1) {
             splitHint = `「${file.name}」已拆成 ${parts.length} 個附件`;
           }
-        } else if (TEXT_FILE_RE.test(file.name) || file.type.startsWith("text/") || file.type === "application/json") {
+        } else if (
+          TEXT_FILE_RE.test(file.name) ||
+          file.type.startsWith("text/") ||
+          file.type === "application/json" ||
+          file.type === "application/x-ndjson" ||
+          file.type === "application/jsonl"
+        ) {
           const parts = await readTextAttachment(file, room);
           addFiles.push(...parts);
           room -= parts.length;
