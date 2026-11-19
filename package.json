@@ -12,6 +12,7 @@
     "supplier-node": "node -e \"console.error('已改為 npm run node-agent'); process.exit(1)\""
   },
   "dependencies": {
+    "fflate": "^0.8.2",
     "mammoth": "^1.13.0",
     "next": "^16.4.5",
     "pdfjs-dist": "^6.5.438",

@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { extractOfficeAttachmentText, isOfficeAttachment } from "@/lib/office-attachments";
+import { extractZipAttachmentText, isZipAttachment } from "@/lib/zip-attachments";
 import {
   parseUserMessageContent,
   previewUserText,
@@ -955,7 +956,7 @@ const TEXT_FILE_RE = /\.(txt|csv|md|json|js|ts|tsx|jsx|py|html|htm|xml|log|css|s
 /** 純圖片：Android 才會走相簿／相機，勿與文件副檔名混在同一個 accept */
 const IMAGE_ACCEPT = "image/*";
 const DOC_ACCEPT =
-  ".txt,.csv,.md,.json,.js,.ts,.tsx,.jsx,.py,.html,.htm,.xml,.log,.css,.sql,.yaml,.yml,.pdf,.docx,.xlsx,.xls";
+  ".txt,.csv,.md,.json,.js,.ts,.tsx,.jsx,.py,.html,.htm,.xml,.log,.css,.sql,.yaml,.yml,.pdf,.docx,.xlsx,.xls,.zip";
 
 function formatCharCount(n: number): string {
   return n.toLocaleString("zh-TW");
@@ -1044,6 +1045,20 @@ async function readTextAttachment(file: File): Promise<PendingFile> {
 async function readOfficeAttachment(file: File): Promise<PendingFile> {
   const text = await extractOfficeAttachmentText(file, MAX_FILE_CHARS);
   return { id: crypto.randomUUID(), name: file.name, size: file.size, text };
+}
+
+async function readZipAttachment(file: File): Promise<PendingFile> {
+  const { text, fileCount, skipped } = await extractZipAttachmentText(file, MAX_FILE_CHARS);
+  const note =
+    skipped.length > 0
+      ? `\n\n（已讀 ${fileCount} 個檔；略過：${skipped.slice(0, 8).join("、")}）`
+      : `\n\n（已讀 ${fileCount} 個檔）`;
+  return {
+    id: crypto.randomUUID(),
+    name: file.name,
+    size: file.size,
+    text: `${text}${note}`.slice(0, MAX_FILE_CHARS + 200),
+  };
 }
 
 export default function ChatPage() {
@@ -1633,6 +1648,9 @@ export default function ChatPage() {
       try {
         if (file.type.startsWith("image/")) {
           addImgs.push(await compressImageFile(file));
+        } else if (isZipAttachment(file)) {
+          flashComposerHint(`正在解壓「${file.name}」…`);
+          addFiles.push(await readZipAttachment(file));
         } else if (isOfficeAttachment(file)) {
           flashComposerHint(`正在解析「${file.name}」…`);
           addFiles.push(await readOfficeAttachment(file));
@@ -1640,7 +1658,7 @@ export default function ChatPage() {
           addFiles.push(await readTextAttachment(file));
         } else {
           flashComposerHint(
-            `不支援的檔案類型：${file.name}（可上傳圖片、文字檔、PDF、Word .docx、Excel）`,
+            `不支援的檔案類型：${file.name}（可上傳圖片、文字檔、PDF、Word .docx、Excel、ZIP）`,
           );
         }
       } catch (e) {
@@ -2549,7 +2567,7 @@ export default function ChatPage() {
               <button
                 type="button"
                 className="composer-icon-btn"
-                title="上傳檔案（文字、PDF、Word、Excel）"
+                title="上傳檔案（文字、PDF、Word、Excel、ZIP）"
                 disabled={busy}
                 aria-label="上傳檔案"
                 onClick={() => fileInputRef.current?.click()}
