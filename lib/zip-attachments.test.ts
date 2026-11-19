@@ -5,6 +5,7 @@ import {
   extractZipAttachmentText,
   isZipAttachment,
   MAX_ZIP_FILE_BYTES,
+  ZIP_TEXT_FILE_RE,
 } from "./zip-attachments";
 
 function zipFile(name: string, files: Record<string, string | Uint8Array>): File {
@@ -26,6 +27,14 @@ describe("isZipAttachment", () => {
       isZipAttachment(new File([], "noext", { type: "application/zip" })),
       true,
     );
+  });
+});
+
+describe("ZIP_TEXT_FILE_RE", () => {
+  it("接受 .jsonl", () => {
+    assert.equal(ZIP_TEXT_FILE_RE.test("events.jsonl"), true);
+    assert.equal(ZIP_TEXT_FILE_RE.test("data/JSONL"), false);
+    assert.equal(ZIP_TEXT_FILE_RE.test("logs/run.JSONL"), true);
   });
 });
 

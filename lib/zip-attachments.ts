@@ -20,7 +20,7 @@ const ZIP_MIME = new Set(["application/zip", "application/x-zip-compressed", "mu
 
 /** 與對話欄文字附件對齊的可讀副檔名 */
 export const ZIP_TEXT_FILE_RE =
-  /\.(txt|csv|md|json|js|ts|tsx|jsx|py|html|htm|xml|log|css|sql|yaml|yml|toml|ini|cfg|env|sh|bash|zsh|rs|go|java|kt|swift|c|cc|cpp|h|hpp|rb|php|vue|svelte)$/i;
+  /\.(txt|csv|md|json|jsonl|js|ts|tsx|jsx|py|html|htm|xml|log|css|sql|yaml|yml|toml|ini|cfg|env|sh|bash|zsh|rs|go|java|kt|swift|c|cc|cpp|h|hpp|rb|php|vue|svelte)$/i;
 
 const SKIP_PATH_RE =
   /(^|\/)(__MACOSX|\.git|node_modules|\.svn|\.hg)(\/|$)/i;
