@@ -62,4 +62,26 @@ describe("ChatGPT usage window parsing", () => {
     assert.equal(chatGptWindowLabel(10_800), "3 小時視窗");
     assert.equal(chatGptWindowLabel(259_200), "3 天視窗");
   });
+
+  it("5h 剩餘 100% 且週窗 0% 時主數字應取 5h", () => {
+    const windows = parseChatGptUsageWindows({
+      rate_limit: {
+        primary_window: {
+          used_percent: 0,
+          limit_window_seconds: 18000,
+          reset_at: 1_800_000_100,
+        },
+        secondary_window: {
+          used_percent: 100,
+          limit_window_seconds: 604800,
+          reset_at: 1_800_500_000,
+        },
+      },
+    });
+    const primary = pickChatGptPrimaryWindow(windows);
+    assert.equal(primary?.remainingPercent, 100);
+    assert.equal(primary?.label, "5 小時視窗");
+    const worst = Math.min(...windows.map((w) => w.remainingPercent));
+    assert.equal(worst, 0);
+  });
 });

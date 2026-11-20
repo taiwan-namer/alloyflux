@@ -499,6 +499,27 @@ export async function saveSourceQuota(sourceId: string, quota: SubscriptionQuota
     .run(JSON.stringify(quota), Date.now(), sourceId);
 }
 
+export type SyncQuotaResult = {
+  sourceId: string;
+  provider: SourceProvider;
+  label: string;
+  ok: boolean;
+  primaryRemainingPercent?: number;
+  primaryUsedPercent?: number;
+  windows?: { label: string; remainingPercent: number; usedPercent: number; resetAt: string | null }[];
+  error?: string;
+  keptPrevious?: boolean;
+};
+
+function parsePrevQuota(row: SourceRow): SubscriptionQuota | null {
+  if (!row.quota_json) return null;
+  try {
+    return JSON.parse(row.quota_json) as SubscriptionQuota;
+  } catch {
+    return null;
+  }
+}
+
 export async function syncSourceQuotaById(sourceId: string): Promise<SubscriptionQuota | null> {
   if (process.env.SUPPLIER_NODE_MODE === "1") return null;
   const row = (await db().prepare("SELECT * FROM sources WHERE id = ?").get(sourceId)) as unknown as
@@ -508,17 +529,52 @@ export async function syncSourceQuotaById(sourceId: string): Promise<Subscriptio
   let creds = JSON.parse(decrypt(row.encrypted_key)) as OAuthCredentials;
   if (creds.delegatedToNode) {
     // Token 在節點；平台無法代查，保留上次 quota_json
-    return row.quota_json ? (JSON.parse(row.quota_json) as SubscriptionQuota) : null;
+    return parsePrevQuota(row);
   }
+  const prev = parsePrevQuota(row);
+
+  // ChatGPT：同步前強制 refresh，避免過期 token 把官方用量讀成 0%／auth_failed
+  const shouldForceRefresh =
+    Boolean(creds.refreshToken) &&
+    (creds.provider === "openai" ||
+      !creds.expiresAt ||
+      creds.expiresAt - Date.now() < 15 * 60_000);
   try {
-    if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
+    if (shouldForceRefresh && creds.refreshToken) {
       creds = await refreshOAuthCredentials(creds);
       await saveUpdatedOAuthCreds(sourceId, creds);
     }
   } catch {
     // refresh 失敗先仍嘗試用現有 access token 查用量；兩邊都掛才標失效
   }
-  const quota = await fetchSubscriptionQuota(creds);
+
+  let quota = await fetchSubscriptionQuota(creds);
+
+  // ChatGPT 若仍像授權失敗，再 refresh 一次後重試
+  if (
+    creds.provider === "openai" &&
+    creds.refreshToken &&
+    (quota.subscriptionStatus === "auth_failed" || !(quota.windows?.length > 0))
+  ) {
+    try {
+      creds = await refreshOAuthCredentials(creds);
+      await saveUpdatedOAuthCreds(sourceId, creds);
+      quota = await fetchSubscriptionQuota(creds);
+    } catch {
+      // keep first quota
+    }
+  }
+
+  // 勿用 auth_failed／空窗覆蓋先前有效用量（否則同步後「永遠 0%」）
+  if (
+    prev &&
+    (prev.windows?.length ?? 0) > 0 &&
+    prev.subscriptionStatus !== "auth_failed" &&
+    (quota.subscriptionStatus === "auth_failed" || !(quota.windows?.length > 0))
+  ) {
+    return prev;
+  }
+
   await saveSourceQuota(sourceId, quota);
 
   const expired =
@@ -544,12 +600,68 @@ export async function syncSourceQuotaById(sourceId: string): Promise<Subscriptio
   return quota;
 }
 
-export async function syncAllSubscriptionQuotas(): Promise<void> {
+export async function syncAllSubscriptionQuotas(): Promise<SyncQuotaResult[]> {
   // 含已停用的訂閱節點：可藉成功同步自動恢復
   const rows = (await db()
-    .prepare("SELECT id FROM sources WHERE auth_type = 'oauth_sub'")
-    .all()) as { id: string }[];
-  await Promise.allSettled(rows.map((r) => syncSourceQuotaById(r.id)));
+    .prepare("SELECT id, provider, label FROM sources WHERE auth_type = 'oauth_sub'")
+    .all()) as { id: string; provider: SourceProvider; label: string }[];
+  const settled = await Promise.allSettled(
+    rows.map(async (r) => {
+      const before = (await db().prepare("SELECT quota_json FROM sources WHERE id = ?").get(r.id)) as
+        | { quota_json: string | null }
+        | undefined;
+      const prev =
+        before?.quota_json != null
+          ? (() => {
+              try {
+                return JSON.parse(before.quota_json) as SubscriptionQuota;
+              } catch {
+                return null;
+              }
+            })()
+          : null;
+      const quota = await syncSourceQuotaById(r.id);
+      if (!quota) {
+        return {
+          sourceId: r.id,
+          provider: r.provider,
+          label: r.label,
+          ok: false,
+          error: "無法讀取或已委託節點",
+        } satisfies SyncQuotaResult;
+      }
+      const keptPrevious =
+        Boolean(prev) &&
+        quota.fetchedAt === prev?.fetchedAt &&
+        quota.primaryRemainingPercent === prev?.primaryRemainingPercent;
+      return {
+        sourceId: r.id,
+        provider: r.provider,
+        label: r.label,
+        ok: quota.subscriptionStatus !== "auth_failed",
+        primaryRemainingPercent: quota.primaryRemainingPercent,
+        primaryUsedPercent: quota.primaryUsedPercent,
+        windows: (quota.windows ?? []).map((w) => ({
+          label: w.label,
+          remainingPercent: w.remainingPercent,
+          usedPercent: w.usedPercent,
+          resetAt: w.resetAt,
+        })),
+        error: quota.subscriptionStatus === "auth_failed" ? "授權失效" : undefined,
+        keptPrevious,
+      } satisfies SyncQuotaResult;
+    }),
+  );
+  return settled.map((s, i) => {
+    if (s.status === "fulfilled") return s.value;
+    return {
+      sourceId: rows[i].id,
+      provider: rows[i].provider,
+      label: rows[i].label,
+      ok: false,
+      error: s.reason instanceof Error ? s.reason.message : String(s.reason),
+    };
+  });
 }
 
 export async function updateSource(

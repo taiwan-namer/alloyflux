@@ -22,6 +22,7 @@ import {
 import {
   addOAuthSubscriptionSource,
   assertSourceOwnedBy,
+  listSourcesIncludingRemoved,
   syncAllSubscriptionQuotas,
   syncSourceQuotaById,
 } from "@/lib/sources";
@@ -354,13 +355,30 @@ export async function POST(req: Request) {
         }
         if (body.sourceId) {
           const quota = await syncSourceQuotaById(body.sourceId);
-          return Response.json({ ok: true, quota });
+          const src = (await listSourcesIncludingRemoved()).find((s) => s.id === body.sourceId);
+          return Response.json({
+            ok: true,
+            quota,
+            results: quota
+              ? [
+                  {
+                    sourceId: body.sourceId,
+                    provider: src?.provider,
+                    label: src?.label,
+                    ok: quota.subscriptionStatus !== "auth_failed",
+                    primaryRemainingPercent: quota.primaryRemainingPercent,
+                    primaryUsedPercent: quota.primaryUsedPercent,
+                    windows: quota.windows,
+                  },
+                ]
+              : [],
+          });
         }
         if (!user.isAdmin) {
           return Response.json({ error: "僅管理員可同步全部額度" }, { status: 403 });
         }
-        await syncAllSubscriptionQuotas();
-        return Response.json({ ok: true });
+        const results = await syncAllSubscriptionQuotas();
+        return Response.json({ ok: true, results });
       }
       default:
         return Response.json({ error: "未知的 action" }, { status: 400 });
