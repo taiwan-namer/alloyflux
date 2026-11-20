@@ -4,10 +4,14 @@ import {
   GEMINI_OAUTH,
   GROK_OAUTH,
   bootstrapGeminiAccount,
+  chatGptWindowLabel,
   fetchAntigravityAvailableModels,
   grokProxyHeaders,
+  pickChatGptPrimaryWindow,
   refreshOAuthCredentials,
+  resolveChatGptResetAt,
   type OAuthCredentials,
+  type QuotaWindow,
   type SubscriptionQuota,
 } from "./oauth";
 import { saveSourceQuota, saveUpdatedOAuthCreds, syncSourceQuotaById, type Candidate } from "./sources";
@@ -971,41 +975,63 @@ async function* chatgptSubscriptionStream(
     }
   }
 
-  // 從回傳 Header 即時讀取最新訂閱進度條 %
-  const hPrimaryUsed = res.headers.get("x-codex-primary-used-percent");
-  const hSecondaryUsed = res.headers.get("x-codex-secondary-used-percent");
-  if (hPrimaryUsed !== null) {
-    const pUsed = Math.round(Number(hPrimaryUsed) * 10) / 10;
-    const sUsed = hSecondaryUsed !== null ? Math.round(Number(hSecondaryUsed) * 10) / 10 : 0;
-    const pRem = Math.max(0, 100 - pUsed);
-    const sRem = Math.max(0, 100 - sUsed);
+  // 從回傳 Header 即時讀取最新訂閱進度條 %（含 reset-at／window-minutes）
+  const headerWindow = (
+    usedHeader: string,
+    minutesHeader: string,
+    resetHeader: string,
+    fallback: "5h" | "7d",
+  ): QuotaWindow | null => {
+    const usedRaw = res.headers.get(usedHeader);
+    if (usedRaw === null) return null;
+    const used = Math.round(Number(usedRaw) * 10) / 10;
+    if (!Number.isFinite(used)) return null;
+    const minutesRaw = res.headers.get(minutesHeader);
+    const minutes = minutesRaw != null ? Number(minutesRaw) : NaN;
+    const secs =
+      Number.isFinite(minutes) && minutes > 0 ? minutes * 60 : fallback === "5h" ? 18_000 : 604_800;
+    const rem = Math.max(0, Math.round((100 - used) * 10) / 10);
+    const resetRaw = res.headers.get(resetHeader);
+    const resetNum = resetRaw != null ? Number(resetRaw) : NaN;
+    return {
+      label: chatGptWindowLabel(secs, fallback),
+      usedPercent: used,
+      remainingPercent: rem,
+      uiRemainingPercent: Math.round(rem),
+      uiUsedPercent: Math.round(used),
+      resetAt: Number.isFinite(resetNum)
+        ? resolveChatGptResetAt({ reset_at: resetNum })
+        : null,
+      modelKey: "chatgpt",
+      limitWindowSeconds: secs,
+    };
+  };
+  const headerWindows = [
+    headerWindow(
+      "x-codex-primary-used-percent",
+      "x-codex-primary-window-minutes",
+      "x-codex-primary-reset-at",
+      "5h",
+    ),
+    headerWindow(
+      "x-codex-secondary-used-percent",
+      "x-codex-secondary-window-minutes",
+      "x-codex-secondary-reset-at",
+      "7d",
+    ),
+  ].filter((w): w is QuotaWindow => Boolean(w));
+  if (headerWindows.length) {
+    // 仍依秒數辨識：Team 方案 primary 可能是週視窗
+    headerWindows.sort(
+      (a, b) => (a.limitWindowSeconds ?? 1e12) - (b.limitWindowSeconds ?? 1e12),
+    );
+    const primary = pickChatGptPrimaryWindow(headerWindows)!;
     const snap: SubscriptionQuota = {
       planType: (creds.planType ?? "pro").toUpperCase(),
       email: creds.email,
-      windows: [
-        {
-          label: "5 小時視窗",
-          usedPercent: pUsed,
-          remainingPercent: pRem,
-          uiRemainingPercent: Math.round(pRem),
-          uiUsedPercent: Math.round(pUsed),
-          resetAt: null,
-        },
-        ...(hSecondaryUsed !== null
-          ? [
-              {
-                label: "7 天週視窗",
-                usedPercent: sUsed,
-                remainingPercent: sRem,
-                uiRemainingPercent: Math.round(sRem),
-                uiUsedPercent: Math.round(sUsed),
-                resetAt: null,
-              },
-            ]
-          : []),
-      ],
-      primaryUsedPercent: Math.round(pUsed),
-      primaryRemainingPercent: Math.round(pRem),
+      windows: headerWindows,
+      primaryUsedPercent: primary.uiUsedPercent,
+      primaryRemainingPercent: primary.uiRemainingPercent,
       fetchedAt: Date.now(),
     };
     await saveSourceQuota(c.source.id, snap);
@@ -1051,42 +1077,47 @@ async function* chatgptSubscriptionStream(
         usage.outputTokens = (u.output_tokens ?? 0) + (u.reasoning_tokens ?? 0);
       }
     } else if (json.type === "codex.rate_limits" && json.rate_limits?.primary) {
-      const pUsed = Number(json.rate_limits.primary.used_percent ?? 0);
-      const sUsed = Number(json.rate_limits.secondary?.used_percent ?? 0);
-      {
-        const pRem = Math.max(0, 100 - pUsed);
-        const sRem = Math.max(0, 100 - sUsed);
+      const toWin = (
+        raw: {
+          used_percent?: number;
+          window_minutes?: number;
+          reset_at?: number;
+        },
+        fallback: "5h" | "7d",
+      ): QuotaWindow | null => {
+        if (typeof raw.used_percent !== "number" || !Number.isFinite(raw.used_percent)) return null;
+        const used = Math.round(raw.used_percent * 10) / 10;
+        const rem = Math.max(0, Math.round((100 - used) * 10) / 10);
+        const secs =
+          typeof raw.window_minutes === "number" && raw.window_minutes > 0
+            ? raw.window_minutes * 60
+            : fallback === "5h"
+              ? 18_000
+              : 604_800;
+        return {
+          label: chatGptWindowLabel(secs, fallback),
+          usedPercent: used,
+          remainingPercent: rem,
+          uiRemainingPercent: Math.round(rem),
+          uiUsedPercent: Math.round(used),
+          resetAt: resolveChatGptResetAt({ reset_at: raw.reset_at ?? null }),
+          modelKey: "chatgpt",
+          limitWindowSeconds: secs,
+        };
+      };
+      const windows = [
+        toWin(json.rate_limits.primary, "5h"),
+        json.rate_limits.secondary ? toWin(json.rate_limits.secondary, "7d") : null,
+      ].filter((w): w is QuotaWindow => Boolean(w));
+      windows.sort((a, b) => (a.limitWindowSeconds ?? 1e12) - (b.limitWindowSeconds ?? 1e12));
+      if (windows.length) {
+        const primary = pickChatGptPrimaryWindow(windows)!;
         await saveSourceQuota(c.source.id, {
           planType: (creds.planType ?? "pro").toUpperCase(),
           email: creds.email,
-          windows: [
-            {
-              label: "5 小時視窗",
-              usedPercent: pUsed,
-              remainingPercent: pRem,
-              uiRemainingPercent: Math.round(pRem),
-              uiUsedPercent: Math.round(pUsed),
-              resetAt: json.rate_limits.primary.reset_at
-                ? new Date(json.rate_limits.primary.reset_at * 1000).toISOString()
-                : null,
-            },
-            ...(json.rate_limits.secondary
-              ? [
-                  {
-                    label: "7 天週視窗",
-                    usedPercent: sUsed,
-                    remainingPercent: sRem,
-                    uiRemainingPercent: Math.round(sRem),
-                    uiUsedPercent: Math.round(sUsed),
-                    resetAt: json.rate_limits.secondary.reset_at
-                      ? new Date(json.rate_limits.secondary.reset_at * 1000).toISOString()
-                      : null,
-                  },
-                ]
-              : []),
-          ],
-          primaryUsedPercent: Math.round(pUsed),
-          primaryRemainingPercent: Math.round(pRem),
+          windows,
+          primaryUsedPercent: primary.uiUsedPercent,
+          primaryRemainingPercent: primary.uiRemainingPercent,
           fetchedAt: Date.now(),
         });
       }

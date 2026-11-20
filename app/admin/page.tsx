@@ -10,8 +10,10 @@ interface QuotaWindow {
   usedPercent: number;
   remainingPercent: number;
   uiRemainingPercent?: number;
+  uiUsedPercent?: number;
   resetAt: string | null;
   modelKey?: string;
+  limitWindowSeconds?: number;
 }
 
 interface SourceRow {
@@ -352,6 +354,14 @@ function fmtIso(iso: string | null | undefined) {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return iso;
   return new Date(t).toLocaleString("zh-TW", { hour12: false });
+}
+
+function resetHint(iso: string | null | undefined) {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  if (t <= Date.now()) return "已過重置時間（請再按同步；若仍為 0% 代表上游尚未放行）";
+  return null;
 }
 
 function fmtNum(n: number) {
@@ -813,10 +823,11 @@ export default function AdminPage() {
                       <td className="adm-sub">
                         {wins.length
                           ? wins
-                              .map(
-                                (w) =>
-                                  `${w.label} ${Math.round(w.uiRemainingPercent ?? w.remainingPercent)}%`,
-                              )
+                              .map((w) => {
+                                const rem = Math.round(w.uiRemainingPercent ?? w.remainingPercent);
+                                const used = Math.round(w.uiUsedPercent ?? w.usedPercent);
+                                return `${w.label} 剩餘${rem}%／已用${used}%`;
+                              })
                               .join(" · ")
                           : "尚無視窗資料"}
                       </td>
@@ -889,18 +900,26 @@ export default function AdminPage() {
 
                         {windows.length > 0 && (
                           <ul className="adm-win-list">
-                            {windows.map((w, i) => (
-                              <li key={`${w.label}-${i}`}>
-                                <div className="adm-win-row">
-                                  <span>{w.label}</span>
-                                  <span className={`adm-text-${level(w.remainingPercent)}`}>
-                                    {Math.round(w.uiRemainingPercent ?? w.remainingPercent)}%
-                                  </span>
-                                </div>
-                                <Meter pct={w.remainingPercent} />
-                                <div className="adm-sub">重置：{fmtIso(w.resetAt)}</div>
-                              </li>
-                            ))}
+                            {windows.map((w, i) => {
+                              const overdue = resetHint(w.resetAt);
+                              const used = Math.round(w.uiUsedPercent ?? w.usedPercent);
+                              const rem = Math.round(w.uiRemainingPercent ?? w.remainingPercent);
+                              return (
+                                <li key={`${w.label}-${i}`}>
+                                  <div className="adm-win-row">
+                                    <span>{w.label}</span>
+                                    <span className={`adm-text-${level(w.remainingPercent)}`}>
+                                      剩餘 {rem}%
+                                    </span>
+                                  </div>
+                                  <Meter pct={w.remainingPercent} />
+                                  <div className="adm-sub">
+                                    已用 {used}% · 重置：{fmtIso(w.resetAt)}
+                                    {overdue ? ` · ${overdue}` : ""}
+                                  </div>
+                                </li>
+                              );
+                            })}
                           </ul>
                         )}
 

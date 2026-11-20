@@ -97,6 +97,8 @@ export interface QuotaWindow {
   /** 對應模型族，如 argon / flash-lite / 3.8-flash / shared */
   modelKey?: string;
   bucketId?: string;
+  /** ChatGPT／Codex：視窗長度（秒），18000=5h、604800=7d */
+  limitWindowSeconds?: number;
 }
 
 function pctFromFraction(fraction: number): {
@@ -1272,6 +1274,167 @@ async function fetchChatGptAccountEntitlement(creds: OAuthCredentials): Promise<
   }
 }
 
+/** ChatGPT／Codex usage 視窗原始欄位（wham／codex） */
+export interface ChatGptUsageWindowRaw {
+  used_percent?: number | null;
+  limit_window_seconds?: number | null;
+  reset_at?: number | null;
+  reset_after_seconds?: number | null;
+  window_minutes?: number | null;
+}
+
+export interface ChatGptUsagePayload {
+  plan_type?: string;
+  email?: string;
+  rate_limit?: {
+    allowed?: boolean;
+    limit_reached?: boolean;
+    primary_window?: ChatGptUsageWindowRaw | null;
+    secondary_window?: ChatGptUsageWindowRaw | null;
+  } | null;
+  additional_rate_limits?:
+    | {
+        id?: string;
+        title?: string;
+        primary_window?: ChatGptUsageWindowRaw | null;
+        secondary_window?: ChatGptUsageWindowRaw | null;
+      }[]
+    | null;
+}
+
+/** reset_at 可能是 unix 秒或毫秒；reset_after_seconds 為相對秒數 */
+export function resolveChatGptResetAt(
+  raw: Pick<ChatGptUsageWindowRaw, "reset_at" | "reset_after_seconds">,
+  nowMs = Date.now(),
+): string | null {
+  const abs = raw.reset_at;
+  if (typeof abs === "number" && Number.isFinite(abs) && abs > 0) {
+    const ms = abs > 1e12 ? abs : abs * 1000;
+    return new Date(ms).toISOString();
+  }
+  const after = raw.reset_after_seconds;
+  if (typeof after === "number" && Number.isFinite(after) && after >= 0) {
+    return new Date(nowMs + after * 1000).toISOString();
+  }
+  return null;
+}
+
+export function chatGptWindowLabel(
+  seconds: number | null | undefined,
+  fallback: "5h" | "7d" | "other" = "other",
+): string {
+  if (typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0) {
+    if (seconds < 86_400) {
+      const hours = Math.max(1, Math.round(seconds / 3600));
+      return hours === 5 ? "5 小時視窗" : `${hours} 小時視窗`;
+    }
+    const days = Math.max(1, Math.round(seconds / 86_400));
+    return days === 7 ? "7 天週視窗" : `${days} 天視窗`;
+  }
+  if (fallback === "5h") return "5 小時視窗";
+  if (fallback === "7d") return "7 天週視窗";
+  return "用量視窗";
+}
+
+function limitSecondsFromRaw(raw: ChatGptUsageWindowRaw): number | null {
+  if (typeof raw.limit_window_seconds === "number" && Number.isFinite(raw.limit_window_seconds)) {
+    return raw.limit_window_seconds;
+  }
+  if (typeof raw.window_minutes === "number" && Number.isFinite(raw.window_minutes) && raw.window_minutes > 0) {
+    return raw.window_minutes * 60;
+  }
+  return null;
+}
+
+function quotaWindowFromChatGptRaw(
+  raw: ChatGptUsageWindowRaw,
+  fallback: "5h" | "7d" | "other",
+  opts?: { title?: string; modelKey?: string },
+): QuotaWindow | null {
+  if (typeof raw.used_percent !== "number" || !Number.isFinite(raw.used_percent)) return null;
+  const used = Math.max(0, Math.round(raw.used_percent * 10) / 10);
+  const rem = Math.max(0, Math.round((100 - used) * 10) / 10);
+  const secs = limitSecondsFromRaw(raw);
+  const baseLabel = chatGptWindowLabel(secs, fallback);
+  const label = opts?.title ? `${opts.title} · ${baseLabel}` : baseLabel;
+  return {
+    label,
+    usedPercent: used,
+    remainingPercent: rem,
+    uiRemainingPercent: Math.round(rem),
+    uiUsedPercent: Math.round(used),
+    resetAt: resolveChatGptResetAt(raw),
+    modelKey: opts?.modelKey ?? "chatgpt",
+    limitWindowSeconds: secs ?? undefined,
+  };
+}
+
+/** 依 limit_window_seconds 辨識 5h／7d；不可假設 primary=5h、secondary=7d */
+export function parseChatGptUsageWindows(data: ChatGptUsagePayload): QuotaWindow[] {
+  const out: QuotaWindow[] = [];
+  const seen = new Set<string>();
+  const push = (w: QuotaWindow | null) => {
+    if (!w) return;
+    const key = `${w.label}|${w.limitWindowSeconds ?? ""}|${w.usedPercent}|${w.resetAt ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(w);
+  };
+
+  const routePair = (
+    primary: ChatGptUsageWindowRaw | null | undefined,
+    secondary: ChatGptUsageWindowRaw | null | undefined,
+    title?: string,
+  ) => {
+    const slots: { raw: ChatGptUsageWindowRaw; fallback: "5h" | "7d" }[] = [];
+    if (primary) slots.push({ raw: primary, fallback: "5h" });
+    if (secondary) slots.push({ raw: secondary, fallback: "7d" });
+    let assigned5h = false;
+    let assigned7d = false;
+    for (const slot of slots) {
+      const secs = limitSecondsFromRaw(slot.raw);
+      let fallback = slot.fallback;
+      if (typeof secs === "number") {
+        if (secs < 86_400) {
+          if (assigned5h && !assigned7d) fallback = "7d";
+          else fallback = "5h";
+        } else {
+          if (assigned7d && !assigned5h) fallback = "5h";
+          else fallback = "7d";
+        }
+      }
+      const win = quotaWindowFromChatGptRaw(slot.raw, fallback, { title });
+      if (!win) continue;
+      if ((win.limitWindowSeconds ?? 0) < 86_400 && (win.limitWindowSeconds ?? 0) > 0) assigned5h = true;
+      if ((win.limitWindowSeconds ?? 0) >= 86_400) assigned7d = true;
+      push(win);
+    }
+  };
+
+  routePair(data.rate_limit?.primary_window, data.rate_limit?.secondary_window);
+  for (const extra of data.additional_rate_limits ?? []) {
+    routePair(extra.primary_window, extra.secondary_window, extra.title || extra.id);
+  }
+
+  // 5 小時視窗排前面，方便後台主數字對齊官方「5 小時」
+  out.sort((a, b) => {
+    const as = a.limitWindowSeconds ?? Number.POSITIVE_INFINITY;
+    const bs = b.limitWindowSeconds ?? Number.POSITIVE_INFINITY;
+    return as - bs;
+  });
+  return out;
+}
+
+export function pickChatGptPrimaryWindow(windows: QuotaWindow[]): QuotaWindow | null {
+  if (!windows.length) return null;
+  const fiveHour = windows.find(
+    (w) =>
+      (typeof w.limitWindowSeconds === "number" && w.limitWindowSeconds > 0 && w.limitWindowSeconds < 86_400) ||
+      /5\s*小時/.test(w.label),
+  );
+  return fiveHour ?? windows[0];
+}
+
 async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<SubscriptionQuota> {
   const headers: Record<string, string> = {
     Authorization: `Bearer ${creds.accessToken}`,
@@ -1286,79 +1449,38 @@ async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<S
   const entitlement = await fetchChatGptAccountEntitlement(creds);
   let usageAuthFailed = false;
 
-  for (const pathSuffix of ["/codex/usage", "/wham/usage"]) {
+  // wham 為 Codex CLI 主路徑；codex/usage 可能回 200 但 rate_limit 空，不可搶先當成成功。
+  for (const pathSuffix of ["/wham/usage", "/codex/usage"]) {
     try {
       const res = await fetch(`${CHATGPT_OAUTH.codexBaseUrl}${pathSuffix}`, { headers });
       if (res.status === 401 || res.status === 403) {
         usageAuthFailed = true;
         continue;
       }
-      if (res.ok) {
-        const data = (await res.json()) as {
-          plan_type?: string;
-          email?: string;
-          rate_limit?: {
-            primary_window?: { used_percent?: number; reset_at?: number };
-            secondary_window?: { used_percent?: number; reset_at?: number };
-          };
-        };
-        const windows: QuotaWindow[] = [];
-        const p = data.rate_limit?.primary_window;
-        if (p && typeof p.used_percent === "number") {
-          const used = Math.round(p.used_percent * 10) / 10;
-          const rem = Math.max(0, Math.round((100 - used) * 10) / 10);
-          windows.push({
-            label: "5 小時視窗",
-            usedPercent: used,
-            remainingPercent: rem,
-            uiRemainingPercent: Math.round(rem),
-            uiUsedPercent: Math.round(used),
-            resetAt: p.reset_at ? new Date(p.reset_at * 1000).toISOString() : null,
-          });
-        }
-        const s = data.rate_limit?.secondary_window;
-        if (s && typeof s.used_percent === "number") {
-          const used = Math.round(s.used_percent * 10) / 10;
-          const rem = Math.max(0, Math.round((100 - used) * 10) / 10);
-          windows.push({
-            label: "7 天週視窗",
-            usedPercent: used,
-            remainingPercent: rem,
-            uiRemainingPercent: Math.round(rem),
-            uiUsedPercent: Math.round(used),
-            resetAt: s.reset_at ? new Date(s.reset_at * 1000).toISOString() : null,
-          });
-        }
-        const primary =
-          windows[0] ??
-          ({
-            label: "5 小時視窗",
-            usedPercent: 0,
-            remainingPercent: 100,
-            uiRemainingPercent: 100,
-            uiUsedPercent: 0,
-            resetAt: null,
-          } satisfies QuotaWindow);
-        const planType = (
-          data.plan_type ??
-          entitlement.planType ??
-          creds.planType ??
-          "pro"
-        ).toUpperCase();
-        // 用量 API 成功＝token 有效；僅當 entitlement 明確說未訂閱才標 inactive
-        const active = entitlement.active === false ? false : true;
-        return {
-          planType,
-          email: data.email ?? entitlement.email ?? creds.email,
-          windows: windows.length ? windows : [primary],
-          primaryUsedPercent: primary.uiUsedPercent,
-          primaryRemainingPercent: primary.uiRemainingPercent,
-          fetchedAt: Date.now(),
-          subscriptionExpiresAt: entitlement.expiresAt,
-          subscriptionActive: active,
-          subscriptionStatus: active ? "active" : "inactive",
-        };
-      }
+      if (!res.ok) continue;
+      const data = (await res.json()) as ChatGptUsagePayload;
+      const windows = parseChatGptUsageWindows(data);
+      if (!windows.length) continue; // 空目錄 → 試下一個端點，勿寫成「假 100%」或卡死舊值
+
+      const primary = pickChatGptPrimaryWindow(windows)!;
+      const planType = (
+        data.plan_type ??
+        entitlement.planType ??
+        creds.planType ??
+        "pro"
+      ).toUpperCase();
+      const active = entitlement.active === false ? false : true;
+      return {
+        planType,
+        email: data.email ?? entitlement.email ?? creds.email,
+        windows,
+        primaryUsedPercent: primary.uiUsedPercent,
+        primaryRemainingPercent: primary.uiRemainingPercent,
+        fetchedAt: Date.now(),
+        subscriptionExpiresAt: entitlement.expiresAt,
+        subscriptionActive: active,
+        subscriptionStatus: active ? "active" : "inactive",
+      };
     } catch {
       // try next path
     }
@@ -1391,6 +1513,8 @@ async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<S
         uiRemainingPercent: 100,
         uiUsedPercent: 0,
         resetAt: null,
+        modelKey: "chatgpt",
+        limitWindowSeconds: 18_000,
       },
     ],
     primaryUsedPercent: 0,
