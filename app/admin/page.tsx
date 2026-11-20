@@ -551,21 +551,59 @@ export default function AdminPage() {
     }
   }, []);
 
+  const syncQuotas = useCallback(
+    async (opts?: { silent?: boolean }) => {
+      const silent = Boolean(opts?.silent);
+      if (!silent) {
+        setSyncing(true);
+        setMsg(null);
+      } else {
+        setSyncing(true);
+      }
+      try {
+        const res = await fetch("/api/oauth", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ action: "sync_quota" }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          if (!silent) setMsg((data as { error?: string }).error || "同步失敗");
+        } else if (!silent) {
+          setMsg("已同步各水庫剩餘容量");
+        }
+        await refreshOverview();
+      } catch {
+        if (!silent) setMsg("同步失敗：網路錯誤");
+      } finally {
+        setSyncing(false);
+      }
+    },
+    [refreshOverview],
+  );
+
   useEffect(() => {
     void refreshOverview();
     void refreshCodes();
+    // 進後台即打官方用量，不必手動按
+    void syncQuotas({ silent: true });
     fetch("/api/auth/me")
       .then((r) => r.json())
       .then((d) => {
         setEmail(d.user?.email ?? "免驗證模式（開放預覽）");
       })
       .catch(() => setEmail("免驗證模式（開放預覽）"));
-  }, [refreshOverview, refreshCodes]);
+  }, [refreshOverview, refreshCodes, syncQuotas]);
 
   useEffect(() => {
-    const t = setInterval(() => void refreshOverview(), 30_000);
-    return () => clearInterval(t);
-  }, [refreshOverview]);
+    // 畫面每 30 秒重讀 DB；每 2 分鐘向官方重拉用量
+    const overviewTimer = setInterval(() => void refreshOverview(), 30_000);
+    const syncTimer = setInterval(() => void syncQuotas({ silent: true }), 120_000);
+    return () => {
+      clearInterval(overviewTimer);
+      clearInterval(syncTimer);
+    };
+  }, [refreshOverview, syncQuotas]);
 
   /* 水庫分組 */
   const reservoirGroups = useMemo(() => {
@@ -590,26 +628,6 @@ export default function AdminPage() {
     }
     return map;
   }, [ov]);
-
-  async function syncQuotas() {
-    setSyncing(true);
-    setMsg(null);
-    try {
-      const res = await fetch("/api/oauth", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ action: "sync_quota" }),
-      });
-      const data = await res.json();
-      if (!res.ok) setMsg(data.error || "同步失敗");
-      else setMsg("已同步各水庫剩餘容量");
-      await refreshOverview();
-    } catch {
-      setMsg("同步失敗：網路錯誤");
-    } finally {
-      setSyncing(false);
-    }
-  }
 
   async function refreshModelCatalog() {
     setRefreshingModels(true);
@@ -715,9 +733,16 @@ export default function AdminPage() {
     return (
       <>
         <div className="adm-toolbar">
-          <button type="button" className="adm-btn adm-btn-primary" onClick={() => void syncQuotas()} disabled={syncing}>
-            {syncing ? "同步中…" : "同步各水庫容量（sync_quotas）"}
+          <button
+            type="button"
+            className="adm-btn adm-btn-primary"
+            onClick={() => void syncQuotas()}
+            disabled={syncing}
+            title="進頁與每 2 分鐘會自動同步；按鈕可立即再拉一次官方用量"
+          >
+            {syncing ? "同步中…" : "立即同步各水庫容量"}
           </button>
+          <span className="adm-pill adm-pill-ok">自動同步：進頁＋每 2 分鐘／背景每 5 分鐘</span>
           <button
             type="button"
             className="adm-btn adm-btn-primary"
