@@ -558,9 +558,18 @@ export default function AdminPage() {
     fetch("/api/auth/me")
       .then((r) => r.json())
       .then((d) => {
-        setEmail(d.user?.email ?? "免驗證模式（開放預覽）");
+        const u = d.user as { email?: string; isAdmin?: boolean } | null;
+        setIsAdminSession(Boolean(u?.isAdmin));
+        setEmail(
+          u?.email
+            ? `${u.email}${u.isAdmin ? "（管理員）" : "（非 ADMIN_EMAILS；同步僅限自己的貨源）"}`
+            : "免驗證模式（開放預覽）",
+        );
       })
-      .catch(() => setEmail("免驗證模式（開放預覽）"));
+      .catch(() => {
+        setIsAdminSession(false);
+        setEmail("免驗證模式（開放預覽）");
+      });
   }, [refreshOverview, refreshCodes]);
 
   useEffect(() => {
@@ -741,7 +750,11 @@ export default function AdminPage() {
             className="adm-btn adm-btn-primary"
             onClick={() => void syncQuotas()}
             disabled={syncing}
-            title="需已登入管理員。重置已過仍顯示剩餘 0% 時按此刷新；失敗會保留舊值並顯示原因"
+            title={
+              isAdminSession
+                ? "已登入管理員：同步全站訂閱用量"
+                : "需登入。非 ADMIN_EMAILS 時只同步自己的貨源；重置已過仍顯示 0% 請按此刷新"
+            }
           >
             {syncing ? "同步中…" : "同步各水庫容量（sync_quotas）"}
           </button>
