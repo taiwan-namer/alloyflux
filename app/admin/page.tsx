@@ -742,7 +742,7 @@ export default function AdminPage() {
           >
             {syncing ? "同步中…" : "立即同步各水庫容量"}
           </button>
-          <span className="adm-pill adm-pill-ok">自動同步：進頁＋每 2 分鐘／背景每 5 分鐘</span>
+          <span className="adm-pill adm-pill-ok">自動同步：進頁＋每 2 分鐘</span>
           <button
             type="button"
             className="adm-btn adm-btn-primary"
