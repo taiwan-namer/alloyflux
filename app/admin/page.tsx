@@ -433,6 +433,7 @@ function Stat({ label, value, sub }: { label: string; value: ReactNode; sub?: Re
 
 export default function AdminPage() {
   const [email, setEmail] = useState("");
+  const [isAdminSession, setIsAdminSession] = useState(false);
   const [active, setActive] = useState<ViewId>("reservoir");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ pool: true, billing: true });
   const [navOpen, setNavOpen] = useState(false);
@@ -602,7 +603,12 @@ export default function AdminPage() {
       });
       const data = await res.json();
       if (!res.ok) {
-        setMsg(data.error || "同步失敗");
+        setMsg(
+          data.error ||
+            (res.status === 401
+              ? "請先登入後再同步"
+              : "同步失敗"),
+        );
       } else if (typeof data.failed === "number" && data.failed > 0) {
         const reasons = Array.isArray(data.results)
           ? data.results

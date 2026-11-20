@@ -22,10 +22,30 @@ import {
 import {
   addOAuthSubscriptionSource,
   assertSourceOwnedBy,
+  listSourcesForUser,
   syncAllSubscriptionQuotas,
   syncSourceQuotaDetailed,
+  type SyncQuotaResult,
 } from "@/lib/sources";
 import { jsonError, requireSupplier, type User } from "@/lib/auth";
+
+function syncQuotaResponse(results: SyncQuotaResult[]) {
+  const failed = results.filter((r) => !r.ok);
+  return Response.json({
+    ok: failed.length === 0,
+    synced: results.filter((r) => r.ok).length,
+    failed: failed.length,
+    results: results.map((r) => ({
+      sourceId: r.sourceId,
+      ok: r.ok,
+      skipped: r.skipped,
+      reason: r.reason,
+      primaryRemainingPercent: r.quota?.primaryRemainingPercent,
+      primaryUsedPercent: r.quota?.primaryUsedPercent,
+      status: r.quota?.subscriptionStatus,
+    })),
+  });
+}
 
 export const dynamic = "force-dynamic";
 
@@ -361,25 +381,21 @@ export async function POST(req: Request) {
             reason: result.reason,
           });
         }
-        if (!user.isAdmin) {
-          return Response.json({ error: "僅管理員可同步全部額度" }, { status: 403 });
+        // 管理員：全站；供給者：僅自己擁有的訂閱貨源（後台按鈕不需再卡 ADMIN_EMAILS）
+        if (user.isAdmin) {
+          return syncQuotaResponse(await syncAllSubscriptionQuotas());
         }
-        const results = await syncAllSubscriptionQuotas();
-        const failed = results.filter((r) => !r.ok);
-        return Response.json({
-          ok: failed.length === 0,
-          synced: results.filter((r) => r.ok).length,
-          failed: failed.length,
-          results: results.map((r) => ({
-            sourceId: r.sourceId,
-            ok: r.ok,
-            skipped: r.skipped,
-            reason: r.reason,
-            primaryRemainingPercent: r.quota?.primaryRemainingPercent,
-            primaryUsedPercent: r.quota?.primaryUsedPercent,
-            status: r.quota?.subscriptionStatus,
-          })),
-        });
+        const owned = (await listSourcesForUser(user)).filter((s) => s.authType === "oauth_sub");
+        if (!owned.length) {
+          return Response.json(
+            {
+              error: `目前帳號 ${user.email} 沒有可同步的訂閱貨源。若你是站長，請確認 Vercel 的 ADMIN_EMAILS 含此信箱（全小寫比對）。`,
+            },
+            { status: 403 },
+          );
+        }
+        const ownedResults = await Promise.all(owned.map((s) => syncSourceQuotaDetailed(s.id)));
+        return syncQuotaResponse(ownedResults);
       }
       default:
         return Response.json({ error: "未知的 action" }, { status: 400 });
