@@ -1276,7 +1276,8 @@ async function fetchChatGptAccountEntitlement(creds: OAuthCredentials): Promise<
 
 /** ChatGPT／Codex usage 視窗原始欄位（wham／codex） */
 export interface ChatGptUsageWindowRaw {
-  used_percent?: number | null;
+  /** 官方偶發回傳字串百分比 */
+  used_percent?: number | string | null;
   limit_window_seconds?: number | null;
   reset_at?: number | null;
   reset_after_seconds?: number | null;
