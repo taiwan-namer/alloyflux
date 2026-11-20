@@ -282,14 +282,25 @@ export async function activeJobCount(nodeId: string): Promise<number> {
   return Number(row.c);
 }
 
-export async function listOnlineNodesForModel(providerKey: string, modelId: string): Promise<SupplierNode[]> {
+export type ListOnlineNodesOpts = {
+  /** 診斷用：略過 concurrency／今日上限，只看在線＋能力是否支援該模型 */
+  ignoreLoad?: boolean;
+};
+
+export async function listOnlineNodesForModel(
+  providerKey: string,
+  modelId: string,
+  opts?: ListOnlineNodesOpts,
+): Promise<SupplierNode[]> {
   const out: SupplierNode[] = [];
   for (const n of await listNodes()) {
     if (!n.online || n.status !== "active" || !n.acceptingJobs) continue;
     await ensureDailyCounter(n.id);
     const fresh = (await getNode(n.id))!;
-    if (fresh.jobsToday >= fresh.dailyJobLimit) continue;
-    if ((await activeJobCount(n.id)) >= fresh.maxConcurrency) continue;
+    if (!opts?.ignoreLoad) {
+      if (fresh.jobsToday >= fresh.dailyJobLimit) continue;
+      if ((await activeJobCount(n.id)) >= fresh.maxConcurrency) continue;
+    }
     if (
       fresh.capabilities.some(
         (c) => c.enabled && c.providerKey === providerKey && (c.modelId === modelId || c.modelId === "*"),

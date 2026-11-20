@@ -10,10 +10,11 @@ import {
   UpstreamError,
   type ChatMessage,
 } from "./providers";
-import { enqueueInferenceJob, streamJobResult } from "./inference-jobs";
+import { enqueueInferenceJob, streamJobResult, sweepStaleJobs } from "./inference-jobs";
 import { listOnlineNodesForModel } from "./node-registry";
 import { releaseSourceLock, tryAcquireSourceLock } from "./source-lock";
 import { slideMessagesForUpstream } from "./context-window";
+import { listSources } from "./sources";
 import {
   attachResearchToDone,
   modelNeedsPlatformResearch,
@@ -48,6 +49,12 @@ async function listOnlineNodesBriefly(
   attempts = 16,
   gapMs = 50,
 ): Promise<Awaited<ReturnType<typeof listOnlineNodesForModel>>> {
+  // 先清逾時卡住的 assigned／running，避免 concurrency 假滿
+  try {
+    await sweepStaleJobs();
+  } catch {
+    /* ignore */
+  }
   for (let i = 0; i < attempts; i++) {
     if (signal?.aborted) return [];
     const nodes = await listOnlineNodesForModel(providerKey, modelId);
@@ -55,6 +62,37 @@ async function listOnlineNodesBriefly(
     if (i + 1 < attempts) await new Promise((r) => setTimeout(r, gapMs));
   }
   return [];
+}
+
+/** 把「真的沒貨源」拆成可行動的原因（Node 離線／忙碌／模型未掛能力／委託後無備援） */
+async function explainEmptySupply(model: ModelInfo): Promise<string> {
+  const route = resolveNodeRoute(model);
+  const sources = await listSources();
+  const enabled = sources.filter((s) => s.enabled && !s.removedAt);
+  const delegated = enabled.filter((s) => s.delegatedToNode);
+  const localish = enabled.filter((s) => !s.delegatedToNode);
+
+  if (!route) {
+    if (localish.length === 0 && delegated.length > 0) {
+      return "訂閱憑證已委託給 Node Agent，但此模型沒有 Node 路由；請啟動節點或改選有備援的模型。";
+    }
+    return "目前沒有可用貨源。請綁定訂閱／API Key，或啟動 Node Agent。";
+  }
+
+  const capable = await listOnlineNodesForModel(route.providerKey, route.upstreamModel, {
+    ignoreLoad: true,
+  });
+  const free = await listOnlineNodesForModel(route.providerKey, route.upstreamModel);
+  if (capable.length === 0) {
+    return `沒有在線節點支援「${model.label}」（${route.providerKey}:${route.upstreamModel}）。請確認 Node Agent 在線，並在後台刷新／掛上此模型能力。`;
+  }
+  if (free.length === 0) {
+    return "算力節點在線但忙碌中（concurrency 已滿或有卡住任務）。請稍候再送，或檢查是否有未結束的 inference job。";
+  }
+  if (localish.length === 0 && delegated.length > 0) {
+    return "訂閱憑證在節點端，平台本地無備援貨源；節點瞬間不可用時會出現此訊息，請再試一次或確認 Node Agent 心跳。";
+  }
+  return "目前沒有可用貨源。請綁定訂閱／API Key，或啟動 Node Agent。";
 }
 
 export type GatewayEvent =
@@ -109,7 +147,7 @@ async function* streamViaNodeAgent(
 
   const nodes = await listOnlineNodesBriefly(route.providerKey, route.upstreamModel, signal);
   if (!nodes.length) {
-    throw new UpstreamError(503, `沒有在線節點可執行 ${route.providerKey}:${route.upstreamModel}`);
+    throw new UpstreamError(503, await explainEmptySupply(model));
   }
 
   const job = await enqueueInferenceJob({
@@ -248,9 +286,7 @@ async function* routeLocalCandidates(
   // 混合水庫：含 oauth_sub；candidatesFor 已過濾 share_limit / cooldown／delegatedToNode
   const allCandidates = await candidatesFor(model);
   if (allCandidates.length === 0) {
-    throw new NoSourceError(
-      "目前沒有可用貨源。若剛按停止，請稍候再送；並確認已綁定訂閱／API Key，或 Node Agent 在線。",
-    );
+    throw new NoSourceError(await explainEmptySupply(model));
   }
   const candidates = allCandidates.filter((c) => !sourceCatalogLacksModel(c.source.id, model));
   if (candidates.length === 0) {
