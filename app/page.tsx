@@ -47,10 +47,15 @@ interface Conversation {
   model: string;
 }
 
+/** 進入對話先顯示最近幾則，往上滑再載入更舊（降低長串 Markdown 卡頓） */
+const INITIAL_MESSAGE_WINDOW = 5;
+const OLDER_MESSAGE_PAGE = 10;
+
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  createdAt?: number;
   /** 模型內部思考過程（可摺疊顯示） */
   thinking?: string;
   model?: string | null;
@@ -1076,6 +1081,8 @@ export default function ChatPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const [input, setInput] = useState("");
   const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
@@ -1142,7 +1149,46 @@ export default function ChatPage() {
     const nearBottom = dist < 96;
     stickToBottomRef.current = nearBottom;
     setShowJumpLatest(!nearBottom && messages.length > 0);
+    // 靠近頂部：載入更舊紀錄
+    if (el.scrollTop < 72) {
+      void loadOlderMessages();
+    }
   }
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!activeId || !hasOlderMessages || loadingOlder || busy) return;
+    const oldest = messages[0];
+    if (!oldest?.createdAt || !oldest.id) return;
+    const el = messagesRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    const prevTop = el?.scrollTop ?? 0;
+    setLoadingOlder(true);
+    try {
+      const qs = new URLSearchParams({
+        limit: String(OLDER_MESSAGE_PAGE),
+        beforeCreatedAt: String(oldest.createdAt),
+        beforeId: oldest.id,
+      });
+      const res = await fetch(`/api/conversations/${activeId}?${qs}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const older = markAutoRouted((data.messages as Message[]) ?? []);
+      setHasOlderMessages(Boolean(data.hasMore));
+      if (!older.length) return;
+      setMessages((prev) => {
+        const seen = new Set(prev.map((m) => m.id));
+        const merged = [...older.filter((m) => !seen.has(m.id)), ...prev];
+        return merged;
+      });
+      requestAnimationFrame(() => {
+        const box = messagesRef.current;
+        if (!box) return;
+        box.scrollTop = prevTop + (box.scrollHeight - prevHeight);
+      });
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [activeId, hasOlderMessages, loadingOlder, busy, messages]);
 
   const refreshConversations = useCallback(async () => {
     const res = await fetch("/api/conversations");
@@ -1367,11 +1413,14 @@ export default function ChatPage() {
     setSidebarOpen(false);
     stickToBottomRef.current = true;
     setShowJumpLatest(false);
-    const res = await fetch(`/api/conversations/${id}`);
+    setHasOlderMessages(false);
+    setLoadingOlder(false);
+    const res = await fetch(`/api/conversations/${id}?limit=${INITIAL_MESSAGE_WINDOW}`);
     if (!res.ok) {
       // 常見於：電腦斷線時伺服器刪掉未完成的新對話 → 列表殘留／點進去 404
       setActiveId(null);
       setMessages([]);
+      setHasOlderMessages(false);
       setComposerHint(
         res.status === 404
           ? "找不到這則對話（可能在電腦斷線時尚未存檔就被清除）。請重新整理列表，或用原裝置重開。"
@@ -1383,6 +1432,7 @@ export default function ChatPage() {
     const data = await res.json();
     if (data.conversation?.model) applyModelSelection(data.conversation.model);
     setMessages(markAutoRouted(data.messages as Message[]));
+    setHasOlderMessages(Boolean(data.hasMore));
     setComposerHint(null);
     requestAnimationFrame(() => scrollToBottom("auto"));
   }
@@ -1391,6 +1441,8 @@ export default function ChatPage() {
     if (busy) return;
     setActiveId(null);
     setMessages([]);
+    setHasOlderMessages(false);
+    setLoadingOlder(false);
     setFamilyId(AUTO_FAMILY_ID);
     setSidebarOpen(false);
     stickToBottomRef.current = true;
@@ -1447,6 +1499,8 @@ export default function ChatPage() {
     setConversations([]);
     setMessages([]);
     setActiveId(null);
+    setHasOlderMessages(false);
+    setLoadingOlder(false);
     setAccountOpen(false);
     setMemoryOpen(false);
     setMemories([]);
@@ -1864,13 +1918,15 @@ export default function ChatPage() {
       imgs.length > 0 ? `[已上傳 ${imgs.length} 張圖片]\n${content || "（見附圖）"}` : content;
     const userMsgId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
+    const now = Date.now();
     setMessages((prev) => [
       ...prev,
-      { id: userMsgId, role: "user", content: displayContent },
+      { id: userMsgId, role: "user", content: displayContent, createdAt: now },
       {
         id: assistantId,
         role: "assistant",
         content: "",
+        createdAt: now + 1,
         model: isAuto ? null : modelId,
         autoRouted: isAuto,
         deepThink: showDeepThink && deepThink,
@@ -2300,6 +2356,11 @@ export default function ChatPage() {
 
         <div className="messages-wrap">
           <div className="messages" ref={messagesRef} onScroll={updateStickFromScroll}>
+            {messages.length > 0 && (hasOlderMessages || loadingOlder) && (
+              <div className="msg-history-loader" aria-live="polite">
+                {loadingOlder ? "載入更早的對話…" : "上滑載入更早的對話"}
+              </div>
+            )}
             {messages.length === 0 && (
               <div className="empty">
                 <h2 className={brand === "gemini" ? "brand-gradient-text" : undefined}>

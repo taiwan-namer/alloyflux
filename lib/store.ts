@@ -69,9 +69,61 @@ export async function listMessages(conversationId: string): Promise<StoredMessag
     .prepare(
       `SELECT id, role, content, model, source_id AS "sourceId", input_tokens AS "inputTokens", output_tokens AS "outputTokens",
               official_cost_points AS "officialCostPoints", charged_points AS "chargedPoints", created_at AS "createdAt"
-       FROM messages WHERE conversation_id = ? ORDER BY created_at`,
+       FROM messages WHERE conversation_id = ? ORDER BY created_at, id`,
     )
     .all(conversationId)) as unknown as StoredMessage[];
+}
+
+export type MessagesPage = {
+  messages: StoredMessage[];
+  hasMore: boolean;
+};
+
+/**
+ * 由新到舊取一頁後再排回時間正序，供聊天 UI 懶載入。
+ * before*：載入比此游標更舊的訊息。
+ */
+export async function listMessagesPage(
+  conversationId: string,
+  opts?: { limit?: number; beforeCreatedAt?: number; beforeId?: string },
+): Promise<MessagesPage> {
+  const limit = Math.max(1, Math.min(50, Math.floor(opts?.limit ?? 5)));
+  const beforeCreatedAt = opts?.beforeCreatedAt;
+  const beforeId = opts?.beforeId?.trim();
+  const take = limit + 1;
+
+  const select = `SELECT id, role, content, model, source_id AS "sourceId", input_tokens AS "inputTokens", output_tokens AS "outputTokens",
+              official_cost_points AS "officialCostPoints", charged_points AS "chargedPoints", created_at AS "createdAt"
+       FROM messages WHERE conversation_id = ?`;
+
+  let rows: StoredMessage[];
+  if (
+    typeof beforeCreatedAt === "number" &&
+    Number.isFinite(beforeCreatedAt) &&
+    beforeId
+  ) {
+    rows = (await db()
+      .prepare(
+        `${select}
+         AND (created_at < ? OR (created_at = ? AND id < ?))
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(conversationId, beforeCreatedAt, beforeCreatedAt, beforeId, take)) as unknown as StoredMessage[];
+  } else {
+    rows = (await db()
+      .prepare(
+        `${select}
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?`,
+      )
+      .all(conversationId, take)) as unknown as StoredMessage[];
+  }
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+  page.reverse(); // 畫面仍由舊→新
+  return { messages: page, hasMore };
 }
 
 export async function addUserMessage(conversationId: string, content: string, model: string): Promise<string> {

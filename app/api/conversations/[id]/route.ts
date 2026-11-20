@@ -1,7 +1,7 @@
 import { getSessionUser, jsonError } from "@/lib/auth";
 import { cloudDbProxy } from "@/lib/cloud-api";
 import { getOrCreateGuestIdentity } from "@/lib/free-tier";
-import { deleteConversation, getConversation, listMessages } from "@/lib/store";
+import { deleteConversation, getConversation, listMessagesPage } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +19,30 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     const { id } = await ctx.params;
     const conversation = await getConversation(actorId, id);
     if (!conversation) return Response.json({ error: "找不到對話" }, { status: 404 });
-    return Response.json({ conversation, messages: await listMessages(id) });
+
+    const url = new URL(req.url);
+    const limitRaw = Number(url.searchParams.get("limit") ?? "5");
+    const beforeCreatedAtRaw = url.searchParams.get("beforeCreatedAt");
+    const beforeId = url.searchParams.get("beforeId") ?? undefined;
+    const beforeCreatedAt =
+      beforeCreatedAtRaw != null && beforeCreatedAtRaw !== ""
+        ? Number(beforeCreatedAtRaw)
+        : undefined;
+
+    const page = await listMessagesPage(id, {
+      limit: Number.isFinite(limitRaw) ? limitRaw : 5,
+      beforeCreatedAt:
+        typeof beforeCreatedAt === "number" && Number.isFinite(beforeCreatedAt)
+          ? beforeCreatedAt
+          : undefined,
+      beforeId,
+    });
+
+    return Response.json({
+      conversation,
+      messages: page.messages,
+      hasMore: page.hasMore,
+    });
   } catch (e) {
     return jsonError(e);
   }
