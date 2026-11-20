@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { goToSourcesAfterBind } from "@/lib/cloud-site";
-import { MAX_SUPPLIER_SHARE_LIMIT_PCT } from "@/lib/sources";
+import { MAX_SUPPLIER_SHARE_LIMIT_PCT } from "@/lib/share-limit";
 
 const OAUTH_STATE_KEY = "aup_gemini_oauth_state";
 const OAUTH_URL_KEY = "aup_gemini_oauth_url";
