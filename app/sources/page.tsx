@@ -25,7 +25,7 @@ interface SubscriptionQuota {
   fetchedAt: number;
   subscriptionExpiresAt?: string | null;
   subscriptionActive?: boolean;
-  subscriptionStatus?: "active" | "inactive" | "unknown" | "auth_failed";
+  subscriptionStatus?: "active" | "inactive" | "unknown" | "auth_failed" | "usage_unavailable";
 }
 
 function formatSubscriptionExpiry(quota: SubscriptionQuota | null): string | null {

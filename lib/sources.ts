@@ -499,26 +499,79 @@ export async function saveSourceQuota(sourceId: string, quota: SubscriptionQuota
     .run(JSON.stringify(quota), Date.now(), sourceId);
 }
 
+export type SyncQuotaResult = {
+  sourceId: string;
+  ok: boolean;
+  skipped?: boolean;
+  reason?: string;
+  quota: SubscriptionQuota | null;
+};
+
 export async function syncSourceQuotaById(sourceId: string): Promise<SubscriptionQuota | null> {
-  if (process.env.SUPPLIER_NODE_MODE === "1") return null;
+  const result = await syncSourceQuotaDetailed(sourceId);
+  return result.quota;
+}
+
+export async function syncSourceQuotaDetailed(sourceId: string): Promise<SyncQuotaResult> {
+  if (process.env.SUPPLIER_NODE_MODE === "1") {
+    return { sourceId, ok: false, skipped: true, reason: "node_mode", quota: null };
+  }
   const row = (await db().prepare("SELECT * FROM sources WHERE id = ?").get(sourceId)) as unknown as
     | SourceRow
     | undefined;
-  if (!row || row.auth_type !== "oauth_sub") return null;
+  if (!row || row.auth_type !== "oauth_sub") {
+    return { sourceId, ok: false, skipped: true, reason: "not_oauth", quota: null };
+  }
+  let prev: SubscriptionQuota | null = null;
+  if (row.quota_json) {
+    try {
+      prev = JSON.parse(row.quota_json) as SubscriptionQuota;
+    } catch {
+      prev = null;
+    }
+  }
   let creds = JSON.parse(decrypt(row.encrypted_key)) as OAuthCredentials;
   if (creds.delegatedToNode) {
     // Token 在節點；平台無法代查，保留上次 quota_json
-    return row.quota_json ? (JSON.parse(row.quota_json) as SubscriptionQuota) : null;
+    return { sourceId, ok: true, skipped: true, reason: "delegated_to_node", quota: prev };
   }
+  let refreshError: string | null = null;
   try {
     if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
       creds = await refreshOAuthCredentials(creds);
       await saveUpdatedOAuthCreds(sourceId, creds);
     }
-  } catch {
+  } catch (e) {
     // refresh 失敗先仍嘗試用現有 access token 查用量；兩邊都掛才標失效
+    refreshError = e instanceof Error ? e.message : String(e);
   }
   const quota = await fetchSubscriptionQuota(creds);
+
+  // 查不到真實視窗：保留舊值，避免把後台洗成假 0%／假 100%
+  if (quota.subscriptionStatus === "usage_unavailable" || (quota.windows?.length ?? 0) === 0) {
+    if (quota.subscriptionStatus === "auth_failed") {
+      await saveSourceQuota(sourceId, quota);
+      if (row.enabled) {
+        await db().prepare("UPDATE sources SET enabled = 0 WHERE id = ?").run(sourceId);
+      }
+      return {
+        sourceId,
+        ok: false,
+        reason: refreshError ? `auth_failed; refresh: ${refreshError}` : "auth_failed",
+        quota,
+      };
+    }
+    return {
+      sourceId,
+      ok: false,
+      skipped: true,
+      reason: refreshError
+        ? `usage_unavailable; refresh: ${refreshError}`
+        : "usage_unavailable",
+      quota: prev,
+    };
+  }
+
   await saveSourceQuota(sourceId, quota);
 
   const expired =
@@ -541,15 +594,24 @@ export async function syncSourceQuotaById(sourceId: string): Promise<Subscriptio
     // 誤殺後若用量恢復正常，自動重新啟用
     await db().prepare("UPDATE sources SET enabled = 1 WHERE id = ?").run(sourceId);
   }
-  return quota;
+  return { sourceId, ok: true, quota };
 }
 
-export async function syncAllSubscriptionQuotas(): Promise<void> {
+export async function syncAllSubscriptionQuotas(): Promise<SyncQuotaResult[]> {
   // 含已停用的訂閱節點：可藉成功同步自動恢復
   const rows = (await db()
     .prepare("SELECT id FROM sources WHERE auth_type = 'oauth_sub'")
     .all()) as { id: string }[];
-  await Promise.allSettled(rows.map((r) => syncSourceQuotaById(r.id)));
+  const settled = await Promise.allSettled(rows.map((r) => syncSourceQuotaDetailed(r.id)));
+  return settled.map((s, i) => {
+    if (s.status === "fulfilled") return s.value;
+    return {
+      sourceId: rows[i]!.id,
+      ok: false,
+      reason: s.reason instanceof Error ? s.reason.message : String(s.reason),
+      quota: null,
+    };
+  });
 }
 
 export async function updateSource(
@@ -631,6 +693,11 @@ export async function candidatesFor(model: ModelInfo): Promise<Candidate[]> {
         // 依「使用者選的模型」對應配額窗熔斷（Argon／Gemini 總額／Claude·GPT 第三方）
         const w = quotaWindowForModel(s.quota, model.antigravityId ?? model.id);
         if (!w) return true;
+        // 重置時間已過卻仍顯示滿載：視為過期快取，允許再派一次以便對話 Header／同步刷新
+        if (w.resetAt) {
+          const resetMs = Date.parse(w.resetAt);
+          if (Number.isFinite(resetMs) && resetMs < now) return true;
+        }
         return w.usedPercent < s.shareLimitPct;
       }
       return true;

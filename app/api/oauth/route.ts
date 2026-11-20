@@ -23,7 +23,7 @@ import {
   addOAuthSubscriptionSource,
   assertSourceOwnedBy,
   syncAllSubscriptionQuotas,
-  syncSourceQuotaById,
+  syncSourceQuotaDetailed,
 } from "@/lib/sources";
 import { jsonError, requireSupplier, type User } from "@/lib/auth";
 
@@ -353,14 +353,33 @@ export async function POST(req: Request) {
           return Response.json(data);
         }
         if (body.sourceId) {
-          const quota = await syncSourceQuotaById(body.sourceId);
-          return Response.json({ ok: true, quota });
+          const result = await syncSourceQuotaDetailed(body.sourceId);
+          return Response.json({
+            ok: result.ok,
+            quota: result.quota,
+            skipped: result.skipped,
+            reason: result.reason,
+          });
         }
         if (!user.isAdmin) {
           return Response.json({ error: "僅管理員可同步全部額度" }, { status: 403 });
         }
-        await syncAllSubscriptionQuotas();
-        return Response.json({ ok: true });
+        const results = await syncAllSubscriptionQuotas();
+        const failed = results.filter((r) => !r.ok);
+        return Response.json({
+          ok: failed.length === 0,
+          synced: results.filter((r) => r.ok).length,
+          failed: failed.length,
+          results: results.map((r) => ({
+            sourceId: r.sourceId,
+            ok: r.ok,
+            skipped: r.skipped,
+            reason: r.reason,
+            primaryRemainingPercent: r.quota?.primaryRemainingPercent,
+            primaryUsedPercent: r.quota?.primaryUsedPercent,
+            status: r.quota?.subscriptionStatus,
+          })),
+        });
       }
       default:
         return Response.json({ error: "未知的 action" }, { status: 400 });

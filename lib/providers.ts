@@ -1079,14 +1079,20 @@ async function* chatgptSubscriptionStream(
     } else if (json.type === "codex.rate_limits" && json.rate_limits?.primary) {
       const toWin = (
         raw: {
-          used_percent?: number;
+          used_percent?: number | string;
           window_minutes?: number;
           reset_at?: number;
         },
         fallback: "5h" | "7d",
       ): QuotaWindow | null => {
-        if (typeof raw.used_percent !== "number" || !Number.isFinite(raw.used_percent)) return null;
-        const used = Math.round(raw.used_percent * 10) / 10;
+        const usedRaw =
+          typeof raw.used_percent === "number"
+            ? raw.used_percent
+            : typeof raw.used_percent === "string"
+              ? Number(raw.used_percent)
+              : NaN;
+        if (!Number.isFinite(usedRaw)) return null;
+        const used = Math.round(usedRaw * 10) / 10;
         const rem = Math.max(0, Math.round((100 - used) * 10) / 10);
         const secs =
           typeof raw.window_minutes === "number" && raw.window_minutes > 0

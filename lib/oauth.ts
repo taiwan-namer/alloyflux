@@ -186,8 +186,8 @@ export interface SubscriptionQuota {
   subscriptionExpiresAt?: string | null;
   /** 是否仍為有效付費訂閱；false 表示已退訂／降級／失效 */
   subscriptionActive?: boolean;
-  /** active | inactive | unknown | auth_failed */
-  subscriptionStatus?: "active" | "inactive" | "unknown" | "auth_failed";
+  /** active | inactive | unknown | auth_failed | usage_unavailable */
+  subscriptionStatus?: "active" | "inactive" | "unknown" | "auth_failed" | "usage_unavailable";
 }
 
 /** 距離訂閱到期的天數；未知則 null */
@@ -1296,8 +1296,13 @@ export interface ChatGptUsagePayload {
     | {
         id?: string;
         title?: string;
+        limit_name?: string;
         primary_window?: ChatGptUsageWindowRaw | null;
         secondary_window?: ChatGptUsageWindowRaw | null;
+        rate_limit?: {
+          primary_window?: ChatGptUsageWindowRaw | null;
+          secondary_window?: ChatGptUsageWindowRaw | null;
+        } | null;
       }[]
     | null;
 }
@@ -1346,13 +1351,24 @@ function limitSecondsFromRaw(raw: ChatGptUsageWindowRaw): number | null {
   return null;
 }
 
+/** 官方偶發回傳字串百分比；null／非數字視為無資料 */
+export function parseUsedPercent(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw.trim() !== "") {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
 function quotaWindowFromChatGptRaw(
   raw: ChatGptUsageWindowRaw,
   fallback: "5h" | "7d" | "other",
   opts?: { title?: string; modelKey?: string },
 ): QuotaWindow | null {
-  if (typeof raw.used_percent !== "number" || !Number.isFinite(raw.used_percent)) return null;
-  const used = Math.max(0, Math.round(raw.used_percent * 10) / 10);
+  const usedRaw = parseUsedPercent(raw.used_percent);
+  if (usedRaw === null) return null;
+  const used = Math.max(0, Math.round(usedRaw * 10) / 10);
   const rem = Math.max(0, Math.round((100 - used) * 10) / 10);
   const secs = limitSecondsFromRaw(raw);
   const baseLabel = chatGptWindowLabel(secs, fallback);
@@ -1413,7 +1429,13 @@ export function parseChatGptUsageWindows(data: ChatGptUsagePayload): QuotaWindow
 
   routePair(data.rate_limit?.primary_window, data.rate_limit?.secondary_window);
   for (const extra of data.additional_rate_limits ?? []) {
-    routePair(extra.primary_window, extra.secondary_window, extra.title || extra.id);
+    // 兩種形狀：扁平 primary_window，或巢狀 rate_limit.primary_window
+    const nested = extra.rate_limit;
+    routePair(
+      extra.primary_window ?? nested?.primary_window,
+      extra.secondary_window ?? nested?.secondary_window,
+      extra.title || extra.id || extra.limit_name,
+    );
   }
 
   // 5 小時視窗排前面，方便後台主數字對齊官方「5 小時」
@@ -1501,28 +1523,19 @@ async function fetchChatGptSubscriptionQuota(creds: OAuthCredentials): Promise<S
     };
   }
 
+  // 查不到真實視窗時絕不可寫「已用 0%／剩餘 100%」假資料（會覆蓋對話 Header 剛寫入的真值，
+  // 或讓後台誤以為已同步成功）。交給 syncSourceQuotaById 保留舊 quota_json。
   const active = entitlement.active !== false;
   return {
     planType: (entitlement.planType ?? creds.planType ?? "pro").toUpperCase(),
     email: entitlement.email ?? creds.email,
-    windows: [
-      {
-        label: "5 小時視窗",
-        usedPercent: 0,
-        remainingPercent: 100,
-        uiRemainingPercent: 100,
-        uiUsedPercent: 0,
-        resetAt: null,
-        modelKey: "chatgpt",
-        limitWindowSeconds: 18_000,
-      },
-    ],
+    windows: [],
     primaryUsedPercent: 0,
-    primaryRemainingPercent: 100,
+    primaryRemainingPercent: 0,
     fetchedAt: Date.now(),
     subscriptionExpiresAt: entitlement.expiresAt,
     subscriptionActive: active,
-    subscriptionStatus: entitlement.active === null ? "unknown" : active ? "active" : "inactive",
+    subscriptionStatus: "usage_unavailable",
   };
 }
 

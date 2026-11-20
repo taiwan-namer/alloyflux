@@ -601,8 +601,23 @@ export default function AdminPage() {
         body: JSON.stringify({ action: "sync_quota" }),
       });
       const data = await res.json();
-      if (!res.ok) setMsg(data.error || "同步失敗");
-      else setMsg("已同步各水庫剩餘容量");
+      if (!res.ok) {
+        setMsg(data.error || "同步失敗");
+      } else if (typeof data.failed === "number" && data.failed > 0) {
+        const reasons = Array.isArray(data.results)
+          ? data.results
+              .filter((r: { ok?: boolean }) => !r.ok)
+              .map((r: { reason?: string }) => r.reason)
+              .filter(Boolean)
+              .slice(0, 3)
+              .join("；")
+          : "";
+        setMsg(
+          `同步完成：成功 ${data.synced ?? 0}、失敗 ${data.failed}${reasons ? `（${reasons}）` : ""}。失敗者保留舊容量，請確認已登入且 OAuth 未過期。`,
+        );
+      } else {
+        setMsg("已同步各水庫剩餘容量");
+      }
       await refreshOverview();
     } catch {
       setMsg("同步失敗：網路錯誤");
@@ -715,7 +730,13 @@ export default function AdminPage() {
     return (
       <>
         <div className="adm-toolbar">
-          <button type="button" className="adm-btn adm-btn-primary" onClick={() => void syncQuotas()} disabled={syncing}>
+          <button
+            type="button"
+            className="adm-btn adm-btn-primary"
+            onClick={() => void syncQuotas()}
+            disabled={syncing}
+            title="需已登入管理員。重置已過仍顯示剩餘 0% 時按此刷新；失敗會保留舊值並顯示原因"
+          >
             {syncing ? "同步中…" : "同步各水庫容量（sync_quotas）"}
           </button>
           <button

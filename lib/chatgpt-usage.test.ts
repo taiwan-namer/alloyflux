@@ -3,11 +3,39 @@ import { describe, it } from "node:test";
 import {
   chatGptWindowLabel,
   parseChatGptUsageWindows,
+  parseUsedPercent,
   pickChatGptPrimaryWindow,
   resolveChatGptResetAt,
 } from "./oauth";
 
 describe("ChatGPT usage window parsing", () => {
+  it("used_percent 字串也可解析", () => {
+    assert.equal(parseUsedPercent("45.5"), 45.5);
+    assert.equal(parseUsedPercent(12), 12);
+    assert.equal(parseUsedPercent(null), null);
+    assert.equal(parseUsedPercent(""), null);
+  });
+
+  it("巢狀 additional_rate_limits.rate_limit 可解析", () => {
+    const windows = parseChatGptUsageWindows({
+      additional_rate_limits: [
+        {
+          limit_name: "spark",
+          rate_limit: {
+            primary_window: {
+              used_percent: "30",
+              limit_window_seconds: 18000,
+              reset_at: 1_700_000_000,
+            },
+          },
+        },
+      ],
+    });
+    assert.equal(windows.length, 1);
+    assert.equal(windows[0].usedPercent, 30);
+    assert.equal(windows[0].label, "spark · 5 小時視窗");
+  });
+
   it("依 limit_window_seconds 標示，不假設 primary=5h", () => {
     const windows = parseChatGptUsageWindows({
       rate_limit: {
