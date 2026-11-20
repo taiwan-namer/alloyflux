@@ -263,12 +263,7 @@ export default function SourcesPage() {
       }
     }
     const t = setInterval(() => void refresh(), 10_000);
-    // 與後台一致：定期向官方重拉用量，不只重讀 DB
-    const syncTimer = setInterval(() => void syncAndRefresh(), 120_000);
-    return () => {
-      clearInterval(t);
-      clearInterval(syncTimer);
-    };
+    return () => clearInterval(t);
   }, [syncAndRefresh, refresh]);
 
   // 輪詢 ChatGPT／Grok 裝置碼驗證狀態

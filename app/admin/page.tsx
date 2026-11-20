@@ -364,6 +364,38 @@ function resetHint(iso: string | null | undefined) {
   return null;
 }
 
+/** 後台主數字：ChatGPT 優先對齊官方「5 小時」剩餘，勿用 Math.min 被週窗拖成 0% */
+function headlineRemaining(
+  provider: SourceRow["provider"],
+  windows: QuotaWindow[],
+  fallback: number | null | undefined,
+): { pct: number | null; note: string | null } {
+  if (!windows.length) {
+    return { pct: typeof fallback === "number" ? fallback : null, note: null };
+  }
+  if (provider === "openai") {
+    const five =
+      windows.find(
+        (w) =>
+          (typeof w.limitWindowSeconds === "number" &&
+            w.limitWindowSeconds > 0 &&
+            w.limitWindowSeconds < 86_400) ||
+          /小時/.test(w.label),
+      ) ?? null;
+    const pick = five ?? windows[0];
+    const worst = Math.min(...windows.map((w) => w.remainingPercent));
+    const note =
+      five && worst < five.remainingPercent - 0.5
+        ? `主數字對齊 ${five.label}（與官方 Settings→Usage 的 5 小時一致）；週窗剩餘 ${Math.round(worst)}% 另列於下`
+        : "Codex／Work 用量（與 Chat 對話額度分開）";
+    return { pct: pick.remainingPercent, note };
+  }
+  return {
+    pct: Math.min(...windows.map((w) => w.remainingPercent)),
+    note: null,
+  };
+}
+
 function fmtNum(n: number) {
   return Math.round(n * 100) / 100 === Math.round(n)
     ? Math.round(n).toLocaleString("zh-TW")
@@ -570,7 +602,23 @@ export default function AdminPage() {
         if (!res.ok) {
           if (!silent) setMsg((data as { error?: string }).error || "同步失敗");
         } else if (!silent) {
-          setMsg("已同步各水庫剩餘容量");
+          const results = (data as { results?: { provider?: string; ok?: boolean; primaryRemainingPercent?: number; error?: string }[] })
+            .results;
+          if (Array.isArray(results) && results.length) {
+            const gpt = results.filter((r) => r.provider === "openai");
+            const gptLine = gpt.length
+              ? gpt
+                  .map((r) =>
+                    r.ok
+                      ? `ChatGPT 剩餘 ${Math.round(r.primaryRemainingPercent ?? 0)}%`
+                      : `ChatGPT 失敗：${r.error || "未知"}`,
+                  )
+                  .join("；")
+              : "無 ChatGPT 水庫";
+            setMsg(`已同步各水庫。${gptLine}`);
+          } else {
+            setMsg("已同步各水庫剩餘容量");
+          }
         }
         await refreshOverview();
       } catch {
@@ -585,7 +633,7 @@ export default function AdminPage() {
   useEffect(() => {
     void refreshOverview();
     void refreshCodes();
-    // 進後台即打官方用量，不必手動按
+    // 進後台拉一次官方用量（無背景定時；Vercel Hobby 不定時）
     void syncQuotas({ silent: true });
     fetch("/api/auth/me")
       .then((r) => r.json())
@@ -596,14 +644,9 @@ export default function AdminPage() {
   }, [refreshOverview, refreshCodes, syncQuotas]);
 
   useEffect(() => {
-    // 畫面每 30 秒重讀 DB；每 2 分鐘向官方重拉用量
     const overviewTimer = setInterval(() => void refreshOverview(), 30_000);
-    const syncTimer = setInterval(() => void syncQuotas({ silent: true }), 120_000);
-    return () => {
-      clearInterval(overviewTimer);
-      clearInterval(syncTimer);
-    };
-  }, [refreshOverview, syncQuotas]);
+    return () => clearInterval(overviewTimer);
+  }, [refreshOverview]);
 
   /* 水庫分組 */
   const reservoirGroups = useMemo(() => {
@@ -738,11 +781,11 @@ export default function AdminPage() {
             className="adm-btn adm-btn-primary"
             onClick={() => void syncQuotas()}
             disabled={syncing}
-            title="進頁與每 2 分鐘會自動同步；按鈕可立即再拉一次官方用量"
+            title="向官方重拉用量（ChatGPT＝Codex／Work Settings→Usage，不是 Chat 對話額度）"
           >
             {syncing ? "同步中…" : "立即同步各水庫容量"}
           </button>
-          <span className="adm-pill adm-pill-ok">自動同步：進頁＋每 2 分鐘</span>
+          <span className="adm-pill adm-pill-ok">ChatGPT 對齊官方 Settings→Usage（Codex／Work）</span>
           <button
             type="button"
             className="adm-btn adm-btn-primary"
@@ -891,10 +934,12 @@ export default function AdminPage() {
               ) : (
                 <div className="adm-reservoir-grid">
                   {entries.map(({ source: s, windows }) => {
-                    const remain =
-                      windows.length > 0
-                        ? Math.min(...windows.map((w) => w.remainingPercent))
-                        : (s.quota?.primaryRemainingPercent ?? null);
+                    const headline = headlineRemaining(
+                      s.provider,
+                      windows,
+                      s.quota?.primaryRemainingPercent ?? null,
+                    );
+                    const remain = headline.pct;
                     const cooling = s.cooldownUntil && s.cooldownUntil > Date.now();
                     return (
                       <article key={`${g.key}-${s.id}`} className={`adm-res-card ${s.enabled ? "" : "is-off"}`}>
@@ -915,12 +960,15 @@ export default function AdminPage() {
                           <div className="adm-res-main">
                             <div className={`adm-res-pct adm-text-${level(remain)}`}>{Math.round(remain)}%</div>
                             <div className="adm-res-bar">
-                              <div className="adm-sub">剩餘可用</div>
+                              <div className="adm-sub">
+                                {s.provider === "openai" ? "5 小時剩餘（對齊官方）" : "剩餘可用"}
+                              </div>
                               <Meter pct={remain} />
+                              {headline.note ? <div className="adm-sub">{headline.note}</div> : null}
                             </div>
                           </div>
                         ) : (
-                          <div className="adm-sub">尚無容量資料（可按「同步各水庫容量」）</div>
+                          <div className="adm-sub">尚無容量資料（可按「立即同步各水庫容量」）</div>
                         )}
 
                         {windows.length > 0 && (
