@@ -13,7 +13,7 @@ async function resolveActorId(req: Request): Promise<{ actorId: string; setCooki
   const user = await getSessionUser(req);
   if (user) return { actorId: user.id };
   const guest = getOrCreateGuestIdentity(req);
-  return { actorId: guest.guestUserId, setCookieHeader: guest.setCookieHeader };
+  return { actorId: guest.guestUserId, setCookieHeader: guest.setCookieHeader ?? undefined };
 }
 
 export async function GET(req: Request) {
