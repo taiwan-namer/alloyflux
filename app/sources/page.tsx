@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { goToSourcesAfterBind } from "@/lib/cloud-site";
+import { MAX_SUPPLIER_SHARE_LIMIT_PCT } from "@/lib/sources";
 
 const OAUTH_STATE_KEY = "aup_gemini_oauth_state";
 const OAUTH_URL_KEY = "aup_gemini_oauth_url";
@@ -931,14 +932,17 @@ export default function SourcesPage() {
                             <span>
                               願意分配託管上限：<strong>{currentLimit}%</strong>
                             </span>
-                            <span className="muted">為自己保留 {100 - currentLimit}%</span>
+                            <span className="muted">
+                              為自己保留 {100 - Math.min(currentLimit, MAX_SUPPLIER_SHARE_LIMIT_PCT)}%（平台上限{" "}
+                              {MAX_SUPPLIER_SHARE_LIMIT_PCT}%）
+                            </span>
                           </div>
                           <input
                             type="range"
                             min={10}
-                            max={100}
+                            max={MAX_SUPPLIER_SHARE_LIMIT_PCT}
                             step={5}
-                            value={currentLimit}
+                            value={Math.min(currentLimit, MAX_SUPPLIER_SHARE_LIMIT_PCT)}
                             style={{ width: "100%" }}
                             onChange={(e) => {
                               const v = Number(e.target.value);
@@ -1122,13 +1126,14 @@ export default function SourcesPage() {
             />
           </label>
           <label>
-            預設託管分配比例：{shareLimitPct}%（滿載月估回饋約 NT$ {newNodeEstMonthlyNtd.toLocaleString("zh-TW")}）
+            預設託管分配比例：{shareLimitPct}%（最多 {MAX_SUPPLIER_SHARE_LIMIT_PCT}%；滿載月估回饋約 NT${" "}
+            {newNodeEstMonthlyNtd.toLocaleString("zh-TW")}）
             <input
               type="range"
               min={20}
-              max={100}
+              max={MAX_SUPPLIER_SHARE_LIMIT_PCT}
               step={5}
-              value={shareLimitPct}
+              value={Math.min(shareLimitPct, MAX_SUPPLIER_SHARE_LIMIT_PCT)}
               onChange={(e) => setShareLimitPct(Number(e.target.value))}
             />
           </label>

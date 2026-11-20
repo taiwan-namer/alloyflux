@@ -17,6 +17,22 @@ export type SourceKind = "supplier" | "platform";
 export type SourceProvider = "gemini" | "openai" | "anthropic" | "xai" | "openrouter";
 export type SourceAuthType = "oauth_sub" | "api_key";
 
+/** 供給者最多可託管到已用 95%（至少留 5% 自用，避免滿載後無法靠對話刷新用量） */
+export const MAX_SUPPLIER_SHARE_LIMIT_PCT = 95;
+export const MIN_SUPPLIER_SHARE_LIMIT_PCT = 10;
+export const DEFAULT_SUPPLIER_SHARE_LIMIT_PCT = 80;
+
+export function clampShareLimitPct(
+  n: number | null | undefined,
+  fallback = DEFAULT_SUPPLIER_SHARE_LIMIT_PCT,
+): number {
+  const v = typeof n === "number" && Number.isFinite(n) ? n : fallback;
+  return Math.max(
+    MIN_SUPPLIER_SHARE_LIMIT_PCT,
+    Math.min(MAX_SUPPLIER_SHARE_LIMIT_PCT, Math.round(v)),
+  );
+}
+
 export interface Source {
   id: string;
   label: string;
@@ -100,6 +116,11 @@ async function ensureSourcesOwnerColumn(): Promise<void> {
   } catch {
     // users 表尚未就緒時略過認領
   }
+  try {
+    await enforceMaxSupplierShareLimits();
+  } catch {
+    // 啟動期表未就緒時略過
+  }
   globalForOwnerCol.__sourcesOwnerColReady = true;
 }
 
@@ -130,7 +151,10 @@ function rowToSource(r: SourceRow): Source {
     keyHint: r.key_hint,
     priority: r.priority,
     monthlyCapPoints: r.monthly_cap_points,
-    shareLimitPct: r.share_limit_pct ?? 80,
+    shareLimitPct:
+      r.kind === "supplier"
+        ? clampShareLimitPct(r.share_limit_pct, DEFAULT_SUPPLIER_SHARE_LIMIT_PCT)
+        : (r.share_limit_pct ?? 100),
     quota,
     quotaUpdatedAt: r.quota_updated_at,
     enabled: r.enabled === 1,
@@ -384,7 +408,7 @@ export async function addOAuthSubscriptionSource(input: {
             input.label?.trim() || existing.label || defaultLabel,
             encrypt(JSON.stringify(input.creds)),
             displayHint,
-            input.shareLimitPct ?? existing.share_limit_pct ?? 80,
+            clampShareLimitPct(input.shareLimitPct ?? existing.share_limit_pct),
             JSON.stringify(quota),
             now,
             ownerId,
@@ -410,7 +434,7 @@ export async function addOAuthSubscriptionSource(input: {
       encrypt(JSON.stringify(input.creds)),
       displayHint,
       input.priority ?? 50,
-      input.shareLimitPct ?? 80,
+      clampShareLimitPct(input.shareLimitPct),
       JSON.stringify(quota),
       now,
       now,
@@ -625,7 +649,20 @@ export async function updateSource(
   if (patch.monthlyCapPoints !== undefined)
     await db().prepare("UPDATE sources SET monthly_cap_points = ? WHERE id = ?").run(patch.monthlyCapPoints, id);
   if (patch.shareLimitPct !== undefined)
-    await db().prepare("UPDATE sources SET share_limit_pct = ? WHERE id = ?").run(patch.shareLimitPct, id);
+    await db()
+      .prepare("UPDATE sources SET share_limit_pct = ? WHERE id = ?")
+      .run(clampShareLimitPct(patch.shareLimitPct), id);
+}
+
+/** 把既有供給者 >95% 的分配上限壓回封頂（只動 supplier） */
+export async function enforceMaxSupplierShareLimits(): Promise<number> {
+  const r = await db()
+    .prepare(
+      `UPDATE sources SET share_limit_pct = ?
+       WHERE kind = 'supplier' AND share_limit_pct > ?`,
+    )
+    .run(MAX_SUPPLIER_SHARE_LIMIT_PCT, MAX_SUPPLIER_SHARE_LIMIT_PCT);
+  return r.changes;
 }
 
 /** 夥伴移除＝軟刪：停派並隱藏，保留列讓已產生分潤／用量對帳不歸零 */
@@ -698,7 +735,9 @@ export async function candidatesFor(model: ModelInfo): Promise<Candidate[]> {
           const resetMs = Date.parse(w.resetAt);
           if (Number.isFinite(resetMs) && resetMs < now) return true;
         }
-        return w.usedPercent < s.shareLimitPct;
+        const limit =
+          s.kind === "supplier" ? clampShareLimitPct(s.shareLimitPct) : s.shareLimitPct;
+        return w.usedPercent < limit;
       }
       return true;
     })
