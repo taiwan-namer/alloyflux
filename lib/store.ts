@@ -24,6 +24,36 @@ export interface Conversation {
   title: string;
   model: string;
   updatedAt: number;
+  /** 軟刪除時間；有值表示在垃圾桶 */
+  deletedAt?: number | null;
+}
+
+let conversationsSchemaReady = false;
+
+/** 確保 conversations.deleted_at 存在（舊庫升級；可重跑） */
+export async function ensureConversationsSchema(): Promise<void> {
+  if (conversationsSchemaReady) return;
+  try {
+    await db().exec(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS deleted_at BIGINT`);
+    await db().exec(
+      `CREATE INDEX IF NOT EXISTS idx_conversations_user_active
+       ON conversations(user_id, updated_at DESC)
+       WHERE deleted_at IS NULL`,
+    );
+    await db().exec(
+      `CREATE INDEX IF NOT EXISTS idx_conversations_user_trash
+       ON conversations(user_id, deleted_at DESC)
+       WHERE deleted_at IS NOT NULL`,
+    );
+    conversationsSchemaReady = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/does not exist|relation/i.test(msg)) {
+      console.warn("[conversations] table missing; skip schema ensure");
+      return;
+    }
+    conversationsSchemaReady = true;
+  }
 }
 
 export interface StoredMessage {
@@ -40,18 +70,43 @@ export interface StoredMessage {
 }
 
 export async function listConversations(userId: string): Promise<Conversation[]> {
+  await ensureConversationsSchema();
   return (await db()
-    .prepare('SELECT id, title, model, updated_at AS "updatedAt" FROM conversations WHERE user_id = ? ORDER BY updated_at DESC')
+    .prepare(
+      `SELECT id, title, model, updated_at AS "updatedAt"
+       FROM conversations
+       WHERE user_id = ? AND deleted_at IS NULL
+       ORDER BY updated_at DESC`,
+    )
+    .all(userId)) as unknown as Conversation[];
+}
+
+/** 垃圾桶內的已軟刪除對話 */
+export async function listTrashedConversations(userId: string): Promise<Conversation[]> {
+  await ensureConversationsSchema();
+  return (await db()
+    .prepare(
+      `SELECT id, title, model, updated_at AS "updatedAt", deleted_at AS "deletedAt"
+       FROM conversations
+       WHERE user_id = ? AND deleted_at IS NOT NULL
+       ORDER BY deleted_at DESC`,
+    )
     .all(userId)) as unknown as Conversation[];
 }
 
 export async function getConversation(userId: string, id: string): Promise<Conversation | undefined> {
+  await ensureConversationsSchema();
   return (await db()
-    .prepare('SELECT id, title, model, updated_at AS "updatedAt" FROM conversations WHERE user_id = ? AND id = ?')
+    .prepare(
+      `SELECT id, title, model, updated_at AS "updatedAt", deleted_at AS "deletedAt"
+       FROM conversations
+       WHERE user_id = ? AND id = ? AND deleted_at IS NULL`,
+    )
     .get(userId, id)) as unknown as Conversation | undefined;
 }
 
 export async function createConversation(userId: string, title: string, model: string): Promise<string> {
+  await ensureConversationsSchema();
   const id = newId();
   const now = Date.now();
   await db()
@@ -60,8 +115,56 @@ export async function createConversation(userId: string, title: string, model: s
   return id;
 }
 
+export async function renameConversation(userId: string, id: string, title: string): Promise<boolean> {
+  await ensureConversationsSchema();
+  const trimmed = title.trim().slice(0, 80);
+  if (!trimmed) return false;
+  const result = await db()
+    .prepare(
+      `UPDATE conversations SET title = ?, updated_at = ?
+       WHERE user_id = ? AND id = ? AND deleted_at IS NULL`,
+    )
+    .run(trimmed, Date.now(), userId, id);
+  return result.changes > 0;
+}
+
+/** 移入垃圾桶：訊息與對話狀態保留，但不再注入跨對話記憶 */
+export async function softDeleteConversation(userId: string, id: string): Promise<boolean> {
+  await ensureConversationsSchema();
+  const result = await db()
+    .prepare(
+      `UPDATE conversations SET deleted_at = ?
+       WHERE user_id = ? AND id = ? AND deleted_at IS NULL`,
+    )
+    .run(Date.now(), userId, id);
+  return result.changes > 0;
+}
+
+/** 從垃圾桶還原：對話記憶一併回來 */
+export async function restoreConversation(userId: string, id: string): Promise<boolean> {
+  await ensureConversationsSchema();
+  const result = await db()
+    .prepare(
+      `UPDATE conversations SET deleted_at = NULL, updated_at = ?
+       WHERE user_id = ? AND id = ? AND deleted_at IS NOT NULL`,
+    )
+    .run(Date.now(), userId, id);
+  return result.changes > 0;
+}
+
+/** 永久刪除（含訊息／對話狀態 CASCADE） */
 export async function deleteConversation(userId: string, id: string): Promise<void> {
+  await ensureConversationsSchema();
   await db().prepare("DELETE FROM conversations WHERE user_id = ? AND id = ?").run(userId, id);
+}
+
+/** 清空垃圾桶 */
+export async function purgeTrashedConversations(userId: string): Promise<number> {
+  await ensureConversationsSchema();
+  const result = await db()
+    .prepare("DELETE FROM conversations WHERE user_id = ? AND deleted_at IS NOT NULL")
+    .run(userId);
+  return result.changes;
 }
 
 export async function listMessages(conversationId: string): Promise<StoredMessage[]> {
@@ -610,6 +713,7 @@ export async function getRecentCrossConversationContext(
   currentConversationId: string,
   limit = CROSS_CHAT_LIMIT,
 ): Promise<string[]> {
+  await ensureConversationsSchema();
   const rows = (await db()
     .prepare(
       `SELECT m.content AS content
@@ -617,6 +721,7 @@ export async function getRecentCrossConversationContext(
        JOIN conversations c ON c.id = m.conversation_id
        WHERE c.user_id = ?
          AND m.conversation_id != ?
+         AND c.deleted_at IS NULL
          AND m.role = 'user'
        ORDER BY m.created_at DESC
        LIMIT ?`,

@@ -1121,6 +1121,12 @@ export default function ChatPage() {
   const [memoryCategory, setMemoryCategory] = useState<"style" | "fact">("style");
   const [memoryMsg, setMemoryMsg] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [convMenuId, setConvMenuId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [trashedConversations, setTrashedConversations] = useState<Conversation[]>([]);
+  const [trashBusy, setTrashBusy] = useState(false);
   const [mintedCode, setMintedCode] = useState<string | null>(null);
   const [mintMsg, setMintMsg] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -1197,6 +1203,14 @@ export default function ChatPage() {
       return;
     }
     setConversations(await res.json());
+  }, []);
+  const refreshTrashed = useCallback(async () => {
+    const res = await fetch("/api/conversations?trash=1");
+    if (!res.ok) {
+      setTrashedConversations([]);
+      return;
+    }
+    setTrashedConversations(await res.json());
   }, []);
   const refreshWallet = useCallback(async () => {
     const res = await fetch("/api/wallet", { cache: "no-store" });
@@ -1279,6 +1293,25 @@ export default function ChatPage() {
     // 串流中用 auto，避免每幾個字 smooth 捲動搶視線
     scrollToBottom(busy ? "auto" : "smooth");
   }, [messages, busy]);
+
+  useEffect(() => {
+    if (!trashOpen) return;
+    void refreshTrashed();
+  }, [trashOpen, refreshTrashed]);
+
+  useEffect(() => {
+    if (!convMenuId) return;
+    const close = () => setConvMenuId(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setConvMenuId(null);
+    };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [convMenuId]);
 
   useEffect(() => {
     if (!sidebarOpen) return;
@@ -1449,10 +1482,75 @@ export default function ChatPage() {
     setShowJumpLatest(false);
   }
 
-  async function removeConversation(id: string) {
+  /** 移入垃圾桶：跨對話記憶會排除此串，還原後訊息與記憶仍在 */
+  async function trashConversation(id: string) {
+    setConvMenuId(null);
     await fetch(`/api/conversations/${id}`, { method: "DELETE" });
     if (id === activeId) newConversation();
-    refreshConversations();
+    if (renamingId === id) {
+      setRenamingId(null);
+      setRenameDraft("");
+    }
+    await refreshConversations();
+    if (trashOpen) void refreshTrashed();
+  }
+
+  function startRename(c: Conversation) {
+    setConvMenuId(null);
+    setRenamingId(c.id);
+    setRenameDraft(c.title);
+  }
+
+  async function commitRename(id: string) {
+    const title = renameDraft.trim().slice(0, 80);
+    setRenamingId(null);
+    setRenameDraft("");
+    if (!title) return;
+    const prev = conversations.find((c) => c.id === id)?.title;
+    if (prev === title) return;
+    setConversations((list) => list.map((c) => (c.id === id ? { ...c, title } : c)));
+    const res = await fetch(`/api/conversations/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title }),
+    });
+    if (!res.ok) void refreshConversations();
+  }
+
+  async function restoreConversation(id: string) {
+    setTrashBusy(true);
+    try {
+      await fetch(`/api/conversations/${id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ restore: true }),
+      });
+      await Promise.all([refreshConversations(), refreshTrashed()]);
+    } finally {
+      setTrashBusy(false);
+    }
+  }
+
+  async function permanentDeleteConversation(id: string) {
+    setTrashBusy(true);
+    try {
+      await fetch(`/api/conversations/${id}?permanent=1`, { method: "DELETE" });
+      await refreshTrashed();
+    } finally {
+      setTrashBusy(false);
+    }
+  }
+
+  async function purgeTrash() {
+    if (trashedConversations.length === 0) return;
+    if (!confirm(`確定永久刪除垃圾桶內全部 ${trashedConversations.length} 則對話？此操作無法復原。`)) return;
+    setTrashBusy(true);
+    try {
+      await fetch("/api/conversations?trash=1", { method: "DELETE" });
+      await refreshTrashed();
+    } finally {
+      setTrashBusy(false);
+    }
   }
 
   async function submitAuth(e: React.FormEvent) {
@@ -1503,6 +1601,10 @@ export default function ChatPage() {
     setLoadingOlder(false);
     setAccountOpen(false);
     setMemoryOpen(false);
+    setTrashOpen(false);
+    setTrashedConversations([]);
+    setConvMenuId(null);
+    setRenamingId(null);
     setMemories([]);
     setSidebarOpen(false);
     if (currentLocked) setFamilyId(AUTO_FAMILY_ID);
@@ -2147,18 +2249,69 @@ export default function ChatPage() {
             <div
               key={c.id}
               className={`conv-item ${c.id === activeId ? "active" : ""}`}
-              onClick={() => openConversation(c.id)}
+              onClick={() => {
+                if (renamingId === c.id) return;
+                openConversation(c.id);
+              }}
             >
-              <span className="title">{c.title}</span>
-              <button
-                className="del"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeConversation(c.id);
-                }}
-              >
-                刪除
-              </button>
+              {renamingId === c.id ? (
+                <input
+                  className="conv-rename-input"
+                  value={renameDraft}
+                  autoFocus
+                  maxLength={80}
+                  aria-label="重新命名對話"
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  onBlur={() => void commitRename(c.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void commitRename(c.id);
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setRenamingId(null);
+                      setRenameDraft("");
+                    }
+                  }}
+                />
+              ) : (
+                <span className="title">{c.title}</span>
+              )}
+              <div className="conv-menu-wrap">
+                <button
+                  type="button"
+                  className="conv-more"
+                  aria-label="對話選項"
+                  aria-expanded={convMenuId === c.id}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConvMenuId((prev) => (prev === c.id ? null : c.id));
+                  }}
+                >
+                  ⋯
+                </button>
+                {convMenuId === c.id && (
+                  <div
+                    className="conv-menu"
+                    role="menu"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <button type="button" role="menuitem" onClick={() => startRename(c)}>
+                      重新命名
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="danger"
+                      onClick={() => void trashConversation(c.id)}
+                    >
+                      刪除
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           ))}
           {conversations.length === 0 && (
@@ -2166,6 +2319,24 @@ export default function ChatPage() {
               還沒有對話
             </div>
           )}
+        </div>
+
+        <div className="sidebar-trash-bar">
+          <button
+            type="button"
+            className="trash-entry-btn"
+            title="垃圾桶"
+            aria-label="開啟垃圾桶"
+            onClick={() => {
+              setConvMenuId(null);
+              setTrashOpen(true);
+            }}
+          >
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden>
+              <path d="M4 7h16M9 7V5h6v2M8 7l1 12h6l1-12" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span>垃圾桶</span>
+          </button>
         </div>
 
         <div className="sidebar-foot">
@@ -2803,6 +2974,84 @@ export default function ChatPage() {
           </div>
         </div>
       </main>
+
+      {trashOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setTrashOpen(false);
+          }}
+        >
+          <div
+            className="modal-panel trash-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="trash-modal-title"
+          >
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+              <div>
+                <h2 id="trash-modal-title">垃圾桶</h2>
+                <p className="muted memory-hint">
+                  刪除的對話會暫存在此。在垃圾桶期間不會注入該對話記憶；還原後訊息與記憶會一併回來。永久刪除後無法復原。
+                </p>
+              </div>
+              <button type="button" className="ghost" onClick={() => setTrashOpen(false)}>
+                關閉
+              </button>
+            </div>
+
+            <div className="modal-section">
+              <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+                <h3 style={{ margin: 0 }}>已刪除對話</h3>
+                <button
+                  type="button"
+                  className="ghost trash-purge-btn"
+                  disabled={trashBusy || trashedConversations.length === 0}
+                  onClick={() => void purgeTrash()}
+                >
+                  全部刪除
+                </button>
+              </div>
+              {trashedConversations.length === 0 ? (
+                <div className="muted" style={{ fontSize: 13, padding: "8px 0" }}>
+                  垃圾桶是空的
+                </div>
+              ) : (
+                <div className="trash-list">
+                  {trashedConversations.map((c) => (
+                    <div key={c.id} className="trash-item">
+                      <span className="title" title={c.title}>
+                        {c.title}
+                      </span>
+                      <div className="trash-item-actions">
+                        <button
+                          type="button"
+                          className="ghost"
+                          disabled={trashBusy}
+                          onClick={() => void restoreConversation(c.id)}
+                        >
+                          還原
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost trash-purge-btn"
+                          disabled={trashBusy}
+                          onClick={() => {
+                            if (!confirm(`確定永久刪除「${c.title}」？此操作無法復原。`)) return;
+                            void permanentDeleteConversation(c.id);
+                          }}
+                        >
+                          永久刪除
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {memoryOpen && authUser && (
         <div

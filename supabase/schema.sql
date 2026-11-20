@@ -7,8 +7,18 @@ CREATE TABLE IF NOT EXISTS conversations (
   title TEXT NOT NULL,
   model TEXT NOT NULL,
   created_at BIGINT NOT NULL,
-  updated_at BIGINT NOT NULL
+  updated_at BIGINT NOT NULL,
+  deleted_at BIGINT
 );
+CREATE INDEX IF NOT EXISTS idx_conversations_user_active
+  ON conversations(user_id, updated_at DESC)
+  WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_conversations_user_trash
+  ON conversations(user_id, deleted_at DESC)
+  WHERE deleted_at IS NOT NULL;
+
+-- 舊庫升級：軟刪除欄位
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
 
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
