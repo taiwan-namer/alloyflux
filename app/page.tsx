@@ -1368,10 +1368,22 @@ export default function ChatPage() {
     stickToBottomRef.current = true;
     setShowJumpLatest(false);
     const res = await fetch(`/api/conversations/${id}`);
-    if (!res.ok) return;
+    if (!res.ok) {
+      // 常見於：電腦斷線時伺服器刪掉未完成的新對話 → 列表殘留／點進去 404
+      setActiveId(null);
+      setMessages([]);
+      setComposerHint(
+        res.status === 404
+          ? "找不到這則對話（可能在電腦斷線時尚未存檔就被清除）。請重新整理列表，或用原裝置重開。"
+          : "載入對話失敗，請稍後再試。",
+      );
+      void refreshConversations();
+      return;
+    }
     const data = await res.json();
     if (data.conversation?.model) applyModelSelection(data.conversation.model);
     setMessages(markAutoRouted(data.messages as Message[]));
+    setComposerHint(null);
     requestAnimationFrame(() => scrollToBottom("auto"));
   }
 
@@ -1878,6 +1890,7 @@ export default function ChatPage() {
     });
 
     let streamOk = false;
+    let hadAssistantText = false;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -1928,7 +1941,10 @@ export default function ChatPage() {
               notices: [...(m.notices ?? []), `${ev.from} 滿載或受限（${ev.reason}），已自動無縫接力下一個帳號`],
             }));
           if (ev.type === "thinking") thinkingTw.push(ev.text);
-          if (ev.type === "text") contentTw.push(ev.text);
+          if (ev.type === "text") {
+            hadAssistantText = true;
+            contentTw.push(ev.text);
+          }
           if (ev.type === "done") {
             if (ev.freeQuota) setFreeQuota(ev.freeQuota as FreeQuota);
             if (typeof ev.hasPaidAccess === "boolean") setHasPaidAccess(ev.hasPaidAccess);
@@ -1980,32 +1996,41 @@ export default function ChatPage() {
       const aborted = controller.signal.aborted;
       abortRef.current = null;
       if (aborted) {
-        // 撤回未完成回合，把原文跳回可編輯對話欄（應停在可改字的地方，不留半成品氣泡）
-        setMessages((prev) => prev.filter((m) => m.id !== userMsgId && m.id !== assistantId));
-        if (!startedConvId) setActiveId(null);
-        if (!composerDraft.regenerate) {
-          imeComposingRef.current = false;
-          imeJustEndedRef.current = false;
-          if (imeJustEndedTimerRef.current) {
-            clearTimeout(imeJustEndedTimerRef.current);
-            imeJustEndedTimerRef.current = null;
-          }
-          setInput(composerDraft.text);
-          setPendingImages(composerDraft.images);
-          setPendingFiles(composerDraft.files);
-          requestAnimationFrame(() => {
-            const el = textareaRef.current;
-            if (!el) return;
-            el.style.height = "48px";
-            el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
-            el.focus();
-            const len = el.value.length;
-            try {
-              el.setSelectionRange(len, len);
-            } catch {
-              /* ignore */
+        // 已有半截回覆：保留氣泡（伺服器也會存檔），方便手機等裝置查看
+        // 完全沒字才撤回並把原文跳回對話欄
+        if (!hadAssistantText) {
+          setMessages((prev) => prev.filter((m) => m.id !== userMsgId && m.id !== assistantId));
+          if (!startedConvId) setActiveId(null);
+          if (!composerDraft.regenerate) {
+            imeComposingRef.current = false;
+            imeJustEndedRef.current = false;
+            if (imeJustEndedTimerRef.current) {
+              clearTimeout(imeJustEndedTimerRef.current);
+              imeJustEndedTimerRef.current = null;
             }
-          });
+            setInput(composerDraft.text);
+            setPendingImages(composerDraft.images);
+            setPendingFiles(composerDraft.files);
+            requestAnimationFrame(() => {
+              const el = textareaRef.current;
+              if (!el) return;
+              el.style.height = "48px";
+              el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+              el.focus();
+              const len = el.value.length;
+              try {
+                el.setSelectionRange(len, len);
+              } catch {
+                /* ignore */
+              }
+            });
+          }
+        } else {
+          patch((m) => ({
+            ...m,
+            error: m.error || "連線中斷或已停止，回覆未完成",
+            completionStatus: m.completionStatus ?? "failed",
+          }));
         }
       }
       setBusy(false);

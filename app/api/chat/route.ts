@@ -219,6 +219,7 @@ export async function POST(req: Request) {
         announceAuto();
         let answer = "";
         let settled = false;
+        let lastSourceId = "";
         const triedAutoModels = new Set<string>();
         try {
           for (;;) {
@@ -235,6 +236,9 @@ export async function POST(req: Request) {
               )) {
                 if (ev.type === "text" || ev.type === "thinking") streamed = true;
                 if (ev.type === "text") answer += ev.text;
+                if (ev.type === "source" && typeof (ev as { sourceId?: string }).sourceId === "string") {
+                  lastSourceId = (ev as { sourceId: string }).sourceId;
+                }
                 if (ev.type !== "done") {
                   send(ev);
                   continue;
@@ -308,17 +312,49 @@ export async function POST(req: Request) {
             send({ type: "error", message: e instanceof Error ? e.message : String(e) });
           }
         } finally {
-          // 使用者按「停止」：回滾本輪 user 訊息，避免下一則繼續重複讀取附件全文
+          // 連線中斷／停止：
+          // - 已有半截回覆 → 寫入 DB（不扣點），讓手機等其他裝置還看得到
+          // - 完全沒產出 → 回滾本輪，避免空對話／重複附件
           if (!settled && req.signal.aborted) {
             try {
-              if (createdThisTurn) {
+              const partial = answer.trim();
+              if (partial) {
+                const note = `${partial}\n\n（連線中斷或已停止，回覆未完成）`;
+                await settleAssistantMessage({
+                  userId,
+                  conversationId: convId!,
+                  content: note,
+                  model: model.id,
+                  sourceId: lastSourceId || "interrupted",
+                  inputTokens: 0,
+                  cachedInputTokens: 0,
+                  outputTokens: 0,
+                  officialCostPoints: 0,
+                  chargedPoints: 0,
+                  freeMode: true,
+                  ipBucketId: guest?.ipBucketId,
+                });
+                try {
+                  send({
+                    type: "done",
+                    usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+                    officialCostPoints: 0,
+                    chargedPoints: 0,
+                    sourceId: lastSourceId || "interrupted",
+                    completionStatus: "failed",
+                    modelId: model.id,
+                  });
+                } catch {
+                  /* 客戶端已斷線時 enqueue 可能失敗，忽略 */
+                }
+              } else if (createdThisTurn) {
                 await deleteConversation(userId, convId!);
               } else {
                 await deleteMessage(convId!, userMsgId);
               }
             } catch (rollbackErr) {
               console.warn(
-                "[chat] abort rollback failed",
+                "[chat] abort rollback/partial save failed",
                 rollbackErr instanceof Error ? rollbackErr.message : rollbackErr,
               );
             }
