@@ -1135,7 +1135,7 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const recognitionRef = useRef<{ stop: () => void } | null>(null);
+  const recognitionRef = useRef<{ stop: () => void; abort?: () => void } | null>(null);
   /** Windows 注音等 IME：compositionend 後同一下 Enter 常會再觸發送出 */
   const imeComposingRef = useRef(false);
   const imeJustEndedRef = useRef(false);
@@ -1889,11 +1889,23 @@ export default function ChatPage() {
     }
   }
 
+  function stopVoiceInput() {
+    const rec = recognitionRef.current;
+    recognitionRef.current = null;
+    setListening(false);
+    if (!rec) return;
+    try {
+      // abort 會丟掉尚未回傳的辨識結果，避免送出後又把文字塞回輸入框
+      if (rec.abort) rec.abort();
+      else rec.stop();
+    } catch {
+      /* 已停止 */
+    }
+  }
+
   function toggleVoiceInput() {
     if (listening) {
-      recognitionRef.current?.stop();
-      recognitionRef.current = null;
-      setListening(false);
+      stopVoiceInput();
       return;
     }
     type SpeechRec = {
@@ -1902,6 +1914,7 @@ export default function ChatPage() {
       interimResults: boolean;
       start: () => void;
       stop: () => void;
+      abort?: () => void;
       onresult: ((ev: { resultIndex: number; results: ArrayLike<{ 0?: { transcript?: string } }> }) => void) | null;
       onerror: (() => void) | null;
       onend: (() => void) | null;
@@ -1920,6 +1933,7 @@ export default function ChatPage() {
     rec.continuous = true;
     rec.interimResults = false;
     rec.onresult = (event) => {
+      if (recognitionRef.current !== rec) return;
       let chunk = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
         chunk += event.results[i][0]?.transcript ?? "";
@@ -1927,10 +1941,12 @@ export default function ChatPage() {
       if (chunk) setInput((prev) => `${prev}${chunk}`);
     };
     rec.onerror = () => {
+      if (recognitionRef.current !== rec) return;
       setListening(false);
       recognitionRef.current = null;
     };
     rec.onend = () => {
+      if (recognitionRef.current !== rec) return;
       setListening(false);
       recognitionRef.current = null;
     };
@@ -2001,6 +2017,8 @@ export default function ChatPage() {
       regenerate: Boolean(opts?.regenerate),
     };
     const startedConvId = activeId;
+
+    stopVoiceInput();
 
     if (!opts?.regenerate) {
       setInput("");
@@ -2946,7 +2964,7 @@ export default function ChatPage() {
                 type="button"
                 className={`composer-icon-btn${listening ? " is-listening" : ""}`}
                 title="語音輸入（zh-TW）"
-                disabled={busy}
+                disabled={busy && !listening}
                 aria-label="語音輸入"
                 onClick={() => toggleVoiceInput()}
               >
