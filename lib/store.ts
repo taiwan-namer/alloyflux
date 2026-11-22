@@ -30,21 +30,34 @@ export interface Conversation {
 
 let conversationsSchemaReady = false;
 
-/** 確保 conversations.deleted_at 存在（舊庫升級；可重跑） */
+/** 計費／系統用對話標題前綴：不進側欄、不進跨對話記憶 */
+const HIDDEN_TITLE_PREFIXES = ["strategy-session ", "strategy-analyze "] as const;
+
+/** 確保 conversations.deleted_at／hidden 存在（舊庫升級；可重跑） */
 export async function ensureConversationsSchema(): Promise<void> {
   if (conversationsSchemaReady) return;
   try {
     await db().exec(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS deleted_at BIGINT`);
+    await db().exec(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS hidden INT NOT NULL DEFAULT 0`);
     await db().exec(
       `CREATE INDEX IF NOT EXISTS idx_conversations_user_active
        ON conversations(user_id, updated_at DESC)
-       WHERE deleted_at IS NULL`,
+       WHERE deleted_at IS NULL AND hidden = 0`,
     );
     await db().exec(
       `CREATE INDEX IF NOT EXISTS idx_conversations_user_trash
        ON conversations(user_id, deleted_at DESC)
        WHERE deleted_at IS NOT NULL`,
     );
+    // 舊的會議室計費殼對話：標題前綴對齊後標 hidden，側欄立即消失
+    for (const prefix of HIDDEN_TITLE_PREFIXES) {
+      await db()
+        .prepare(
+          `UPDATE conversations SET hidden = 1
+           WHERE hidden = 0 AND title LIKE ?`,
+        )
+        .run(`${prefix}%`);
+    }
     conversationsSchemaReady = true;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -75,7 +88,7 @@ export async function listConversations(userId: string): Promise<Conversation[]>
     .prepare(
       `SELECT id, title, model, updated_at AS "updatedAt"
        FROM conversations
-       WHERE user_id = ? AND deleted_at IS NULL
+       WHERE user_id = ? AND deleted_at IS NULL AND hidden = 0
        ORDER BY updated_at DESC`,
     )
     .all(userId)) as unknown as Conversation[];
@@ -105,13 +118,22 @@ export async function getConversation(userId: string, id: string): Promise<Conve
     .get(userId, id)) as unknown as Conversation | undefined;
 }
 
-export async function createConversation(userId: string, title: string, model: string): Promise<string> {
+export async function createConversation(
+  userId: string,
+  title: string,
+  model: string,
+  opts?: { hidden?: boolean },
+): Promise<string> {
   await ensureConversationsSchema();
   const id = newId();
   const now = Date.now();
+  const autoHidden = HIDDEN_TITLE_PREFIXES.some((p) => title.startsWith(p));
+  const hidden = opts?.hidden || autoHidden ? 1 : 0;
   await db()
-    .prepare("INSERT INTO conversations (id, user_id, title, model, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(id, userId, title, model, now, now);
+    .prepare(
+      "INSERT INTO conversations (id, user_id, title, model, created_at, updated_at, hidden) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .run(id, userId, title, model, now, now, hidden);
   return id;
 }
 
@@ -722,6 +744,7 @@ export async function getRecentCrossConversationContext(
        WHERE c.user_id = ?
          AND m.conversation_id != ?
          AND c.deleted_at IS NULL
+         AND c.hidden = 0
          AND m.role = 'user'
        ORDER BY m.created_at DESC
        LIMIT ?`,

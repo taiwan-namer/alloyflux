@@ -209,7 +209,9 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     last.content = `${contextBlock}\n\n---\n# ${fromWeb ? "使用者（網頁）" : "Cursor"} 本回合訊息\n${last.content}`;
   }
 
-  const convId = await createConversation(auth.user.id, `strategy-session ${session.name}`, model.id);
+  const convId = await createConversation(auth.user.id, `strategy-session ${session.name}`, model.id, {
+    hidden: true,
+  });
   await addUserMessage(convId, content, model.id);
 
   let answer = "";

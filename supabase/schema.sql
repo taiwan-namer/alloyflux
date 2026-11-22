@@ -8,17 +8,19 @@ CREATE TABLE IF NOT EXISTS conversations (
   model TEXT NOT NULL,
   created_at BIGINT NOT NULL,
   updated_at BIGINT NOT NULL,
-  deleted_at BIGINT
+  deleted_at BIGINT,
+  hidden INT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_conversations_user_active
   ON conversations(user_id, updated_at DESC)
-  WHERE deleted_at IS NULL;
+  WHERE deleted_at IS NULL AND hidden = 0;
 CREATE INDEX IF NOT EXISTS idx_conversations_user_trash
   ON conversations(user_id, deleted_at DESC)
   WHERE deleted_at IS NOT NULL;
 
--- 舊庫升級：軟刪除欄位
+-- 舊庫升級：軟刪除／隱藏（會議室計費殼）欄位
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS deleted_at BIGINT;
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS hidden INT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,

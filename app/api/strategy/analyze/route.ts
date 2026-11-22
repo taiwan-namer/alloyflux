@@ -87,7 +87,9 @@ export async function POST(req: Request) {
   };
 
   const prompt = `請分析此策略 run 並回傳 JSON：\n${JSON.stringify(userPayload, null, 2)}`;
-  const convId = await createConversation(auth.user.id, `strategy-analyze ${run.id}`, model.id);
+  const convId = await createConversation(auth.user.id, `strategy-analyze ${run.id}`, model.id, {
+    hidden: true,
+  });
   await addUserMessage(convId, prompt, model.id);
 
   let answer = "";
