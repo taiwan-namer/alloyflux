@@ -1,4 +1,4 @@
-import { findUserByApiKey, findUserByEmail, isAdminEmail, type User } from "./auth";
+import { findUserByApiKey, findUserByEmail, getSessionUser, isAdminEmail, type User } from "./auth";
 
 /**
  * v1 API Key 驗證：
@@ -26,5 +26,17 @@ export async function authenticatePlatformApiKey(req: Request): Promise<{ user: 
     if (admin) return { user: admin, keyHint: `…${raw.slice(-4)}` };
   }
   // 後門金鑰但尚無管理員帳號：拒絕（避免誤扣到幽靈 user）
+  return null;
+}
+
+/**
+ * 策略會議室讀取用：API Key 或網頁登入 session 皆可。
+ * 寫入／發訊息仍請用 authenticatePlatformApiKey，避免網頁誤觸干擾 Cursor 流程。
+ */
+export async function authenticateStrategyReader(req: Request): Promise<{ user: User } | null> {
+  const byKey = await authenticatePlatformApiKey(req);
+  if (byKey) return { user: byKey.user };
+  const session = await getSessionUser(req);
+  if (session) return { user: session };
   return null;
 }

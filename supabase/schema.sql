@@ -285,3 +285,89 @@ CREATE TABLE IF NOT EXISTS user_api_keys (
   created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_user_api_keys_user ON user_api_keys(user_id, created_at);
+
+-- Strategy loop（automax ↔ AlloyFlux ↔ Cursor）
+CREATE TABLE IF NOT EXISTS strategy_loop_runs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  profile_id TEXT NOT NULL DEFAULT '',
+  strategy_version TEXT NOT NULL DEFAULT '',
+  git_commit TEXT NOT NULL DEFAULT '',
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  review_excerpt TEXT NOT NULL DEFAULT '',
+  metrics_json TEXT NOT NULL DEFAULT '{}',
+  session_id TEXT NOT NULL DEFAULT '',
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_loop_runs_user
+  ON strategy_loop_runs(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_loop_runs_session
+  ON strategy_loop_runs(session_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS strategy_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  profile_id TEXT NOT NULL DEFAULT '',
+  strategy_version TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'collecting',
+  model TEXT NOT NULL DEFAULT '',
+  pending_instructions_json TEXT NOT NULL DEFAULT '[]',
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_sessions_user
+  ON strategy_sessions(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS strategy_session_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  structured_json TEXT NOT NULL DEFAULT '{}',
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_session_messages_sess
+  ON strategy_session_messages(session_id, created_at ASC);
+
+CREATE TABLE IF NOT EXISTS strategy_loop_plans (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending_code',
+  hypotheses_json TEXT NOT NULL DEFAULT '[]',
+  change_requests_json TEXT NOT NULL DEFAULT '[]',
+  acceptance_json TEXT NOT NULL DEFAULT '[]',
+  raw_analysis TEXT NOT NULL DEFAULT '',
+  round_index INT NOT NULL DEFAULT 1,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_loop_plans_user_status
+  ON strategy_loop_plans(user_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS strategy_loop_code_results (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  files_changed_json TEXT NOT NULL DEFAULT '[]',
+  checks_ok INT NOT NULL DEFAULT 0,
+  notes TEXT NOT NULL DEFAULT '',
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_loop_code_results_plan
+  ON strategy_loop_code_results(plan_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS strategy_loop_retros (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  window_hours INT NOT NULL DEFAULT 12,
+  summary_json TEXT NOT NULL DEFAULT '{}',
+  next_hypotheses_json TEXT NOT NULL DEFAULT '[]',
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_loop_retros_user
+  ON strategy_loop_retros(user_id, created_at DESC);

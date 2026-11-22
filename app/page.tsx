@@ -112,6 +112,54 @@ interface ApiKeyRow {
   createdAt: number;
 }
 
+interface StrategySessionBrief {
+  id: string;
+  name: string;
+  status: string;
+  model: string;
+  updatedAt: number;
+}
+
+interface StrategySessionMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  createdAt: number;
+}
+
+interface StrategySessionDetail {
+  session: StrategySessionBrief & {
+    profileId?: string;
+    strategyVersion?: string;
+    pendingInstructions?: unknown[];
+  };
+  dossier: {
+    strategies: Record<string, string>;
+    findings: string[];
+    decisions: string[];
+    fPlan: Record<string, unknown> | null;
+  };
+  messages: StrategySessionMessage[];
+  reports: { id: string; title: string; chars: number; createdAt: number }[];
+  runs: { id: string; profileId?: string; createdAt?: number }[];
+}
+
+const STRATEGY_STATUS_LABEL: Record<string, string> = {
+  discovery: "探索中",
+  designing: "設計中",
+  ready_to_run: "可開跑",
+  running: "進行中",
+  collecting: "收集中",
+  reviewing: "復盤中",
+  await_code: "待改碼",
+  ready_next_run: "可再開下一輪",
+  closed: "已關閉",
+};
+
+function strategyStatusLabel(status: string): string {
+  return STRATEGY_STATUS_LABEL[status] ?? status;
+}
+
 interface UserMemoryItem {
   id: string;
   fact: string;
@@ -1128,6 +1176,11 @@ export default function ChatPage() {
   const [trashOpen, setTrashOpen] = useState(false);
   const [trashedConversations, setTrashedConversations] = useState<Conversation[]>([]);
   const [trashBusy, setTrashBusy] = useState(false);
+  const [strategySessions, setStrategySessions] = useState<StrategySessionBrief[]>([]);
+  const [strategyOpen, setStrategyOpen] = useState(false);
+  const [strategyBusy, setStrategyBusy] = useState(false);
+  const [strategyDetail, setStrategyDetail] = useState<StrategySessionDetail | null>(null);
+  const [strategyError, setStrategyError] = useState<string | null>(null);
   const [mintedCode, setMintedCode] = useState<string | null>(null);
   const [mintMsg, setMintMsg] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -1213,6 +1266,19 @@ export default function ChatPage() {
     }
     setTrashedConversations(await res.json());
   }, []);
+  const refreshStrategySessions = useCallback(async () => {
+    if (!authUser) {
+      setStrategySessions([]);
+      return;
+    }
+    const res = await fetch("/api/strategy/sessions?limit=20", { cache: "no-store" });
+    if (!res.ok) {
+      setStrategySessions([]);
+      return;
+    }
+    const data = (await res.json()) as { sessions?: StrategySessionBrief[] };
+    setStrategySessions(Array.isArray(data.sessions) ? data.sessions : []);
+  }, [authUser]);
   const refreshWallet = useCallback(async () => {
     const res = await fetch("/api/wallet", { cache: "no-store" });
     if (!res.ok) {
@@ -1287,7 +1353,8 @@ export default function ChatPage() {
     if (authLoading) return;
     void refreshConversations();
     if (authUser) void refreshWallet();
-  }, [authLoading, authUser, refreshConversations, refreshWallet]);
+    void refreshStrategySessions();
+  }, [authLoading, authUser, refreshConversations, refreshWallet, refreshStrategySessions]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -1554,6 +1621,28 @@ export default function ChatPage() {
     }
   }
 
+  async function openStrategySession(id: string) {
+    setStrategyBusy(true);
+    setStrategyError(null);
+    setStrategyOpen(true);
+    setSidebarOpen(false);
+    try {
+      const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(id)}`, { cache: "no-store" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setStrategyDetail(null);
+        setStrategyError(typeof data.error === "string" ? data.error : "無法載入會議室");
+        return;
+      }
+      setStrategyDetail(data as StrategySessionDetail);
+    } catch (e) {
+      setStrategyDetail(null);
+      setStrategyError(e instanceof Error ? e.message : "無法載入會議室");
+    } finally {
+      setStrategyBusy(false);
+    }
+  }
+
   async function submitAuth(e: React.FormEvent) {
     e.preventDefault();
     setAuthError(null);
@@ -1604,6 +1693,9 @@ export default function ChatPage() {
     setMemoryOpen(false);
     setTrashOpen(false);
     setTrashedConversations([]);
+    setStrategyOpen(false);
+    setStrategySessions([]);
+    setStrategyDetail(null);
     setConvMenuId(null);
     setRenamingId(null);
     setMemories([]);
@@ -2318,6 +2410,29 @@ export default function ChatPage() {
               還沒有對話
             </div>
           )}
+
+          <div className="conv-section-label">會議室</div>
+          {!authUser ? (
+            <div className="muted" style={{ padding: "8px 12px", fontSize: 13 }}>
+              登入後可查看策略會議室
+            </div>
+          ) : strategySessions.length === 0 ? (
+            <div className="muted" style={{ padding: "8px 12px", fontSize: 13 }}>
+              還沒有會議室
+            </div>
+          ) : (
+            strategySessions.map((s) => (
+              <div
+                key={s.id}
+                className={`conv-item strategy-session-item${strategyDetail?.session.id === s.id && strategyOpen ? " active" : ""}`}
+                onClick={() => void openStrategySession(s.id)}
+                title={`${s.name}（${strategyStatusLabel(s.status)}）`}
+              >
+                <span className="title">{s.name || "未命名會議室"}</span>
+                <span className="strategy-status-chip">{strategyStatusLabel(s.status)}</span>
+              </div>
+            ))
+          )}
         </div>
 
         <div className="sidebar-trash-bar">
@@ -2968,6 +3083,131 @@ export default function ChatPage() {
           </div>
         </div>
       </main>
+
+      {strategyOpen && (
+        <div
+          className="modal-backdrop"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setStrategyOpen(false);
+          }}
+        >
+          <div
+            className="modal-panel strategy-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="strategy-modal-title"
+          >
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8, gap: 12 }}>
+              <div style={{ minWidth: 0 }}>
+                <h2 id="strategy-modal-title" style={{ margin: 0 }}>
+                  {strategyDetail?.session.name || "策略會議室"}
+                </h2>
+                <p className="muted memory-hint">
+                  只讀檢視，不會中斷 Cursor 開會流程。長期記憶在 dossier；完整大數據請看報告索引。
+                </p>
+              </div>
+              <div className="row" style={{ gap: 8, flexShrink: 0 }}>
+                {strategyDetail?.session.id && (
+                  <button
+                    type="button"
+                    className="ghost"
+                    disabled={strategyBusy}
+                    onClick={() => void openStrategySession(strategyDetail.session.id)}
+                  >
+                    重新整理
+                  </button>
+                )}
+                <button type="button" className="ghost" onClick={() => setStrategyOpen(false)}>
+                  關閉
+                </button>
+              </div>
+            </div>
+
+            {strategyBusy && !strategyDetail ? (
+              <div className="muted" style={{ padding: "12px 0" }}>
+                載入中…
+              </div>
+            ) : strategyError ? (
+              <div className="muted" style={{ padding: "12px 0", color: "#dc2626" }}>
+                {strategyError}
+              </div>
+            ) : strategyDetail ? (
+              <>
+                <div className="strategy-meta-row">
+                  <span className="strategy-status-chip">
+                    {strategyStatusLabel(strategyDetail.session.status)}
+                  </span>
+                  {strategyDetail.session.model ? (
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      模型：{strategyDetail.session.model}
+                    </span>
+                  ) : null}
+                  <span className="muted" style={{ fontSize: 12 }}>
+                    報告 {strategyDetail.reports.length}｜run {strategyDetail.runs.length}
+                  </span>
+                </div>
+
+                {(strategyDetail.dossier.findings.length > 0 ||
+                  strategyDetail.dossier.decisions.length > 0 ||
+                  strategyDetail.dossier.fPlan) && (
+                  <div className="modal-section">
+                    <h3>dossier 摘要</h3>
+                    {strategyDetail.dossier.fPlan ? (
+                      <p className="strategy-dossier-line">
+                        F 方案：{String((strategyDetail.dossier.fPlan as { name?: unknown }).name ?? "已定案")}
+                      </p>
+                    ) : null}
+                    {strategyDetail.dossier.decisions.slice(-3).map((d, i) => (
+                      <p key={`d-${i}`} className="strategy-dossier-line">
+                        決策：{d}
+                      </p>
+                    ))}
+                    {strategyDetail.dossier.findings.slice(-3).map((f, i) => (
+                      <p key={`f-${i}`} className="strategy-dossier-line">
+                        發現：{f}
+                      </p>
+                    ))}
+                  </div>
+                )}
+
+                {strategyDetail.reports.length > 0 && (
+                  <div className="modal-section">
+                    <h3>報告索引</h3>
+                    <ul className="strategy-report-list">
+                      {strategyDetail.reports.slice(0, 12).map((r) => (
+                        <li key={r.id}>
+                          <span className="title">{r.title}</span>
+                          <span className="muted">{r.chars.toLocaleString("zh-TW")} 字</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="modal-section">
+                  <h3>會議室對話</h3>
+                  {strategyDetail.messages.length === 0 ? (
+                    <div className="muted" style={{ fontSize: 13 }}>
+                      尚無訊息
+                    </div>
+                  ) : (
+                    <div className="strategy-msg-list">
+                      {strategyDetail.messages.map((m) => (
+                        <div key={m.id} className={`strategy-msg strategy-msg-${m.role}`}>
+                          <div className="strategy-msg-role">
+                            {m.role === "assistant" ? "會議室" : m.role === "user" ? "Cursor／你" : "系統"}
+                          </div>
+                          <pre className="strategy-msg-body">{m.content}</pre>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {trashOpen && (
         <div
