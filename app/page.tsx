@@ -2964,7 +2964,7 @@ export default function ChatPage() {
                 type="button"
                 className={`composer-icon-btn${listening ? " is-listening" : ""}`}
                 title="語音輸入（zh-TW）"
-                disabled={busy && !listening}
+                disabled={busy}
                 aria-label="語音輸入"
                 onClick={() => toggleVoiceInput()}
               >
