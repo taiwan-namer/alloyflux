@@ -1,8 +1,27 @@
 import type { ChatMessage } from "./providers";
 
-/** 上游最多帶最近 N 輪（1 輪 = user+assistant 各 1，即 2N 則） */
+/** 上游至少帶最近 N 輪（1 輪 = user+assistant 各 1，即 2N 則） */
 export const UPSTREAM_MAX_TURNS = 8;
 export const UPSTREAM_MAX_MESSAGES = UPSTREAM_MAX_TURNS * 2;
+/**
+ * 視窗起點每 N 輪才前移一次（對齊到 2N 則的倍數），讓連續幾輪的請求開頭維持一致、可命中 prompt cache。
+ * 實際帶入 UPSTREAM_MAX_TURNS ～ UPSTREAM_MAX_TURNS + N - 1 輪，永不少於 UPSTREAM_MAX_TURNS。
+ */
+export const UPSTREAM_WINDOW_STEP_TURNS = 4;
+const WINDOW_STEP_MESSAGES = UPSTREAM_WINDOW_STEP_TURNS * 2;
+
+/** 視窗起點：保留至少 minKeep 則，起點對齊 WINDOW_STEP_MESSAGES 的倍數 */
+export function alignedWindowStart(length: number, minKeep: number): number {
+  if (length <= minKeep) return 0;
+  return Math.floor((length - minKeep) / WINDOW_STEP_MESSAGES) * WINDOW_STEP_MESSAGES;
+}
+
+/** 從 DB 讀取的歷史上限：最多 maxKeep 則，丟棄量對齊 WINDOW_STEP_MESSAGES，與 alignedWindowStart 起點一致 */
+export function alignedTail<T>(items: T[], maxKeep: number): T[] {
+  if (items.length <= maxKeep) return items;
+  const drop = Math.ceil((items.length - maxKeep) / WINDOW_STEP_MESSAGES) * WINDOW_STEP_MESSAGES;
+  return items.slice(drop);
+}
 
 /** 緊鄰當前問題的上一則 assistant：頭尾保留總量（多輪深度對照需保留完整分析與結尾表格） */
 export const LAST_ASSISTANT_MAX_CHARS = 3600;
@@ -151,7 +170,7 @@ export function slimAssistantHistory(messages: ChatMessage[]): ChatMessage[] {
 }
 
 /**
- * 滑動視窗：DB 可留全文，送給上游的 payload 只取最近 maxTurns 輪，
+ * 滑動視窗：DB 可留全文，送給上游的 payload 至少取最近 maxTurns 輪（起點對齊，見 alignedWindowStart），
  * 並對歷史 assistant 長文做智慧瘦身。
  * 保證開頭是 user（若截斷後首則是 assistant 則丟掉）。
  */
@@ -160,9 +179,8 @@ export function slideMessagesForUpstream(
   maxTurns = UPSTREAM_MAX_TURNS,
 ): ChatMessage[] {
   const maxMsgs = Math.max(1, maxTurns * 2);
-  let sliced = messages
-    .filter((m) => m.content?.trim() || (m.images && m.images.length > 0))
-    .slice(-maxMsgs);
+  const filtered = messages.filter((m) => m.content?.trim() || (m.images && m.images.length > 0));
+  let sliced = filtered.slice(alignedWindowStart(filtered.length, maxMsgs));
   while (sliced.length && sliced[0].role !== "user") sliced = sliced.slice(1);
   return slimAssistantHistory(sliced);
 }

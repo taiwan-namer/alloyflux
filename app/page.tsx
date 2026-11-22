@@ -956,7 +956,8 @@ type PendingImage = { id: string; mimeType: string; data: string; previewUrl: st
 type PendingFile = { id: string; name: string; size: number; text: string };
 
 const MAX_PENDING_IMAGES = 3;
-const MAX_PENDING_FILES = 10;
+/** 附件不設數量上限；拆段時用此值作為 maxParts 上界（實務上等同無限制） */
+const UNLIMITED_FILE_PARTS = Number.MAX_SAFE_INTEGER;
 /** 文字檔上傳位元組上限（超長會再拆成多個 ≤15,000 字附件） */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 /** 單個文字附件淨化後上限 */
@@ -1820,28 +1821,21 @@ export default function ChatPage() {
     const addImgs: PendingImage[] = [];
     const addFiles: PendingFile[] = [];
     let splitHint: string | null = null;
-    // 預留目前已掛的附件格數，超長檔依剩餘格數拆段
-    let room = Math.max(0, MAX_PENDING_FILES - pendingFiles.length);
     for (const file of files) {
       try {
         if (file.type.startsWith("image/")) {
           addImgs.push(await compressImageFile(file));
-        } else if (room <= 0) {
-          flashComposerHint(`附件最多 ${MAX_PENDING_FILES} 個`);
-          break;
         } else if (isZipAttachment(file)) {
           flashComposerHint(`正在解壓「${file.name}」…`);
-          const parts = await readZipAttachment(file, room);
+          const parts = await readZipAttachment(file, UNLIMITED_FILE_PARTS);
           addFiles.push(...parts);
-          room -= parts.length;
           if (parts.length > 1) {
             splitHint = `「${file.name}」已拆成 ${parts.length} 個附件`;
           }
         } else if (isOfficeAttachment(file)) {
           flashComposerHint(`正在解析「${file.name}」…`);
-          const parts = await readOfficeAttachment(file, room);
+          const parts = await readOfficeAttachment(file, UNLIMITED_FILE_PARTS);
           addFiles.push(...parts);
-          room -= parts.length;
           if (parts.length > 1) {
             splitHint = `「${file.name}」已拆成 ${parts.length} 個附件`;
           }
@@ -1852,9 +1846,8 @@ export default function ChatPage() {
           file.type === "application/x-ndjson" ||
           file.type === "application/jsonl"
         ) {
-          const parts = await readTextAttachment(file, room);
+          const parts = await readTextAttachment(file, UNLIMITED_FILE_PARTS);
           addFiles.push(...parts);
-          room -= parts.length;
           if (parts.length > 1) {
             splitHint = `「${file.name}」已拆成 ${parts.length} 個附件（每段最多 ${formatCharCount(MAX_FILE_CHARS)} 字）`;
           }
@@ -1877,15 +1870,8 @@ export default function ChatPage() {
       });
     }
     if (addFiles.length) {
-      setPendingFiles((prev) => {
-        const next = [...prev, ...addFiles].slice(0, MAX_PENDING_FILES);
-        if (prev.length + addFiles.length > MAX_PENDING_FILES) {
-          flashComposerHint(`附件最多 ${MAX_PENDING_FILES} 個`);
-        } else if (splitHint) {
-          flashComposerHint(splitHint);
-        }
-        return next;
-      });
+      setPendingFiles((prev) => [...prev, ...addFiles]);
+      if (splitHint) flashComposerHint(splitHint);
     }
   }
 
@@ -1987,12 +1973,7 @@ export default function ChatPage() {
 
     // 送出前雙保險：對話欄仍有超長本文 → 收成 TXT（可拆多段）
     if (!opts?.regenerate && !opts?.files && boxText.trim().length >= LONG_PASTE_TO_FILE_CHARS) {
-      const room = MAX_PENDING_FILES - files.length;
-      if (room <= 0) {
-        flashComposerHint(`文字過長且附件已滿（最多 ${MAX_PENDING_FILES} 個），請縮短或移除附件`);
-        return;
-      }
-      const { files: parts, hint } = pendingFilesFromLongText(boxText.trim(), room);
+      const { files: parts, hint } = pendingFilesFromLongText(boxText.trim(), UNLIMITED_FILE_PARTS);
       if (parts.length === 0) return;
       files = [...files, ...parts];
       boxText =
@@ -2828,16 +2809,11 @@ export default function ChatPage() {
                   if (pastedText.length >= LONG_PASTE_TO_FILE_CHARS) {
                     e.preventDefault();
                     if (imageFiles.length) void ingestFiles(imageFiles);
-                    const room = MAX_PENDING_FILES - pendingFiles.length;
-                    if (room <= 0) {
-                      flashComposerHint(`文字過長且附件已滿（最多 ${MAX_PENDING_FILES} 個），請先移除再貼上`);
-                      return;
-                    }
-                    const { files: parts, hint } = pendingFilesFromLongText(pastedText, room);
-                    setPendingFiles((prev) => {
-                      const left = MAX_PENDING_FILES - prev.length;
-                      return left <= 0 ? prev : [...prev, ...parts.slice(0, left)];
-                    });
+                    const { files: parts, hint } = pendingFilesFromLongText(
+                      pastedText,
+                      UNLIMITED_FILE_PARTS,
+                    );
+                    setPendingFiles((prev) => [...prev, ...parts]);
                     flashComposerHint(hint);
                     return;
                   }

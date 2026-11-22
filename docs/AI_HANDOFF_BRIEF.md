@@ -74,7 +74,8 @@
 
 | 項目 | 現況 |
 |------|------|
-| 上游視窗 | `UPSTREAM_MAX_TURNS = 8`（約 16 則 message）`lib/context-window.ts` |
+| 上游視窗 | 至少 `UPSTREAM_MAX_TURNS = 8` 輪，起點每 `UPSTREAM_WINDOW_STEP_TURNS = 4` 輪才前移（實帶 8–11 輪，利於 prompt cache）`lib/context-window.ts` |
+| Prompt cache | ChatGPT 路徑：`instructions` 只放固定前段；狀態摘要／跨對話提問／即時查證以 developer 訊息插在本輪 user 前（`splitSystemPromptForCache`，上游 400 時自動退回舊排法） |
 | 長對話 | `conversation_states` 本串狀態筆記（目標／硬約束／決策／provenance／supersede）+ `conversation_history_summaries` 視窗外整則批次（≈3500 tok）摘要 |
 | 注入 | `buildConversationStateContext` + 使用者 `user_memories` → chat `extraSystemContext` |
 | 自動路由 | `lib/auto-router.ts`；免費層 `freeMode` |
