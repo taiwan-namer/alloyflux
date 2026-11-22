@@ -354,6 +354,35 @@ export function systemPromptFor(
   return appendUserContext(base, extraSystemContext);
 }
 
+/**
+ * 把 System 拆成「跨輪固定的前段」與「本輪變動的背景」（狀態摘要、跨對話提問、即時查證）。
+ * `${stable}\n\n${volatile}` 與 withResearchSystem(systemPromptFor(...), research) 完全相同；
+ * 變動段改放在對話歷史之後，請求開頭才能跨輪一致、命中上游 prompt cache。
+ */
+export function splitSystemPromptForCache(
+  model: ModelInfo,
+  upstreamId: string,
+  extraSystemContext?: string,
+  customSystemPrompt?: string,
+  styleOverrideContext?: string,
+  research?: ResearchBundle | ResearchAttach | null,
+): { stable: string; volatile: string } {
+  const stable = systemPromptFor(model, upstreamId, undefined, customSystemPrompt, styleOverrideContext);
+  const volatile = withResearchSystem(appendUserContext("", extraSystemContext), research).trim();
+  return { stable, volatile };
+}
+
+/** 變動背景以 developer 訊息插在本輪 user 之前（Responses API） */
+function withDeveloperContextBeforeLast<T extends { role: string }>(
+  input: T[],
+  volatile: string,
+): Array<T | { role: "developer"; content: Array<{ type: "input_text"; text: string }> }> {
+  const dev = { role: "developer" as const, content: [{ type: "input_text" as const, text: volatile }] };
+  const last = input[input.length - 1];
+  if (!last || last.role !== "user") return [...input, dev];
+  return [...input.slice(0, -1), dev, last];
+}
+
 /** 依帳號實際目錄解析要送出的 Antigravity wire id（選哪個就打哪個） */
 type AntigravityCatalog = Awaited<ReturnType<typeof fetchAntigravityAvailableModels>>;
 
@@ -941,7 +970,7 @@ async function* chatgptSubscriptionStream(
   };
   if (creds.accountId) headers["ChatGPT-Account-Id"] = creds.accountId;
 
-  // 自研查證注入 Instructions；絕不掛載上游原生 web_search（避免雙重上網爆 tokens）
+  // 自研查證注入 System 層級（instructions／developer）；絕不掛載上游原生 web_search（避免雙重上網爆 tokens）
   const research = await researchForMessages(messages, signal);
   const input: { role: string; content: string | Array<Record<string, unknown>> }[] = messages.map(
     (m) => ({
@@ -949,14 +978,19 @@ async function* chatgptSubscriptionStream(
       content: responsesContentForMessage(m, model),
     }),
   );
+  const { stable, volatile } = splitSystemPromptForCache(
+    model,
+    upstreamModel,
+    extraSystemContext,
+    customSystemPrompt,
+    styleOverrideContext,
+    research,
+  );
 
   const body: Record<string, unknown> = {
     model: upstreamModel,
-    instructions: withResearchSystem(
-      systemPromptFor(model, upstreamModel, extraSystemContext, customSystemPrompt, styleOverrideContext),
-      research,
-    ),
-    input,
+    instructions: stable,
+    input: volatile ? withDeveloperContextBeforeLast(input, volatile) : input,
     stream: true,
     store: false, // 強制無痕：絕不寫入供給者的 ChatGPT 歷史對話列表
     reasoning: { effort: reasoningEffortFor(model.effort), summary: "auto" },
@@ -967,7 +1001,12 @@ async function* chatgptSubscriptionStream(
     res = await post(`${CHATGPT_OAUTH.codexBaseUrl}/codex/responses`, headers, body, signal);
   } catch (e) {
     const err = e instanceof UpstreamError ? e : new UpstreamError(0, String(e));
-    if (err.status === 400 && body.tools) {
+    if (err.status === 400 && volatile && body.input !== input) {
+      console.warn("[chatgpt] developer context rejected; fallback to instructions", err.message.slice(0, 200));
+      body.instructions = `${stable}\n\n${volatile}`;
+      body.input = input;
+      res = await post(`${CHATGPT_OAUTH.codexBaseUrl}/codex/responses`, headers, body, signal);
+    } else if (err.status === 400 && body.tools) {
       delete body.tools;
       res = await post(`${CHATGPT_OAUTH.codexBaseUrl}/codex/responses`, headers, body, signal);
     } else {
@@ -1073,7 +1112,7 @@ async function* chatgptSubscriptionStream(
       if (json.response?.usage) {
         const u = json.response.usage;
         usage.inputTokens = u.input_tokens ?? 0;
-        usage.cachedInputTokens = u.cached_tokens ?? 0;
+        usage.cachedInputTokens = u.input_tokens_details?.cached_tokens ?? u.cached_tokens ?? 0;
         usage.outputTokens = (u.output_tokens ?? 0) + (u.reasoning_tokens ?? 0);
       }
     } else if (json.type === "codex.rate_limits" && json.rate_limits?.primary) {

@@ -6,7 +6,7 @@ import {
   buildConversationStateContext,
   updateConversationStateAfterTurn,
 } from "@/lib/conversation-state";
-import { slideMessagesForUpstream } from "@/lib/context-window";
+import { alignedTail, slideMessagesForUpstream } from "@/lib/context-window";
 import { getSessionUser, jsonError } from "@/lib/auth";
 import { cloudDbProxy } from "@/lib/cloud-api";
 import { getFreeDailyStatus, getOrCreateGuestIdentity, isFreeTierModel } from "@/lib/free-tier";
@@ -161,12 +161,15 @@ export async function POST(req: Request) {
     const userMsgId = await addUserMessage(convId, dbContent, userModelTag);
 
     // 不再重讀 DB：用先前訊息＋本輪 user 組歷史
-    const fullHistory: ChatMessage[] = [
-      ...prior
-        .filter((m) => m.content.trim())
-        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
-      { role: "user" as const, content: dbContent },
-    ].slice(-DB_HISTORY_READ);
+    const fullHistory: ChatMessage[] = alignedTail(
+      [
+        ...prior
+          .filter((m) => m.content.trim())
+          .map((m) => ({ role: m.role as "user" | "assistant", content: m.content })),
+        { role: "user" as const, content: dbContent },
+      ],
+      DB_HISTORY_READ,
+    );
     const history = slideMessagesForUpstream(fullHistory);
 
     if (images.length && history.length) {

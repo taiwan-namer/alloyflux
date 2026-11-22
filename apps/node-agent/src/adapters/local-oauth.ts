@@ -259,7 +259,7 @@ async function* chatgptStream(
           const u = json.response.usage;
           usage = {
             inputTokens: u.input_tokens ?? 0,
-            cachedInputTokens: u.cached_tokens ?? 0,
+            cachedInputTokens: u.input_tokens_details?.cached_tokens ?? u.cached_tokens ?? 0,
             outputTokens: (u.output_tokens ?? 0) + (u.reasoning_tokens ?? 0),
           };
         }
