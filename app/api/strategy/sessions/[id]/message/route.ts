@@ -1,7 +1,7 @@
 import { cloudDbProxy } from "@/lib/cloud-api";
 import { NoSourceError, routeChat } from "@/lib/gateway";
 import { findModel } from "@/lib/models";
-import { authenticatePlatformApiKey } from "@/lib/platform-api-auth";
+import { authenticateStrategyActor } from "@/lib/platform-api-auth";
 import type { ChatMessage } from "@/lib/providers";
 import {
   addUserMessage,
@@ -10,13 +10,18 @@ import {
   settleAssistantMessage,
 } from "@/lib/store";
 import {
+  addDispatchItems,
   addSessionMessage,
+  buildWorkspaceBrief,
+  ensureDefaultWorkspace,
   extractJsonObject,
   getStrategySession,
   listRunsForSession,
+  listSessionDispatch,
   listSessionMessages,
   listSessionReports,
   mergeDossier,
+  queryRoomContent,
   readDossier,
   STRATEGY_LIMITS,
   STRATEGY_SESSION_STATUSES,
@@ -61,9 +66,17 @@ const SYSTEM = `你是 automax 量化策略「會議室」主導者。另一端�
     "fPlan": null
   },
   "canStartRun": false,
-  "openQuestions": ["未解問題"]
+  "openQuestions": ["未解問題"],
+  "summary": "本會議室目前的完整結論（≤${L.summaryMaxChars} 字）",
+  "roomQueries": [{"roomId": "sess_…", "question": "要查的問題"}]
 }
-規則：只限 paper／testnet，不建議實盤下單。引用數字要來自報告或 dossier，不可臆造。fPlan 未定案時給 null；定案時給完整物件（name、規則、參數、風控、驗收指標、比較基準）。`;
+規則：只限 paper／testnet，不建議實盤下單。引用數字要來自報告或 dossier，不可臆造。fPlan 未定案時給 null；定案時給完整物件（name、規則、參數、風控、驗收指標、比較基準）。
+
+## 主體與其他會議室
+- 同一個主體底下可能有多間會議室，各自討論不同主題。你會看到主體共用記憶與其他會議室的摘要。
+- summary：每回合都要給「本會議室目前結論」的完整最新版（會覆蓋舊的），寫給其他會議室和一般對話看：主題、已定案、關鍵數字、未解問題。
+- roomQueries：摘要不夠、需要另一間會議室的細節時才用（每回合最多 ${L.roomQueriesPerTurn} 個，不需要就給 []）。平台會在該會議室的對話、報告、dossier 中找出相關片段（≤${L.roomQueryMaxChars} 字），下一回合帶給你。
+- 發言者可能是 Cursor，也可能是使用者本人（網頁）；instructions 不一定會立刻派給 Cursor，使用者可能要先確認。`;
 
 function budgetJoin(parts: string[], max: number): string {
   let out = "";
@@ -74,15 +87,30 @@ function budgetJoin(parts: string[], max: number): string {
   return out;
 }
 
+type RoomQueryResult = { roomId: string; roomName: string; question: string; snippet: string };
+
+function readRoomQueryResults(meta: Record<string, unknown>): RoomQueryResult[] {
+  const raw = meta.roomQueryResults;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (r): r is RoomQueryResult => !!r && typeof r === "object" && typeof (r as RoomQueryResult).snippet === "string",
+  );
+}
+
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const proxied = await cloudDbProxy(req);
   if (proxied) return proxied;
-  const auth = await authenticatePlatformApiKey(req);
+  const auth = await authenticateStrategyActor(req);
   if (!auth) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const fromWeb = auth.via === "session";
 
   const { id: sessionId } = await ctx.params;
-  const session = await getStrategySession(auth.user.id, sessionId);
+  let session = await getStrategySession(auth.user.id, sessionId);
   if (!session) return Response.json({ error: "Not found" }, { status: 404 });
+  if (!session.workspaceId) {
+    await ensureDefaultWorkspace(auth.user.id);
+    session = (await getStrategySession(auth.user.id, sessionId))!;
+  }
   if (session.status === "closed") {
     return Response.json({ error: "Session closed" }, { status: 409 });
   }
@@ -110,12 +138,25 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return Response.json({ error: `Unknown model: ${modelId}` }, { status: 400 });
   }
 
-  await addSessionMessage({ sessionId, userId: auth.user.id, role: "user", content });
+  await addSessionMessage({
+    sessionId,
+    userId: auth.user.id,
+    role: "user",
+    content,
+    structured: { source: fromWeb ? "web" : "cursor" },
+  });
 
   const dossier = readDossier(session.meta);
   const history = await listSessionMessages(auth.user.id, sessionId, L.historyMessages);
   const reports = await listSessionReports(auth.user.id, sessionId, 30);
   const runs = await listRunsForSession(auth.user.id, sessionId, 3);
+  const { text: workspaceBrief } = await buildWorkspaceBrief(auth.user.id, session.workspaceId, {
+    excludeSessionId: sessionId,
+  });
+  const queryResults = readRoomQueryResults(session.meta);
+  const awaitingApproval = session.autoDispatch
+    ? []
+    : (await listSessionDispatch(auth.user.id, sessionId, 50)).filter((d) => d.status === "pending");
 
   const reportIndex = reports
     .map((r) => `- ${r.id}${r.requestId ? ` [${r.requestId}]` : ""}：${r.title}（${r.chars} 字）`)
@@ -138,10 +179,20 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     L.runsInjectMaxChars,
   );
 
+  const queryBodies = queryResults
+    .map((q) => `\n### 查詢 ${q.roomName}（${q.roomId}）：${q.question}\n${q.snippet}\n`)
+    .join("");
+
   const contextBlock = [
-    `# 會議室 ${session.name}（${session.id}）｜phase=${session.status}`,
+    workspaceBrief,
+    `# 會議室 ${session.name}（${session.id}）｜phase=${session.status}${session.topic ? `｜主題：${session.topic}` : ""}`,
+    session.summary ? `## 本會議室上一版摘要\n${session.summary}` : "",
+    queryBodies ? `## 上一回合 roomQueries 的結果${queryBodies}` : "",
     `## 策略檔案夾 dossier\n${JSON.stringify(dossier, null, 1)}`,
-    `## 上一回合你給 Cursor 的待辦\n${JSON.stringify(session.pendingInstructions).slice(0, 3000)}`,
+    `## 已派給 Cursor 的待辦\n${JSON.stringify(session.pendingInstructions).slice(0, 3000)}`,
+    awaitingApproval.length
+      ? `## 等待使用者確認派送的指令（${awaitingApproval.length} 項）\n${JSON.stringify(awaitingApproval.map((d) => d.instruction)).slice(0, 2000)}`
+      : "",
     reports.length ? `## 已收到的報告索引\n${reportIndex}` : "## 尚未收到任何報告",
     reportBodies ? `## 最近報告內容${reportBodies}` : "",
     runBodies ? `## 已掛載 run${runBodies}` : "",
@@ -155,7 +206,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   while (upstream.length && upstream[0].role !== "user") upstream.shift();
   const last = upstream[upstream.length - 1];
   if (last?.role === "user") {
-    last.content = `${contextBlock}\n\n---\n# Cursor 本回合訊息\n${last.content}`;
+    last.content = `${contextBlock}\n\n---\n# ${fromWeb ? "使用者（網頁）" : "Cursor"} 本回合訊息\n${last.content}`;
   }
 
   const convId = await createConversation(auth.user.id, `strategy-session ${session.name}`, model.id);
@@ -223,6 +274,27 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   }
 
   const nextDossier = mergeDossier(dossier, parsed.memoryUpdates);
+  const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
+
+  const nextQueryResults: RoomQueryResult[] = [];
+  const roomQueries = Array.isArray(parsed.roomQueries) ? parsed.roomQueries.slice(0, L.roomQueriesPerTurn) : [];
+  for (const q of roomQueries) {
+    if (!q || typeof q !== "object") continue;
+    const { roomId, question } = q as { roomId?: unknown; question?: unknown };
+    if (typeof roomId !== "string" || typeof question !== "string" || !question.trim()) continue;
+    const hit = await queryRoomContent(auth.user.id, session, roomId.trim(), question.trim());
+    if (hit) nextQueryResults.push(hit);
+  }
+
+  const toDispatch = [...instructions, ...reportRequests];
+  const dispatchIds = toDispatch.length
+    ? await addDispatchItems({
+        userId: auth.user.id,
+        sessionId,
+        items: toDispatch,
+        dispatched: session.autoDispatch,
+      })
+    : [];
 
   const structured = {
     reply,
@@ -233,6 +305,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     canStartRun: nextStatus === "ready_to_run" || nextStatus === "ready_next_run",
     fPlan: nextDossier.fPlan,
     contextChars: contextBlock.length,
+    summary,
+    roomQueries: nextQueryResults.map((r) => ({ roomId: r.roomId, roomName: r.roomName, question: r.question })),
+    autoDispatch: session.autoDispatch,
+    dispatchIds,
   };
 
   await addSessionMessage({
@@ -244,9 +320,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   });
   await updateStrategySession(auth.user.id, sessionId, {
     status: nextStatus,
-    pendingInstructions: [...instructions, ...reportRequests],
-    meta: { ...session.meta, dossier: nextDossier },
+    ...(session.autoDispatch ? { pendingInstructions: toDispatch } : {}),
+    meta: { ...session.meta, dossier: nextDossier, roomQueryResults: nextQueryResults },
     model: model.id,
+    summary,
   });
 
   const updated = await getStrategySession(auth.user.id, sessionId);

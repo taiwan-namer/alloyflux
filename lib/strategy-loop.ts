@@ -44,6 +44,11 @@ export const STRATEGY_LIMITS = {
   reportInjectEachMaxChars: 8000,
   runsInjectMaxChars: 6000,
   historyMessages: 6,
+  summaryMaxChars: 800,
+  roomQueryMaxChars: 2000,
+  roomQueriesPerTurn: 3,
+  workspaceMemoryMaxChars: 4000,
+  workspaceBriefMaxChars: 6000,
 } as const;
 
 export type StrategyDossier = {
@@ -53,7 +58,19 @@ export type StrategyDossier = {
   fPlan: Record<string, unknown> | null;
 };
 
-async function ensureTables(): Promise<void> {
+let tablesReady: Promise<void> | null = null;
+
+function ensureTables(): Promise<void> {
+  if (!tablesReady) {
+    tablesReady = createTables().catch((e) => {
+      tablesReady = null;
+      throw e;
+    });
+  }
+  return tablesReady;
+}
+
+async function createTables(): Promise<void> {
   // postgres.js unsafe 對多語句不穩，逐句執行
   const stmts = [
     `CREATE TABLE IF NOT EXISTS strategy_loop_runs (
@@ -149,6 +166,41 @@ async function ensureTables(): Promise<void> {
     `ALTER TABLE strategy_loop_runs ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT ''`,
     `CREATE INDEX IF NOT EXISTS idx_strategy_loop_runs_session
       ON strategy_loop_runs(session_id, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS strategy_workspaces (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL DEFAULT '',
+      template_id TEXT NOT NULL DEFAULT 'automax',
+      memory_json TEXT NOT NULL DEFAULT '{}',
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      deleted_at BIGINT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_workspaces_user
+      ON strategy_workspaces(user_id, updated_at DESC)`,
+    // 舊會議室（Cursor 主導的 F、G）預設 auto_dispatch=1，行為與改版前一致
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS topic TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary_updated_at BIGINT NOT NULL DEFAULT 0`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS auto_dispatch INT NOT NULL DEFAULT 1`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_workspace
+      ON strategy_sessions(workspace_id, updated_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS strategy_dispatch_items (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      instruction_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending',
+      note TEXT NOT NULL DEFAULT '',
+      created_at BIGINT NOT NULL,
+      dispatched_at BIGINT,
+      done_at BIGINT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_session
+      ON strategy_dispatch_items(session_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_user_status
+      ON strategy_dispatch_items(user_id, status, created_at ASC)`,
   ];
   for (const sql of stmts) {
     await db().exec(sql);
@@ -410,17 +462,28 @@ export async function createStrategySession(input: {
   model?: string;
   meta?: Record<string, unknown>;
   status?: StrategySessionStatus;
+  workspaceId?: string;
+  topic?: string;
+  autoDispatch?: boolean;
 }): Promise<{ id: string }> {
   await ensureTables();
   const id = `sess_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
   const ts = nowMs();
   const status =
     input.status && STRATEGY_SESSION_STATUSES.includes(input.status) ? input.status : "collecting";
+  let workspaceId = input.workspaceId?.trim() || "";
+  if (workspaceId) {
+    const ws = await getStrategyWorkspace(input.userId, workspaceId);
+    if (!ws) throw new Error("workspace not found");
+  } else {
+    workspaceId = (await ensureDefaultWorkspace(input.userId)).id;
+  }
   await db()
     .prepare(
       `INSERT INTO strategy_sessions
-        (id, user_id, name, profile_id, strategy_version, status, model, pending_instructions_json, meta_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)`,
+        (id, user_id, name, profile_id, strategy_version, status, model, pending_instructions_json, meta_json,
+         workspace_id, topic, auto_dispatch, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -431,9 +494,13 @@ export async function createStrategySession(input: {
       status,
       input.model ?? "",
       JSON.stringify(input.meta ?? {}),
+      workspaceId,
+      clip((input.topic ?? "").trim(), 500),
+      input.autoDispatch === false ? 0 : 1,
       ts,
       ts,
     );
+  await touchWorkspace(input.userId, workspaceId);
   return { id };
 }
 
@@ -568,6 +635,10 @@ export async function updateStrategySession(
     pendingInstructions?: unknown[];
     meta?: Record<string, unknown>;
     model?: string;
+    name?: string;
+    topic?: string;
+    summary?: string;
+    autoDispatch?: boolean;
   },
 ): Promise<boolean> {
   await ensureTables();
@@ -577,13 +648,36 @@ export async function updateStrategySession(
   const pending = patch.pendingInstructions ?? cur.pendingInstructions;
   const meta = patch.meta ?? cur.meta;
   const model = patch.model ?? cur.model;
+  const name = patch.name?.trim() ? clip(patch.name.trim(), 120) : cur.name;
+  const topic = patch.topic !== undefined ? clip(patch.topic.trim(), 500) : cur.topic;
+  const summaryChanged = patch.summary !== undefined && patch.summary.trim() !== "";
+  const summary = summaryChanged
+    ? clip(patch.summary!.trim(), STRATEGY_LIMITS.summaryMaxChars)
+    : cur.summary;
+  const summaryAt = summaryChanged ? nowMs() : cur.summaryUpdatedAt;
+  const autoDispatch = patch.autoDispatch ?? cur.autoDispatch;
   await db()
     .prepare(
       `UPDATE strategy_sessions
-       SET status = ?, pending_instructions_json = ?, meta_json = ?, model = ?, updated_at = ?
+       SET status = ?, pending_instructions_json = ?, meta_json = ?, model = ?, name = ?, topic = ?,
+           summary = ?, summary_updated_at = ?, auto_dispatch = ?, updated_at = ?
        WHERE id = ? AND user_id = ?`,
     )
-    .run(status, JSON.stringify(pending), JSON.stringify(meta), model, nowMs(), sessionId, userId);
+    .run(
+      status,
+      JSON.stringify(pending),
+      JSON.stringify(meta),
+      model,
+      name,
+      topic,
+      summary,
+      summaryAt,
+      autoDispatch ? 1 : 0,
+      nowMs(),
+      sessionId,
+      userId,
+    );
+  if (cur.workspaceId) await touchWorkspace(userId, cur.workspaceId);
   return true;
 }
 
@@ -598,9 +692,393 @@ function mapSession(row: Record<string, unknown>) {
     model: String(row.model ?? ""),
     pendingInstructions: safeJson(row.pending_instructions_json, [] as unknown[]),
     meta: safeJson(row.meta_json, {} as Record<string, unknown>),
+    workspaceId: String(row.workspace_id ?? ""),
+    topic: String(row.topic ?? ""),
+    summary: String(row.summary ?? ""),
+    summaryUpdatedAt: Number(row.summary_updated_at ?? 0),
+    autoDispatch: Number(row.auto_dispatch ?? 1) !== 0,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
+}
+
+export type StrategySession = ReturnType<typeof mapSession>;
+
+// ─── 主體（workspace）────────────────────────────────────────────
+
+export type StrategyWorkspaceMemory = { notes: string };
+
+function mapWorkspace(row: Record<string, unknown>) {
+  const mem = safeJson(row.memory_json, {} as Record<string, unknown>);
+  return {
+    id: String(row.id),
+    name: String(row.name ?? ""),
+    templateId: String(row.template_id ?? "automax"),
+    memory: { notes: typeof mem.notes === "string" ? mem.notes : "" } as StrategyWorkspaceMemory,
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    deletedAt: row.deleted_at == null ? null : Number(row.deleted_at),
+  };
+}
+
+export type StrategyWorkspace = ReturnType<typeof mapWorkspace>;
+
+export async function createStrategyWorkspace(input: {
+  userId: string;
+  name: string;
+  templateId?: string;
+}): Promise<{ id: string }> {
+  await ensureTables();
+  const id = `ws_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  const ts = nowMs();
+  await db()
+    .prepare(
+      `INSERT INTO strategy_workspaces (id, user_id, name, template_id, memory_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, '{}', ?, ?)`,
+    )
+    .run(id, input.userId, clip(input.name.trim() || "未命名主體", 120), input.templateId?.trim() || "automax", ts, ts);
+  return { id };
+}
+
+export async function getStrategyWorkspace(userId: string, workspaceId: string, includeDeleted = false) {
+  await ensureTables();
+  const row = (await db()
+    .prepare(`SELECT * FROM strategy_workspaces WHERE id = ? AND user_id = ?`)
+    .get(workspaceId, userId)) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  const ws = mapWorkspace(row);
+  if (ws.deletedAt != null && !includeDeleted) return null;
+  return ws;
+}
+
+/** 取得（或建立）使用者的預設主體，並把尚未歸屬的舊會議室掛進去。 */
+export async function ensureDefaultWorkspace(userId: string): Promise<StrategyWorkspace> {
+  await ensureTables();
+  const existing = (await db()
+    .prepare(
+      `SELECT * FROM strategy_workspaces WHERE user_id = ? AND deleted_at IS NULL
+       ORDER BY created_at ASC LIMIT 1`,
+    )
+    .get(userId)) as Record<string, unknown> | undefined;
+  let ws: StrategyWorkspace;
+  if (existing) {
+    ws = mapWorkspace(existing);
+  } else {
+    const { id } = await createStrategyWorkspace({ userId, name: "automax 交易策略" });
+    ws = (await getStrategyWorkspace(userId, id))!;
+  }
+  await db()
+    .prepare(`UPDATE strategy_sessions SET workspace_id = ? WHERE user_id = ? AND workspace_id = ''`)
+    .run(ws.id, userId);
+  return ws;
+}
+
+export async function listStrategyWorkspaces(userId: string, opts: { trash?: boolean } = {}) {
+  await ensureTables();
+  if (!opts.trash) await ensureDefaultWorkspace(userId);
+  const rows = (await db()
+    .prepare(
+      `SELECT * FROM strategy_workspaces WHERE user_id = ? AND deleted_at IS ${opts.trash ? "NOT NULL" : "NULL"}
+       ORDER BY updated_at DESC LIMIT 50`,
+    )
+    .all(userId)) as Record<string, unknown>[];
+  return rows.map(mapWorkspace);
+}
+
+export async function updateStrategyWorkspace(
+  userId: string,
+  workspaceId: string,
+  patch: { name?: string; memoryNotes?: string; restore?: boolean },
+): Promise<boolean> {
+  await ensureTables();
+  const cur = await getStrategyWorkspace(userId, workspaceId, true);
+  if (!cur) return false;
+  const name = patch.name?.trim() ? clip(patch.name.trim(), 120) : cur.name;
+  const notes =
+    patch.memoryNotes !== undefined
+      ? clip(patch.memoryNotes, STRATEGY_LIMITS.workspaceMemoryMaxChars)
+      : cur.memory.notes;
+  const deletedAt = patch.restore ? null : cur.deletedAt;
+  await db()
+    .prepare(
+      `UPDATE strategy_workspaces SET name = ?, memory_json = ?, deleted_at = ?, updated_at = ?
+       WHERE id = ? AND user_id = ?`,
+    )
+    .run(name, JSON.stringify({ notes }), deletedAt, nowMs(), workspaceId, userId);
+  return true;
+}
+
+export async function softDeleteStrategyWorkspace(userId: string, workspaceId: string): Promise<boolean> {
+  await ensureTables();
+  const r = await db()
+    .prepare(
+      `UPDATE strategy_workspaces SET deleted_at = ? WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
+    )
+    .run(nowMs(), workspaceId, userId);
+  return (r.changes ?? 0) > 0;
+}
+
+async function touchWorkspace(userId: string, workspaceId: string): Promise<void> {
+  await db()
+    .prepare(`UPDATE strategy_workspaces SET updated_at = ? WHERE id = ? AND user_id = ?`)
+    .run(nowMs(), workspaceId, userId);
+}
+
+export async function listWorkspaceSessions(userId: string, workspaceId: string) {
+  await ensureTables();
+  const rows = (await db()
+    .prepare(
+      `SELECT * FROM strategy_sessions WHERE user_id = ? AND workspace_id = ?
+       ORDER BY updated_at DESC LIMIT 50`,
+    )
+    .all(userId, workspaceId)) as Record<string, unknown>[];
+  return rows.map(mapSession);
+}
+
+/**
+ * 主體共用記憶＋各會議室摘要，供會議室與一般對話注入。
+ * excludeSessionId：會議室自己的摘要不必重複注入。
+ */
+export async function buildWorkspaceBrief(
+  userId: string,
+  workspaceId: string,
+  opts: { excludeSessionId?: string; maxChars?: number } = {},
+): Promise<{ text: string; workspace: StrategyWorkspace | null }> {
+  const ws = await getStrategyWorkspace(userId, workspaceId);
+  if (!ws) return { text: "", workspace: null };
+  const rooms = (await listWorkspaceSessions(userId, workspaceId)).filter(
+    (s) => s.id !== opts.excludeSessionId,
+  );
+  const parts: string[] = [`# 主體「${ws.name}」（${ws.id}）`];
+  if (ws.memory.notes.trim()) parts.push(`## 主體共用記憶\n${ws.memory.notes.trim()}`);
+  const roomLines = rooms.map((s) => {
+    const head = `### ${s.name}（${s.id}）｜${s.status}${s.topic ? `｜主題：${s.topic}` : ""}`;
+    const body = s.summary.trim() ? clip(s.summary.trim(), STRATEGY_LIMITS.summaryMaxChars) : "（尚無摘要）";
+    return `\n${head}\n${body}\n`;
+  });
+  if (roomLines.length) {
+    parts.push(`## ${opts.excludeSessionId ? "其他" : "各"}會議室摘要${budgetJoin(roomLines, opts.maxChars ?? STRATEGY_LIMITS.workspaceBriefMaxChars)}`);
+  }
+  return { text: parts.join("\n\n"), workspace: ws };
+}
+
+function budgetJoin(parts: string[], max: number): string {
+  let out = "";
+  for (const p of parts) {
+    if (out.length + p.length > max) break;
+    out += p;
+  }
+  return out;
+}
+
+// ─── 跨會議室查詢 ────────────────────────────────────────────────
+
+function queryTerms(question: string): string[] {
+  const terms = new Set<string>();
+  const lower = question.toLowerCase();
+  for (const w of lower.match(/[a-z0-9_.%]{2,}/g) ?? []) terms.add(w);
+  for (const run of lower.match(/[\u3400-\u9fff]+/g) ?? []) {
+    if (run.length === 1) terms.add(run);
+    for (let i = 0; i + 2 <= run.length; i++) terms.add(run.slice(i, i + 2));
+  }
+  return [...terms];
+}
+
+/** 依關鍵字重疊挑出最相關的段落，總長不超過 maxChars；保持原本順序。 */
+export function pickRelevantSnippets(chunks: string[], question: string, maxChars: number): string {
+  const terms = queryTerms(question);
+  if (!terms.length) return "";
+  const scored = chunks
+    .map((text, idx) => {
+      const lower = text.toLowerCase();
+      let score = 0;
+      for (const t of terms) if (lower.includes(t)) score += t.length >= 3 ? 2 : 1;
+      return { text, idx, score };
+    })
+    .filter((c) => c.score > 0)
+    .sort((a, b) => b.score - a.score || b.idx - a.idx);
+  const picked: { text: string; idx: number }[] = [];
+  let used = 0;
+  for (const c of scored) {
+    const piece = c.text.length > maxChars ? `${c.text.slice(0, maxChars - 1)}…` : c.text;
+    if (used + piece.length + 2 > maxChars) continue;
+    picked.push({ text: piece, idx: c.idx });
+    used += piece.length + 2;
+  }
+  return picked
+    .sort((a, b) => a.idx - b.idx)
+    .map((p) => p.text)
+    .join("\n…\n");
+}
+
+function splitChunks(text: string, size = 600): string[] {
+  const out: string[] = [];
+  for (const para of text.split(/\n{2,}/)) {
+    const p = para.trim();
+    if (!p) continue;
+    for (let i = 0; i < p.length; i += size) out.push(p.slice(i, i + size));
+  }
+  return out;
+}
+
+/** 在同主體的另一間會議室裡找與問題相關的片段（dossier、報告、對話）。 */
+export async function queryRoomContent(
+  userId: string,
+  fromSession: { id: string; workspaceId: string },
+  roomId: string,
+  question: string,
+): Promise<{ roomId: string; roomName: string; question: string; snippet: string } | null> {
+  const room = await getStrategySession(userId, roomId);
+  if (!room || room.id === fromSession.id || room.workspaceId !== fromSession.workspaceId) return null;
+  const dossier = readDossier(room.meta);
+  const chunks: string[] = [];
+  if (room.summary) chunks.push(`[摘要] ${room.summary}`);
+  for (const [k, v] of Object.entries(dossier.strategies)) chunks.push(`[策略 ${k}] ${v}`);
+  for (const d of dossier.decisions) chunks.push(`[決策] ${d}`);
+  for (const f of dossier.findings) chunks.push(`[發現] ${f}`);
+  if (dossier.fPlan) chunks.push(`[定案方案] ${JSON.stringify(dossier.fPlan)}`);
+  for (const r of await listSessionReports(userId, roomId, 20)) {
+    for (const c of splitChunks(r.content)) chunks.push(`[報告 ${r.title}] ${c}`);
+  }
+  for (const m of await listSessionMessages(userId, roomId, 100)) {
+    for (const c of splitChunks(m.content)) chunks.push(`[${m.role === "assistant" ? "主持人" : "發言"}] ${c}`);
+  }
+  const snippet = pickRelevantSnippets(chunks, question, STRATEGY_LIMITS.roomQueryMaxChars);
+  return { roomId: room.id, roomName: room.name, question: clip(question, 300), snippet: snippet || "（查無相關內容）" };
+}
+
+// ─── 待派送清單 ──────────────────────────────────────────────────
+
+export type DispatchStatus = "pending" | "dispatched" | "done" | "rejected";
+
+function mapDispatch(row: Record<string, unknown>) {
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    instruction: safeJson(row.instruction_json, {} as unknown),
+    status: String(row.status) as DispatchStatus,
+    note: String(row.note ?? ""),
+    createdAt: Number(row.created_at),
+    dispatchedAt: row.dispatched_at == null ? null : Number(row.dispatched_at),
+    doneAt: row.done_at == null ? null : Number(row.done_at),
+  };
+}
+
+export type DispatchItem = ReturnType<typeof mapDispatch>;
+
+export async function addDispatchItems(input: {
+  userId: string;
+  sessionId: string;
+  items: unknown[];
+  dispatched: boolean;
+}): Promise<string[]> {
+  await ensureTables();
+  const ts = nowMs();
+  const ids: string[] = [];
+  for (const item of input.items) {
+    const id = `dsp_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    await db()
+      .prepare(
+        `INSERT INTO strategy_dispatch_items (id, session_id, user_id, instruction_json, status, created_at, dispatched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        id,
+        input.sessionId,
+        input.userId,
+        JSON.stringify(item ?? null),
+        input.dispatched ? "dispatched" : "pending",
+        ts,
+        input.dispatched ? ts : null,
+      );
+    ids.push(id);
+  }
+  return ids;
+}
+
+export async function listSessionDispatch(userId: string, sessionId: string, limit = 50) {
+  await ensureTables();
+  const rows = (await db()
+    .prepare(
+      `SELECT * FROM strategy_dispatch_items WHERE user_id = ? AND session_id = ?
+       ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(userId, sessionId, Math.min(Math.max(limit, 1), 200))) as Record<string, unknown>[];
+  return rows.map(mapDispatch);
+}
+
+export async function listDispatchByStatus(
+  userId: string,
+  status: DispatchStatus,
+  opts: { sessionId?: string; workspaceId?: string; limit?: number } = {},
+) {
+  await ensureTables();
+  const where = ["d.user_id = ?", "d.status = ?"];
+  const params: unknown[] = [userId, status];
+  if (opts.sessionId) {
+    where.push("d.session_id = ?");
+    params.push(opts.sessionId);
+  }
+  if (opts.workspaceId) {
+    where.push("s.workspace_id = ?");
+    params.push(opts.workspaceId);
+  }
+  params.push(Math.min(Math.max(opts.limit ?? 50, 1), 200));
+  const rows = (await db()
+    .prepare(
+      `SELECT d.*, s.name AS session_name, s.workspace_id AS session_workspace_id
+       FROM strategy_dispatch_items d JOIN strategy_sessions s ON s.id = d.session_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY d.created_at ASC LIMIT ?`,
+    )
+    .all(...params)) as Record<string, unknown>[];
+  return rows.map((row) => ({
+    ...mapDispatch(row),
+    sessionName: String(row.session_name ?? ""),
+    workspaceId: String(row.session_workspace_id ?? ""),
+  }));
+}
+
+/** 使用者在網頁勾選後派送或駁回；派送的指令同時併入會議室的 pendingInstructions。 */
+export async function decideDispatchItems(
+  userId: string,
+  sessionId: string,
+  ids: string[],
+  action: "dispatch" | "reject",
+): Promise<number> {
+  await ensureTables();
+  const pending = (await listSessionDispatch(userId, sessionId, 200)).filter(
+    (d) => d.status === "pending" && ids.includes(d.id),
+  );
+  if (!pending.length) return 0;
+  const ts = nowMs();
+  for (const d of pending) {
+    await db()
+      .prepare(
+        `UPDATE strategy_dispatch_items SET status = ?, dispatched_at = ? WHERE id = ? AND user_id = ?`,
+      )
+      .run(action === "dispatch" ? "dispatched" : "rejected", action === "dispatch" ? ts : null, d.id, userId);
+  }
+  if (action === "dispatch") {
+    const sess = await getStrategySession(userId, sessionId);
+    if (sess) {
+      await updateStrategySession(userId, sessionId, {
+        pendingInstructions: [...sess.pendingInstructions, ...pending.map((d) => d.instruction)],
+      });
+    }
+  }
+  return pending.length;
+}
+
+export async function markDispatchDone(userId: string, dispatchId: string, note: string): Promise<boolean> {
+  await ensureTables();
+  const r = await db()
+    .prepare(
+      `UPDATE strategy_dispatch_items SET status = 'done', done_at = ?, note = ?
+       WHERE id = ? AND user_id = ? AND status = 'dispatched'`,
+    )
+    .run(nowMs(), clip(note.trim(), 2000), dispatchId, userId);
+  return (r.changes ?? 0) > 0;
 }
 
 export async function addSessionMessage(input: {

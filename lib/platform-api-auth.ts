@@ -30,13 +30,19 @@ export async function authenticatePlatformApiKey(req: Request): Promise<{ user: 
 }
 
 /**
- * 策略會議室讀取用：API Key 或網頁登入 session 皆可。
- * 寫入／發訊息仍請用 authenticatePlatformApiKey，避免網頁誤觸干擾 Cursor 流程。
+ * 策略會議室：API Key（Cursor）或網頁登入 session 皆可。
+ * via 讓路由區分來源，例如網頁不能改 phase／pendingInstructions，那些仍只限 Cursor。
  */
-export async function authenticateStrategyReader(req: Request): Promise<{ user: User } | null> {
+export async function authenticateStrategyActor(
+  req: Request,
+): Promise<{ user: User; via: "api_key" | "session" } | null> {
   const byKey = await authenticatePlatformApiKey(req);
-  if (byKey) return { user: byKey.user };
+  if (byKey) return { user: byKey.user, via: "api_key" };
   const session = await getSessionUser(req);
-  if (session) return { user: session };
+  if (session) return { user: session, via: "session" };
   return null;
+}
+
+export async function authenticateStrategyReader(req: Request): Promise<{ user: User } | null> {
+  return authenticateStrategyActor(req);
 }

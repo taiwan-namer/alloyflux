@@ -332,6 +332,43 @@ CREATE TABLE IF NOT EXISTS strategy_session_messages (
 CREATE INDEX IF NOT EXISTS idx_strategy_session_messages_sess
   ON strategy_session_messages(session_id, created_at ASC);
 
+CREATE TABLE IF NOT EXISTS strategy_workspaces (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  template_id TEXT NOT NULL DEFAULT 'automax',
+  memory_json TEXT NOT NULL DEFAULT '{}',
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  deleted_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_workspaces_user
+  ON strategy_workspaces(user_id, updated_at DESC);
+
+ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS topic TEXT NOT NULL DEFAULT '';
+ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '';
+ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary_updated_at BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS auto_dispatch INT NOT NULL DEFAULT 1;
+CREATE INDEX IF NOT EXISTS idx_strategy_sessions_workspace
+  ON strategy_sessions(workspace_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS strategy_dispatch_items (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  instruction_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'pending',
+  note TEXT NOT NULL DEFAULT '',
+  created_at BIGINT NOT NULL,
+  dispatched_at BIGINT,
+  done_at BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_session
+  ON strategy_dispatch_items(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_user_status
+  ON strategy_dispatch_items(user_id, status, created_at ASC);
+
 CREATE TABLE IF NOT EXISTS strategy_loop_plans (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,

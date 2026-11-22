@@ -23,6 +23,7 @@ import {
   listMessages,
   settleAssistantMessage,
 } from "@/lib/store";
+import { buildWorkspaceBrief } from "@/lib/strategy-loop";
 
 export const dynamic = "force-dynamic";
 
@@ -62,6 +63,8 @@ export async function POST(req: Request) {
       deepThink?: boolean;
       /** Auto 專用：「改用主力模型重答」 */
       autoForce?: "main";
+      /** 附加策略主體：注入主體共用記憶與各會議室摘要 */
+      strategyWorkspaceId?: string;
     };
 
     const isAuto = body.model === AUTO_MODEL_ID;
@@ -195,13 +198,27 @@ export async function POST(req: Request) {
       console.warn("[chat] persona remember failed", memErr instanceof Error ? memErr.message : memErr);
     }
 
-    const [userMemoryCtx, styleOverrideCtx, stateNoteCtx] = await Promise.all([
+    const workspaceId = sessionUser && typeof body.strategyWorkspaceId === "string" ? body.strategyWorkspaceId : "";
+    const [userMemoryCtx, styleOverrideCtx, stateNoteCtx, workspaceCtx] = await Promise.all([
       sessionUser ? buildUserMemoryContext(userId, convId).then((s) => s || "") : Promise.resolve(""),
       buildStyleOverrideContext(sessionUser ? userId : null, convId),
       buildConversationStateContext(convId),
+      workspaceId
+        ? buildWorkspaceBrief(userId, workspaceId)
+            .then((r) =>
+              r.text
+                ? `【使用者附加的策略主體：以下是主體共用記憶與各會議室的最新摘要，回答相關問題時以此為準】\n${r.text}`
+                : "",
+            )
+            .catch((e) => {
+              console.warn("[chat] workspace brief failed", e instanceof Error ? e.message : e);
+              return "";
+            })
+        : Promise.resolve(""),
     ]);
     // 事實／狀態 → 非當前指令；語氣 → 獨立 styleOverride 通道
-    const extraSystemContext = [stateNoteCtx, userMemoryCtx].filter((s) => s.trim()).join("\n\n") || undefined;
+    const extraSystemContext =
+      [stateNoteCtx, userMemoryCtx, workspaceCtx].filter((s) => s.trim()).join("\n\n") || undefined;
     const styleOverrideContext = styleOverrideCtx.trim() || undefined;
 
     const encoder = new TextEncoder();
