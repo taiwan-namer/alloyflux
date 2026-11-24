@@ -1,15 +1,18 @@
 import { cloudDbProxy } from "@/lib/cloud-api";
 import { authenticateStrategyActor, authenticateStrategyReader } from "@/lib/platform-api-auth";
 import {
+  applySessionPauseAction,
   getStrategySession,
   listRunsForSession,
   listSessionDispatch,
   listSessionMessages,
   listSessionReports,
+  PAUSE_ACTIONS,
   readDossier,
   STRATEGY_LIMITS,
   STRATEGY_SESSION_STATUSES,
   updateStrategySession,
+  type PauseAction,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
 
@@ -61,13 +64,47 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     name?: string;
     topic?: string;
     autoDispatch?: boolean;
+    pauseAction?: string;
+    pauseState?: unknown;
   };
+
+  if (body.pauseState !== undefined) {
+    return Response.json(
+      { error: "Direct pauseState writes are forbidden; use pauseAction instead" },
+      { status: 400 },
+    );
+  }
+
+  if (body.pauseAction !== undefined) {
+    if (!PAUSE_ACTIONS.includes(body.pauseAction as PauseAction)) {
+      return Response.json(
+        { error: "pauseAction must be graceful_pause | force_pause | resume" },
+        { status: 400 },
+      );
+    }
+    const pauseResult = await applySessionPauseAction(
+      auth.user.id,
+      id,
+      body.pauseAction as PauseAction,
+    );
+    if (!pauseResult) return Response.json({ error: "Not found" }, { status: 404 });
+    return Response.json({ session: pauseResult.session, pauseResult });
+  }
+
   if (body.status && !STRATEGY_SESSION_STATUSES.includes(body.status)) {
     return Response.json({ error: "Invalid status" }, { status: 400 });
   }
   const patch =
     auth.via === "api_key"
-      ? body
+      ? {
+          status: body.status,
+          pendingInstructions: body.pendingInstructions,
+          meta: body.meta,
+          model: body.model,
+          name: body.name,
+          topic: body.topic,
+          autoDispatch: body.autoDispatch,
+        }
       : {
           name: typeof body.name === "string" ? body.name : undefined,
           topic: typeof body.topic === "string" ? body.topic : undefined,

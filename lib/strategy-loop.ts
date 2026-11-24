@@ -32,6 +32,17 @@ export const STRATEGY_SESSION_STATUSES: StrategySessionStatus[] = [
   "closed",
 ];
 
+export type PauseState = "none" | "pausing" | "paused";
+export type PauseAction = "graceful_pause" | "force_pause" | "resume";
+
+export const PAUSE_ACTIONS: PauseAction[] = ["graceful_pause", "force_pause", "resume"];
+
+function normalizePauseState(raw: unknown): PauseState {
+  const s = String(raw ?? "");
+  if (s === "pausing" || s === "paused") return s;
+  return "none";
+}
+
 /**
  * 會議室每回合送上游的字數預算。歷史會被 slideMessagesForUpstream 再裁（8 輪、舊 assistant ≤1800 字），
  * 所以長期記憶放 dossier，大數據由 Cursor 本機彙總成報告再上傳。
@@ -184,6 +195,7 @@ async function createTables(): Promise<void> {
     `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary_updated_at BIGINT NOT NULL DEFAULT 0`,
     `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS auto_dispatch INT NOT NULL DEFAULT 1`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS pause_state TEXT NOT NULL DEFAULT 'none'`,
     `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_workspace
       ON strategy_sessions(workspace_id, updated_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_dispatch_items (
@@ -209,6 +221,19 @@ async function createTables(): Promise<void> {
 
 function nowMs(): number {
   return Date.now();
+}
+
+/** 單調遞增 updated_at，避免同毫秒雙寫導致 /sync 漏訊。 */
+export async function touchSessionUpdatedAt(userId: string, sessionId: string): Promise<void> {
+  await ensureTables();
+  const ts = nowMs();
+  await db()
+    .prepare(
+      `UPDATE strategy_sessions
+       SET updated_at = GREATEST(updated_at + 1, ?)
+       WHERE id = ? AND user_id = ?`,
+    )
+    .run(ts, sessionId, userId);
 }
 
 export async function createStrategyRun(input: {
@@ -583,9 +608,7 @@ export async function addSessionReport(input: {
       chars,
       nowMs(),
     );
-  await db()
-    .prepare(`UPDATE strategy_sessions SET updated_at = ? WHERE id = ? AND user_id = ?`)
-    .run(nowMs(), input.sessionId, input.userId);
+  await touchSessionUpdatedAt(input.userId, input.sessionId);
   return { id, chars };
 }
 
@@ -639,6 +662,7 @@ export async function updateStrategySession(
     topic?: string;
     summary?: string;
     autoDispatch?: boolean;
+    pauseState?: PauseState;
   },
 ): Promise<boolean> {
   await ensureTables();
@@ -656,11 +680,14 @@ export async function updateStrategySession(
     : cur.summary;
   const summaryAt = summaryChanged ? nowMs() : cur.summaryUpdatedAt;
   const autoDispatch = patch.autoDispatch ?? cur.autoDispatch;
+  const pauseState = patch.pauseState !== undefined ? normalizePauseState(patch.pauseState) : cur.pauseState;
+  const ts = nowMs();
   await db()
     .prepare(
       `UPDATE strategy_sessions
        SET status = ?, pending_instructions_json = ?, meta_json = ?, model = ?, name = ?, topic = ?,
-           summary = ?, summary_updated_at = ?, auto_dispatch = ?, updated_at = ?
+           summary = ?, summary_updated_at = ?, auto_dispatch = ?, pause_state = ?,
+           updated_at = GREATEST(updated_at + 1, ?)
        WHERE id = ? AND user_id = ?`,
     )
     .run(
@@ -673,7 +700,8 @@ export async function updateStrategySession(
       summary,
       summaryAt,
       autoDispatch ? 1 : 0,
-      nowMs(),
+      pauseState,
+      ts,
       sessionId,
       userId,
     );
@@ -697,6 +725,7 @@ function mapSession(row: Record<string, unknown>) {
     summary: String(row.summary ?? ""),
     summaryUpdatedAt: Number(row.summary_updated_at ?? 0),
     autoDispatch: Number(row.auto_dispatch ?? 1) !== 0,
+    pauseState: normalizePauseState(row.pause_state),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   };
@@ -1065,20 +1094,153 @@ export async function decideDispatchItems(
       await updateStrategySession(userId, sessionId, {
         pendingInstructions: [...sess.pendingInstructions, ...pending.map((d) => d.instruction)],
       });
+    } else {
+      await touchSessionUpdatedAt(userId, sessionId);
     }
+  } else {
+    await touchSessionUpdatedAt(userId, sessionId);
   }
   return pending.length;
 }
 
-export async function markDispatchDone(userId: string, dispatchId: string, note: string): Promise<boolean> {
+export async function countDispatchedItems(userId: string, sessionId: string): Promise<number> {
   await ensureTables();
+  const row = await db()
+    .prepare(
+      `SELECT COUNT(*)::int AS n FROM strategy_dispatch_items
+       WHERE user_id = ? AND session_id = ? AND status = 'dispatched'`,
+    )
+    .get(userId, sessionId);
+  return Number(row?.n ?? 0);
+}
+
+export async function closeAllDispatched(
+  userId: string,
+  sessionId: string,
+  note = "forced pause close",
+): Promise<number> {
+  await ensureTables();
+  const ts = nowMs();
+  const tag = clip(note.trim() || "forced pause close", 500);
+  const r = await db()
+    .prepare(
+      `UPDATE strategy_dispatch_items
+       SET status = 'done',
+           done_at = ?,
+           note = CASE
+             WHEN COALESCE(note, '') = '' THEN ?
+             ELSE LEFT(note || ' | ' || ?, 2000)
+           END
+       WHERE user_id = ? AND session_id = ? AND status = 'dispatched'`,
+    )
+    .run(ts, tag, tag, userId, sessionId);
+  return r.changes ?? 0;
+}
+
+export async function applySessionPauseAction(
+  userId: string,
+  sessionId: string,
+  action: PauseAction,
+): Promise<{
+  session: StrategySession | null;
+  closedCount: number;
+  remainingDispatched: number;
+} | null> {
+  await ensureTables();
+  const cur = await getStrategySession(userId, sessionId);
+  if (!cur) return null;
+
+  let closedCount = 0;
+  let nextPause: PauseState = cur.pauseState;
+
+  if (action === "graceful_pause") {
+    const n = await countDispatchedItems(userId, sessionId);
+    nextPause = n > 0 ? "pausing" : "paused";
+    await updateStrategySession(userId, sessionId, { pauseState: nextPause });
+  } else if (action === "force_pause") {
+    closedCount = await closeAllDispatched(userId, sessionId, "forced pause close");
+    nextPause = "paused";
+    await updateStrategySession(userId, sessionId, {
+      pauseState: "paused",
+      pendingInstructions: [],
+    });
+  } else {
+    nextPause = "none";
+    await updateStrategySession(userId, sessionId, { pauseState: "none" });
+  }
+
+  const remainingDispatched = await countDispatchedItems(userId, sessionId);
+  const session = await getStrategySession(userId, sessionId);
+  return { session, closedCount, remainingDispatched };
+}
+
+export async function markDispatchDone(
+  userId: string,
+  dispatchId: string,
+  note: string,
+): Promise<{ ok: boolean; sessionId?: string; pauseState?: PauseState }> {
+  await ensureTables();
+  const existing = await db()
+    .prepare(
+      `SELECT session_id FROM strategy_dispatch_items
+       WHERE id = ? AND user_id = ? AND status = 'dispatched'`,
+    )
+    .get(dispatchId, userId);
+  if (!existing) return { ok: false };
+
+  const sessionId = String(existing.session_id);
   const r = await db()
     .prepare(
       `UPDATE strategy_dispatch_items SET status = 'done', done_at = ?, note = ?
        WHERE id = ? AND user_id = ? AND status = 'dispatched'`,
     )
     .run(nowMs(), clip(note.trim(), 2000), dispatchId, userId);
-  return (r.changes ?? 0) > 0;
+  if ((r.changes ?? 0) <= 0) return { ok: false };
+
+  const sess = await getStrategySession(userId, sessionId);
+  const remaining = await countDispatchedItems(userId, sessionId);
+  if (sess?.pauseState === "pausing" && remaining === 0) {
+    await updateStrategySession(userId, sessionId, { pauseState: "paused" });
+  } else {
+    await touchSessionUpdatedAt(userId, sessionId);
+  }
+  const updated = await getStrategySession(userId, sessionId);
+  return { ok: true, sessionId, pauseState: updated?.pauseState ?? "none" };
+}
+
+export async function getSessionSyncMeta(
+  userId: string,
+  sessionId: string,
+): Promise<{
+  sessionUpdatedAt: number;
+  workspaceId: string;
+  workspaceUpdatedAt: number;
+  workspaceMemoryNotes: string;
+  maxUpdatedAt: number;
+} | null> {
+  await ensureTables();
+  const sess = await getStrategySession(userId, sessionId);
+  if (!sess) return null;
+
+  let workspaceUpdatedAt = 0;
+  let workspaceMemoryNotes = "";
+  const workspaceId = sess.workspaceId || "";
+  if (workspaceId) {
+    const ws = await getStrategyWorkspace(userId, workspaceId);
+    if (ws) {
+      workspaceUpdatedAt = ws.updatedAt;
+      workspaceMemoryNotes = ws.memory.notes;
+    }
+  }
+
+  const sessionUpdatedAt = sess.updatedAt;
+  return {
+    sessionUpdatedAt,
+    workspaceId,
+    workspaceUpdatedAt,
+    workspaceMemoryNotes,
+    maxUpdatedAt: Math.max(sessionUpdatedAt, workspaceUpdatedAt),
+  };
 }
 
 export async function addSessionMessage(input: {
@@ -1105,9 +1267,7 @@ export async function addSessionMessage(input: {
       JSON.stringify(input.structured ?? {}),
       nowMs(),
     );
-  await db()
-    .prepare(`UPDATE strategy_sessions SET updated_at = ? WHERE id = ? AND user_id = ?`)
-    .run(nowMs(), input.sessionId, input.userId);
+  await touchSessionUpdatedAt(input.userId, input.sessionId);
   return { id };
 }
 
@@ -1153,9 +1313,7 @@ export async function attachRunToSession(userId: string, sessionId: string, runI
   const r = await db()
     .prepare(`UPDATE strategy_loop_runs SET session_id = ? WHERE id = ? AND user_id = ?`)
     .run(sessionId, runId, userId);
-  await db()
-    .prepare(`UPDATE strategy_sessions SET updated_at = ? WHERE id = ? AND user_id = ?`)
-    .run(nowMs(), sessionId, userId);
+  await touchSessionUpdatedAt(userId, sessionId);
   return (r.changes ?? 0) > 0;
 }
 

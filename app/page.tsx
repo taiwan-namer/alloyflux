@@ -14,6 +14,16 @@ import {
   previewUserText,
   shouldCollapseUserText,
 } from "@/lib/user-message-display";
+import StrategyRoomView from "@/components/StrategyRoomView";
+import {
+  strategyStatusLabel,
+  type PauseAction,
+  type StrategyDispatchItem,
+  type StrategySessionDetail,
+  type StrategySyncResponse,
+  type StrategyWorkspaceBrief,
+  type ViewMode,
+} from "@/components/strategy-types";
 
 type Effort = "low" | "medium" | "high";
 type Brand = "gpt" | "claude" | "gemini" | "grok";
@@ -112,95 +122,7 @@ interface ApiKeyRow {
   createdAt: number;
 }
 
-interface StrategySessionBrief {
-  id: string;
-  name: string;
-  status: string;
-  model?: string;
-  topic?: string;
-  summary?: string;
-  autoDispatch?: boolean;
-  updatedAt: number;
-}
-
-interface StrategyWorkspaceBrief {
-  id: string;
-  name: string;
-  memory: { notes: string };
-  rooms: StrategySessionBrief[];
-}
-
-interface StrategySessionMessage {
-  id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  structured?: { source?: string };
-  createdAt: number;
-}
-
-interface StrategyDispatchItem {
-  id: string;
-  instruction: unknown;
-  status: "pending" | "dispatched" | "done" | "rejected";
-  note: string;
-  createdAt: number;
-}
-
-const DISPATCH_STATUS_LABEL: Record<StrategyDispatchItem["status"], string> = {
-  pending: "待確認",
-  dispatched: "已派送",
-  done: "Cursor 已完成",
-  rejected: "已駁回",
-};
-
-function dispatchText(instruction: unknown): string {
-  if (typeof instruction === "string") return instruction;
-  if (instruction && typeof instruction === "object") {
-    const o = instruction as { title?: unknown; spec?: unknown };
-    if (typeof o.title === "string") {
-      return `報告：${o.title}${typeof o.spec === "string" ? `｜${o.spec}` : ""}`;
-    }
-  }
-  return JSON.stringify(instruction);
-}
-
 const ATTACHED_WORKSPACE_KEY = "alloyflux.attachedWorkspace";
-
-interface StrategySessionDetail {
-  session: StrategySessionBrief & {
-    profileId?: string;
-    strategyVersion?: string;
-    pendingInstructions?: unknown[];
-    workspaceId?: string;
-    summaryUpdatedAt?: number;
-  };
-  dispatch: StrategyDispatchItem[];
-  dossier: {
-    strategies: Record<string, string>;
-    findings: string[];
-    decisions: string[];
-    fPlan: Record<string, unknown> | null;
-  };
-  messages: StrategySessionMessage[];
-  reports: { id: string; title: string; chars: number; createdAt: number }[];
-  runs: { id: string; profileId?: string; createdAt?: number }[];
-}
-
-const STRATEGY_STATUS_LABEL: Record<string, string> = {
-  discovery: "探索中",
-  designing: "設計中",
-  ready_to_run: "可開跑",
-  running: "進行中",
-  collecting: "收集中",
-  reviewing: "復盤中",
-  await_code: "待改碼",
-  ready_next_run: "可再開下一輪",
-  closed: "已關閉",
-};
-
-function strategyStatusLabel(status: string): string {
-  return STRATEGY_STATUS_LABEL[status] ?? status;
-}
 
 interface UserMemoryItem {
   id: string;
@@ -1226,7 +1148,8 @@ export default function ChatPage() {
   const [newRoomName, setNewRoomName] = useState("");
   const [newRoomTopic, setNewRoomTopic] = useState("");
   const [strategyCreating, setStrategyCreating] = useState(false);
-  const [strategyOpen, setStrategyOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("chat");
+  const [canSplit, setCanSplit] = useState(false);
   const [strategyBusy, setStrategyBusy] = useState(false);
   const [strategyDetail, setStrategyDetail] = useState<StrategySessionDetail | null>(null);
   const [strategyError, setStrategyError] = useState<string | null>(null);
@@ -1234,6 +1157,7 @@ export default function ChatPage() {
   const [strategySending, setStrategySending] = useState(false);
   const [dispatchSelected, setDispatchSelected] = useState<Set<string>>(() => new Set());
   const [wsMemoryDraft, setWsMemoryDraft] = useState("");
+  const [wsMemoryDirty, setWsMemoryDirty] = useState(false);
   const [wsMemorySaving, setWsMemorySaving] = useState(false);
   const [attachedWorkspaceId, setAttachedWorkspaceId] = useState<string>("");
   const [mintedCode, setMintedCode] = useState<string | null>(null);
@@ -1587,8 +1511,28 @@ export default function ChatPage() {
     setFamilyId(splitModelId(fullId).familyId);
   }
 
+  useEffect(() => {
+    const wide = window.matchMedia("(min-width: 1024px)");
+    const coarse = window.matchMedia("(hover: none), (pointer: coarse)");
+    const sync = () => {
+      const next = wide.matches && !coarse.matches;
+      setCanSplit(next);
+      if (!next) {
+        setViewMode((m) => (m === "split" ? "strategy" : m));
+      }
+    };
+    sync();
+    wide.addEventListener("change", sync);
+    coarse.addEventListener("change", sync);
+    return () => {
+      wide.removeEventListener("change", sync);
+      coarse.removeEventListener("change", sync);
+    };
+  }, []);
+
   async function openConversation(id: string) {
     setActiveId(id);
+    setViewMode((m) => (m === "split" && canSplit ? "split" : "chat"));
     setSidebarOpen(false);
     stickToBottomRef.current = true;
     setShowJumpLatest(false);
@@ -1702,11 +1646,13 @@ export default function ChatPage() {
   async function openStrategySession(id: string) {
     setStrategyBusy(true);
     setStrategyError(null);
-    setStrategyOpen(true);
-    setSidebarOpen(false);
-    if (strategyDetail?.session.id !== id) {
+    setViewMode((m) => (m === "split" && canSplit ? "split" : "strategy"));
+    if (!canSplit) setSidebarOpen(false);
+    const switching = strategyDetail?.session.id !== id;
+    if (switching) {
       setStrategyDraft("");
       setDispatchSelected(new Set());
+      setWsMemoryDirty(false);
     }
     try {
       const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(id)}`, { cache: "no-store" });
@@ -1719,7 +1665,7 @@ export default function ChatPage() {
       const detail = data as StrategySessionDetail;
       setStrategyDetail({ ...detail, dispatch: Array.isArray(detail.dispatch) ? detail.dispatch : [] });
       const ws = strategyWorkspaces.find((w) => w.id === detail.session.workspaceId);
-      setWsMemoryDraft(ws?.memory.notes ?? "");
+      if (switching || !wsMemoryDirty) setWsMemoryDraft(ws?.memory.notes ?? "");
     } catch (e) {
       setStrategyDetail(null);
       setStrategyError(e instanceof Error ? e.message : "無法載入會議室");
@@ -1799,15 +1745,26 @@ export default function ChatPage() {
     const sessionId = strategyDetail?.session.id;
     const ids = [...dispatchSelected];
     if (!sessionId || !ids.length) return;
+    setStrategyError(null);
     const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sessionId)}/dispatch`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ action, ids }),
     });
-    const data = (await res.json().catch(() => ({}))) as { items?: StrategyDispatchItem[] };
+    const data = (await res.json().catch(() => ({}))) as {
+      items?: StrategyDispatchItem[];
+      error?: string;
+      code?: string;
+    };
+    if (res.status === 409 || data.code === "SESSION_PAUSED") {
+      setStrategyError(data.error || "會議室目前處於暫停狀態，無法派送指令，請先恢復執行。");
+      return;
+    }
     if (res.ok && Array.isArray(data.items)) {
       setStrategyDetail((d) => (d ? { ...d, dispatch: data.items! } : d));
       setDispatchSelected(new Set());
+    } else if (!res.ok) {
+      setStrategyError(data.error || "派送失敗");
     }
   }
 
@@ -1825,6 +1782,70 @@ export default function ChatPage() {
     }
   }
 
+  async function handlePauseAction(action: PauseAction) {
+    const sessionId = strategyDetail?.session.id;
+    if (!sessionId) return;
+    setStrategyBusy(true);
+    setStrategyError(null);
+    try {
+      const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sessionId)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pauseAction: action }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        session?: StrategySessionDetail["session"];
+        error?: string;
+      };
+      if (!res.ok) {
+        setStrategyError(data.error || "暫停操作失敗");
+        return;
+      }
+      if (data.session) {
+        setStrategyDetail((d) => (d ? { ...d, session: { ...d.session, ...data.session! } } : d));
+      }
+      await openStrategySession(sessionId);
+    } finally {
+      setStrategyBusy(false);
+    }
+  }
+
+  async function handleMarkDispatchDone(dispatchId: string) {
+    setStrategyError(null);
+    const res = await fetch(`/api/strategy/dispatch/${encodeURIComponent(dispatchId)}/done`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ note: "marked done from web" }),
+    });
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    if (!res.ok) {
+      setStrategyError(data.error || "標記完成失敗");
+      return;
+    }
+    const sessionId = strategyDetail?.session.id;
+    if (sessionId) await openStrategySession(sessionId);
+  }
+
+  function handleSyncPatch(data: Extract<StrategySyncResponse, { changed: true }>) {
+    if (strategySending) return;
+    if (!strategyDetail || strategyDetail.session.id !== data.session.id) return;
+    const nextDispatch = Array.isArray(data.dispatch) ? data.dispatch : strategyDetail.dispatch;
+    const pendingIds = new Set(nextDispatch.filter((d) => d.status === "pending").map((d) => d.id));
+    setDispatchSelected((sel) => new Set([...sel].filter((id) => pendingIds.has(id))));
+    setStrategyDetail({
+      ...strategyDetail,
+      session: { ...strategyDetail.session, ...data.session },
+      dossier: data.dossier ?? strategyDetail.dossier,
+      messages: Array.isArray(data.messages) ? data.messages : strategyDetail.messages,
+      runs: Array.isArray(data.runs) ? data.runs : strategyDetail.runs,
+      reports: Array.isArray(data.reports) ? data.reports : strategyDetail.reports,
+      dispatch: nextDispatch,
+    });
+    if (!wsMemoryDirty && typeof data.workspaceMemoryNotes === "string") {
+      setWsMemoryDraft(data.workspaceMemoryNotes);
+    }
+  }
+
   async function saveWorkspaceMemory() {
     const workspaceId = strategyDetail?.session.workspaceId;
     if (!workspaceId || wsMemorySaving) return;
@@ -1835,7 +1856,10 @@ export default function ChatPage() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ memoryNotes: wsMemoryDraft }),
       });
-      if (res.ok) await refreshStrategySessions();
+      if (res.ok) {
+        setWsMemoryDirty(false);
+        await refreshStrategySessions();
+      }
     } finally {
       setWsMemorySaving(false);
     }
@@ -1891,7 +1915,7 @@ export default function ChatPage() {
     setMemoryOpen(false);
     setTrashOpen(false);
     setTrashedConversations([]);
-    setStrategyOpen(false);
+    setViewMode("chat");
     setStrategyWorkspaces([]);
     setStrategyDetail(null);
     changeAttachedWorkspace("");
@@ -2512,7 +2536,7 @@ export default function ChatPage() {
   }
 
   return (
-    <div className={`app${sidebarOpen ? " sidebar-open" : ""}`} data-brand={brand}>
+    <div className={`app view-${viewMode}${sidebarOpen ? " sidebar-open" : ""}`} data-brand={brand}>
       {sidebarOpen && (
         <button type="button" className="sidebar-backdrop" aria-label="關閉選單" onClick={() => setSidebarOpen(false)} />
       )}
@@ -2732,7 +2756,7 @@ export default function ChatPage() {
                       ws.rooms.map((s) => (
                         <div
                           key={s.id}
-                          className={`conv-item strategy-session-item${strategyDetail?.session.id === s.id && strategyOpen ? " active" : ""}`}
+                          className={`conv-item strategy-session-item${strategyDetail?.session.id === s.id && viewMode !== "chat" ? " active" : ""}`}
                           onClick={() => void openStrategySession(s.id)}
                           title={`${s.name}（${strategyStatusLabel(s.status)}）${s.topic ? `\n主題：${s.topic}` : ""}`}
                         >
@@ -2909,7 +2933,7 @@ export default function ChatPage() {
         </div>
       </aside>
 
-      <main className="main">
+      <main className="main" aria-hidden={viewMode === "strategy"}>
         <div className="topbar">
           <button type="button" className="menu-btn" aria-label="開啟對話紀錄" onClick={() => setSidebarOpen(true)}>
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
@@ -2937,6 +2961,20 @@ export default function ChatPage() {
                       : "Gemini 星光氛圍"}
             </span>
           </div>
+          {canSplit ? (
+            <button
+              type="button"
+              className={`ghost topbar-split-btn${viewMode === "split" ? " is-active" : ""}`}
+              disabled={!strategyDetail}
+              title={strategyDetail ? "一般聊天｜會議室並排" : "請先從左側選擇一間會議室"}
+              onClick={() => {
+                if (!strategyDetail) return;
+                setViewMode((m) => (m === "split" ? "strategy" : "split"));
+              }}
+            >
+              {viewMode === "split" ? "取消並排" : "並排檢視"}
+            </button>
+          ) : null}
           <button
             type="button"
             className="topbar-new-chat"
@@ -3412,305 +3450,40 @@ export default function ChatPage() {
         </div>
       </main>
 
-      {strategyOpen && (
-        <div
-          className="modal-backdrop"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setStrategyOpen(false);
+      {viewMode !== "chat" && strategyDetail ? (
+        <StrategyRoomView
+          detail={strategyDetail}
+          draft={strategyDraft}
+          onDraftChange={setStrategyDraft}
+          dispatchSelected={dispatchSelected}
+          onDispatchSelectedChange={setDispatchSelected}
+          wsMemoryDraft={wsMemoryDraft}
+          onWsMemoryChange={(v) => {
+            setWsMemoryDraft(v);
+            setWsMemoryDirty(true);
           }}
-        >
-          <div
-            className="modal-panel strategy-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="strategy-modal-title"
-          >
-            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8, gap: 12 }}>
-              <div style={{ minWidth: 0 }}>
-                <h2 id="strategy-modal-title" style={{ margin: 0 }}>
-                  {strategyDetail?.session.name || "策略會議室"}
-                </h2>
-                <p className="muted memory-hint">
-                  {strategyDetail?.session.topic
-                    ? `主題：${strategyDetail.session.topic}`
-                    : "長期記憶在 dossier；每回合會自動更新摘要給其他會議室與一般對話參考。"}
-                </p>
-              </div>
-              <div className="row" style={{ gap: 8, flexShrink: 0 }}>
-                {strategyDetail?.session.id && (
-                  <button
-                    type="button"
-                    className="ghost"
-                    disabled={strategyBusy}
-                    onClick={() => void openStrategySession(strategyDetail.session.id)}
-                  >
-                    重新整理
-                  </button>
-                )}
-                <button type="button" className="ghost" onClick={() => setStrategyOpen(false)}>
-                  關閉
-                </button>
-              </div>
-            </div>
-
-            {strategyBusy && !strategyDetail ? (
-              <div className="muted" style={{ padding: "12px 0" }}>
-                載入中…
-              </div>
-            ) : strategyError && !strategyDetail ? (
-              <div className="muted" style={{ padding: "12px 0", color: "#dc2626" }}>
-                {strategyError}
-              </div>
-            ) : strategyDetail ? (
-              <>
-                <div className="strategy-meta-row">
-                  <span className="strategy-status-chip">
-                    {strategyStatusLabel(strategyDetail.session.status)}
-                  </span>
-                  {strategyDetail.session.model ? (
-                    <span className="muted" style={{ fontSize: 12 }}>
-                      模型：{strategyDetail.session.model}
-                    </span>
-                  ) : null}
-                  <span className="muted" style={{ fontSize: 12 }}>
-                    報告 {strategyDetail.reports.length}｜run {strategyDetail.runs.length}
-                  </span>
-                  <label
-                    className="strategy-auto-toggle"
-                    title="開啟：主持人給的指令直接派給 Cursor。關閉：先放在待派送清單，由你勾選後才派送。"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={strategyDetail.session.autoDispatch !== false}
-                      onChange={(e) => void toggleAutoDispatch(e.target.checked)}
-                    />
-                    <span>自動派送給 Cursor</span>
-                  </label>
-                </div>
-
-                <div className="modal-section">
-                  <h3>會議室摘要</h3>
-                  {strategyDetail.session.summary ? (
-                    <p className="strategy-summary">{strategyDetail.session.summary}</p>
-                  ) : (
-                    <div className="muted" style={{ fontSize: 13 }}>
-                      尚無摘要，下一次對話後會自動產生
-                    </div>
-                  )}
-                </div>
-
-                {(() => {
-                  const pending = strategyDetail.dispatch.filter((d) => d.status === "pending");
-                  const recent = strategyDetail.dispatch.filter((d) => d.status !== "pending").slice(0, 8);
-                  if (!pending.length && !recent.length) return null;
-                  return (
-                    <div className="modal-section">
-                      <h3>待派送給 Cursor{pending.length ? `（${pending.length}）` : ""}</h3>
-                      {pending.length > 0 && (
-                        <>
-                          <ul className="strategy-dispatch-list">
-                            {pending.map((d) => (
-                              <li key={d.id}>
-                                <label>
-                                  <input
-                                    type="checkbox"
-                                    checked={dispatchSelected.has(d.id)}
-                                    onChange={(e) =>
-                                      setDispatchSelected((prev) => {
-                                        const next = new Set(prev);
-                                        if (e.target.checked) next.add(d.id);
-                                        else next.delete(d.id);
-                                        return next;
-                                      })
-                                    }
-                                  />
-                                  <span>{dispatchText(d.instruction)}</span>
-                                </label>
-                              </li>
-                            ))}
-                          </ul>
-                          <div className="row" style={{ gap: 8, marginTop: 8 }}>
-                            <button
-                              type="button"
-                              className="ghost"
-                              onClick={() =>
-                                setDispatchSelected(
-                                  dispatchSelected.size === pending.length
-                                    ? new Set()
-                                    : new Set(pending.map((d) => d.id)),
-                                )
-                              }
-                            >
-                              {dispatchSelected.size === pending.length ? "取消全選" : "全選"}
-                            </button>
-                            <button
-                              type="button"
-                              disabled={!dispatchSelected.size}
-                              onClick={() => void decideDispatch("dispatch")}
-                            >
-                              派給 Cursor
-                            </button>
-                            <button
-                              type="button"
-                              className="ghost"
-                              disabled={!dispatchSelected.size}
-                              onClick={() => void decideDispatch("reject")}
-                            >
-                              駁回
-                            </button>
-                          </div>
-                        </>
-                      )}
-                      {recent.length > 0 && (
-                        <ul className="strategy-dispatch-list strategy-dispatch-history">
-                          {recent.map((d) => (
-                            <li key={d.id}>
-                              <span className={`strategy-dispatch-chip is-${d.status}`}>
-                                {DISPATCH_STATUS_LABEL[d.status]}
-                              </span>
-                              <span>{dispatchText(d.instruction)}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  );
-                })()}
-
-                <div className="modal-section">
-                  <h3>主體共用記憶</h3>
-                  <p className="muted memory-hint" style={{ marginTop: 0 }}>
-                    同一主體底下的所有會議室，以及附加這個主體的一般對話都會讀到。
-                  </p>
-                  <textarea
-                    className="strategy-ws-memory"
-                    value={wsMemoryDraft}
-                    maxLength={4000}
-                    rows={3}
-                    placeholder="例如：只做 paper／testnet；以 A–E 的實績為比較基準"
-                    onChange={(e) => setWsMemoryDraft(e.target.value)}
-                  />
-                  <div className="row" style={{ justifyContent: "flex-end", marginTop: 6 }}>
-                    <button
-                      type="button"
-                      className="ghost"
-                      disabled={wsMemorySaving}
-                      onClick={() => void saveWorkspaceMemory()}
-                    >
-                      {wsMemorySaving ? "儲存中…" : "儲存共用記憶"}
-                    </button>
-                  </div>
-                </div>
-
-                {(strategyDetail.dossier.findings.length > 0 ||
-                  strategyDetail.dossier.decisions.length > 0 ||
-                  strategyDetail.dossier.fPlan) && (
-                  <div className="modal-section">
-                    <h3>dossier 摘要</h3>
-                    {strategyDetail.dossier.fPlan ? (
-                      <p className="strategy-dossier-line">
-                        定案方案：{String((strategyDetail.dossier.fPlan as { name?: unknown }).name ?? "已定案")}
-                      </p>
-                    ) : null}
-                    {strategyDetail.dossier.decisions.slice(-3).map((d, i) => (
-                      <p key={`d-${i}`} className="strategy-dossier-line">
-                        決策：{d}
-                      </p>
-                    ))}
-                    {strategyDetail.dossier.findings.slice(-3).map((f, i) => (
-                      <p key={`f-${i}`} className="strategy-dossier-line">
-                        發現：{f}
-                      </p>
-                    ))}
-                  </div>
-                )}
-
-                {strategyDetail.reports.length > 0 && (
-                  <div className="modal-section">
-                    <h3>報告索引</h3>
-                    <ul className="strategy-report-list">
-                      {strategyDetail.reports.slice(0, 12).map((r) => (
-                        <li key={r.id}>
-                          <span className="title">{r.title}</span>
-                          <span className="muted">{r.chars.toLocaleString("zh-TW")} 字</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-                <div className="modal-section">
-                  <h3>會議室對話</h3>
-                  {strategyDetail.messages.length === 0 ? (
-                    <div className="muted" style={{ fontSize: 13 }}>
-                      尚無訊息
-                    </div>
-                  ) : (
-                    <div className="strategy-msg-list">
-                      {strategyDetail.messages.map((m) => (
-                        <div key={m.id} className={`strategy-msg strategy-msg-${m.role}`}>
-                          <div className="strategy-msg-role">
-                            {m.role === "assistant"
-                              ? "會議室"
-                              : m.role === "user"
-                                ? m.structured?.source === "web"
-                                  ? "你（網頁）"
-                                  : m.structured?.source === "cursor"
-                                    ? "Cursor"
-                                    : "Cursor／你"
-                                : "系統"}
-                          </div>
-                          <pre className="strategy-msg-body">{m.content}</pre>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {strategyError && (
-                  <div className="muted" style={{ fontSize: 13, color: "#dc2626", marginTop: 8 }}>
-                    {strategyError}
-                  </div>
-                )}
-                <form
-                  className="strategy-composer"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    void sendStrategyMessage();
-                  }}
-                >
-                  <textarea
-                    value={strategyDraft}
-                    maxLength={8000}
-                    rows={3}
-                    disabled={strategySending || strategyDetail.session.status === "closed"}
-                    placeholder={
-                      strategyDetail.session.status === "closed"
-                        ? "會議室已關閉"
-                        : "在會議室發言（Enter 送出，Shift+Enter 換行）"
-                    }
-                    onChange={(e) => setStrategyDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                        e.preventDefault();
-                        void sendStrategyMessage();
-                      }
-                    }}
-                  />
-                  <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
-                    <span className="muted" style={{ fontSize: 12 }}>
-                      {strategySending ? "主持人思考中…" : "每次發言會依 token 扣點"}
-                    </span>
-                    <button type="submit" disabled={strategySending || !strategyDraft.trim()}>
-                      送出
-                    </button>
-                  </div>
-                </form>
-              </>
-            ) : null}
-          </div>
-        </div>
-      )}
+          wsMemoryDirty={wsMemoryDirty}
+          sending={strategySending}
+          busy={strategyBusy}
+          error={strategyError}
+          canSplit={canSplit}
+          viewMode={viewMode}
+          onToggleSplit={() => setViewMode((m) => (m === "split" ? "strategy" : "split"))}
+          onBackToChat={() => setViewMode("chat")}
+          onOpenSidebar={() => setSidebarOpen(true)}
+          onSend={() => void sendStrategyMessage()}
+          onRefresh={() => {
+            if (strategyDetail?.session.id) void openStrategySession(strategyDetail.session.id);
+          }}
+          onDecideDispatch={(action) => void decideDispatch(action)}
+          onToggleAutoDispatch={(next) => void toggleAutoDispatch(next)}
+          onSaveMemory={() => void saveWorkspaceMemory()}
+          onPauseAction={(action) => void handlePauseAction(action)}
+          onMarkDispatchDone={(id) => void handleMarkDispatchDone(id)}
+          onSyncPatch={handleSyncPatch}
+          wsMemorySaving={wsMemorySaving}
+        />
+      ) : null}
 
       {trashOpen && (
         <div

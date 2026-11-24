@@ -289,12 +289,18 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   }
 
   const toDispatch = [...instructions, ...reportRequests];
+
+  // 防競態：AI 思考期間使用者可能已按暫停，寫入前重讀 pauseState / autoDispatch
+  const freshSession = await getStrategySession(auth.user.id, sessionId);
+  const shouldAutoDispatch =
+    (freshSession?.pauseState ?? "none") === "none" && Boolean(freshSession?.autoDispatch);
+
   const dispatchIds = toDispatch.length
     ? await addDispatchItems({
         userId: auth.user.id,
         sessionId,
         items: toDispatch,
-        dispatched: session.autoDispatch,
+        dispatched: shouldAutoDispatch,
       })
     : [];
 
@@ -309,7 +315,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     contextChars: contextBlock.length,
     summary,
     roomQueries: nextQueryResults.map((r) => ({ roomId: r.roomId, roomName: r.roomName, question: r.question })),
-    autoDispatch: session.autoDispatch,
+    autoDispatch: shouldAutoDispatch,
+    pauseState: freshSession?.pauseState ?? "none",
     dispatchIds,
   };
 
@@ -322,8 +329,12 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   });
   await updateStrategySession(auth.user.id, sessionId, {
     status: nextStatus,
-    ...(session.autoDispatch ? { pendingInstructions: toDispatch } : {}),
-    meta: { ...session.meta, dossier: nextDossier, roomQueryResults: nextQueryResults },
+    ...(shouldAutoDispatch ? { pendingInstructions: toDispatch } : {}),
+    meta: {
+      ...(freshSession?.meta ?? session.meta),
+      dossier: nextDossier,
+      roomQueryResults: nextQueryResults,
+    },
     model: model.id,
     summary,
   });
