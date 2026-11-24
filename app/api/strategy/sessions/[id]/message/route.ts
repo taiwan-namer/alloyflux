@@ -1,8 +1,8 @@
 import { cloudDbProxy } from "@/lib/cloud-api";
 import { NoSourceError, routeChat } from "@/lib/gateway";
-import { findModel } from "@/lib/models";
+import { findModel, type ModelInfo } from "@/lib/models";
 import { authenticateStrategyActor } from "@/lib/platform-api-auth";
-import type { ChatMessage } from "@/lib/providers";
+import { isAbortError, type ChatMessage } from "@/lib/providers";
 import {
   addUserMessage,
   balance,
@@ -10,12 +10,23 @@ import {
   settleAssistantMessage,
 } from "@/lib/store";
 import {
+  STRATEGY_STREAM_HEADERS,
+  StrategyJsonTailBuffer,
+  encodeNdjson,
+} from "@/lib/strategy-stream";
+import {
+  STRATEGY_STATE_DELIMITER,
+  getStrategyTemplate,
+  type StrategyTemplate,
+} from "@/lib/strategy-templates";
+import {
   addDispatchItems,
   addSessionMessage,
   buildWorkspaceBrief,
   ensureDefaultWorkspace,
   extractJsonObject,
   getStrategySession,
+  getStrategyWorkspace,
   listRunsForSession,
   listSessionDispatch,
   listSessionMessages,
@@ -23,9 +34,12 @@ import {
   mergeDossier,
   queryRoomContent,
   readDossier,
+  resolveSessionMembers,
   STRATEGY_LIMITS,
   STRATEGY_SESSION_STATUSES,
   updateStrategySession,
+  type SessionMember,
+  type StrategySession,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
 
@@ -33,50 +47,18 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
 const L = STRATEGY_LIMITS;
+const ADVISOR_BUDGET_MS = 180_000;
+const SOFT_DEADLINE_MS = 270_000;
 
-const SYSTEM = `你是 automax 量化策略「會議室」主導者。另一端是 Cursor（能在使用者電腦上讀檔、跑 Python、改程式、啟動 paper 測試）。
-策略方向、取捨與何時開跑由你決定；Cursor 負責執行你的指令並回報。
+type RoomQueryResult = { roomId: string; roomName: string; question: string; snippet: string };
 
-## 流程（phase）
-1. discovery：透過 Cursor 了解 automax 過往 A、B、C、D、E 各策略的規則與實績；再要求挖個別交易紀錄、K 線分析。
-2. designing：根據證據討論出新策略「F 方案」，來回修正。
-3. ready_to_run：F 定案。給出 fPlan（規則、參數、驗收指標）與給 Cursor 的實作／啟動指令，canStartRun=true。
-4. running：本機 24h paper 進行中（由 Cursor 標記）。
-5. collecting／reviewing：24h 結束後復盤；缺資料就下指令要。
-6. await_code：需要改程式。
-7. ready_next_run：復盤完成，允許開下一輪 24h（canStartRun=true）。
-
-## 資料量限制（很重要）
-- 平台每回合只看得到：你的策略檔案夾（dossier，≤${L.dossierMaxChars} 字）、最近的 Cursor 報告（合計 ≤${L.reportsInjectMaxChars} 字，單份 ≤${L.reportInjectEachMaxChars} 字）、最近幾則對話。更早的對話會被裁掉。
-- Cursor 單則訊息 ≤${L.messageMaxChars} 字；單份報告上傳 ≤${L.reportMaxChars} 字。
-- 因此：絕對不要要求 Cursor 貼原始 K 線、完整 fills、decision_trace 原檔。要指定「在本機分析後回傳彙總」：統計表、分組（標的／方向／時段／退出原因）、分佈、代表性樣本（≤10 筆）、結論。
-- 每個 reportRequest 必須寫清楚：資料來源、計算方式、輸出欄位、maxChars（建議 3000–8000）。
-- 重要結論一定要寫進 memoryUpdates，因為舊對話會被裁掉；dossier 是你唯一可靠的長期記憶。
-
-## 每次只輸出一個 JSON 物件
-{
-  "reply": "給使用者與 Cursor 的繁體中文說明",
-  "phase": "discovery|designing|ready_to_run|collecting|reviewing|await_code|ready_next_run",
-  "instructions": ["Cursor 要執行的具體動作"],
-  "reportRequests": [{"id": "r1", "title": "標題", "spec": "來源、方法、欄位", "maxChars": 6000}],
-  "memoryUpdates": {
-    "strategies": {"A": "一段摘要：規則重點＋實績＋問題"},
-    "findings": ["新發現"],
-    "decisions": ["已定案的決策"],
-    "fPlan": null
-  },
-  "canStartRun": false,
-  "openQuestions": ["未解問題"],
-  "summary": "本會議室目前的完整結論（≤${L.summaryMaxChars} 字）",
-  "roomQueries": [{"roomId": "sess_…", "question": "要查的問題"}]
-}
-規則：只限 paper／testnet，不建議實盤下單。引用數字要來自報告或 dossier，不可臆造。fPlan 未定案時給 null；定案時給完整物件（name、規則、參數、風控、驗收指標、比較基準）。
-
-## 主體與其他會議室
-- 同一個主體底下可能有多間會議室，各自討論不同主題。你會看到主體共用記憶與其他會議室的摘要。
-- summary：每回合都要給「本會議室目前結論」的完整最新版（會覆蓋舊的），寫給其他會議室和一般對話看：主題、已定案、關鍵數字、未解問題。
-- roomQueries：摘要不夠、需要另一間會議室的細節時才用（每回合最多 ${L.roomQueriesPerTurn} 個，不需要就給 []）。平台會在該會議室的對話、報告、dossier 中找出相關片段（≤${L.roomQueryMaxChars} 字），下一回合帶給你。
-- 發言者可能是 Cursor，也可能是使用者本人（網頁）；instructions 不一定會立刻派給 Cursor，使用者可能要先確認。`;
+type DoneBill = {
+  usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
+  officialCostPoints: number;
+  chargedPoints: number;
+  sourceId: string;
+  jobId?: string;
+};
 
 function budgetJoin(parts: string[], max: number): string {
   let out = "";
@@ -87,8 +69,6 @@ function budgetJoin(parts: string[], max: number): string {
   return out;
 }
 
-type RoomQueryResult = { roomId: string; roomName: string; question: string; snippet: string };
-
 function readRoomQueryResults(meta: Record<string, unknown>): RoomQueryResult[] {
   const raw = meta.roomQueryResults;
   if (!Array.isArray(raw)) return [];
@@ -97,66 +77,46 @@ function readRoomQueryResults(meta: Record<string, unknown>): RoomQueryResult[] 
   );
 }
 
-export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
-  const proxied = await cloudDbProxy(req);
-  if (proxied) return proxied;
-  const auth = await authenticateStrategyActor(req);
-  if (!auth) return Response.json({ error: "Unauthorized" }, { status: 401 });
-  const fromWeb = auth.via === "session";
+function limitsBlock(): string {
+  return `## 資料量限制（很重要）
+- 平台每回合只看得到：dossier（≤${L.dossierMaxChars} 字）、最近報告（合計 ≤${L.reportsInjectMaxChars} 字，單份 ≤${L.reportInjectEachMaxChars} 字）、最近幾則對話。
+- Cursor 單則訊息 ≤${L.messageMaxChars} 字；單份報告 ≤${L.reportMaxChars} 字。
+- 不要要求貼原始 K 線／完整 fills／decision_trace；只要本機彙總。
+- 重要結論寫進 memoryUpdates；summary ≤${L.summaryMaxChars} 字；roomQueries 每回合最多 ${L.roomQueriesPerTurn} 個。`;
+}
 
-  const { id: sessionId } = await ctx.params;
-  let session = await getStrategySession(auth.user.id, sessionId);
-  if (!session) return Response.json({ error: "Not found" }, { status: 404 });
-  if (!session.workspaceId) {
-    await ensureDefaultWorkspace(auth.user.id);
-    session = (await getStrategySession(auth.user.id, sessionId))!;
-  }
-  if (session.status === "closed") {
-    return Response.json({ error: "Session closed" }, { status: 409 });
-  }
+function jsonOnlySystem(template: StrategyTemplate): string {
+  return `${template.systemPrompt}\n\n${limitsBlock()}`;
+}
 
-  const body = (await req.json().catch(() => ({}))) as { content?: string; model?: string };
-  const content = (body.content || "").trim();
-  if (!content) return Response.json({ error: "content required" }, { status: 400 });
-  if (content.length > L.messageMaxChars) {
-    return Response.json(
-      {
-        error: `訊息 ${content.length} 字，超過上限 ${L.messageMaxChars} 字；長內容請改用報告上傳（/report）`,
-        limits: L,
-      },
-      { status: 413 },
-    );
-  }
+function streamLeadSystem(template: StrategyTemplate): string {
+  return `${template.streamLeadPreface}
 
-  if ((await balance(auth.user.id)) <= 0) {
-    return Response.json({ error: "Insufficient credits" }, { status: 402 });
-  }
+${limitsBlock()}
 
-  const modelId = body.model || session.model || "gemini-4-neon-high";
-  const model = findModel(modelId);
-  if (!model) {
-    return Response.json({ error: `Unknown model: ${modelId}` }, { status: 400 });
-  }
+結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, roomQueries。
+分隔標記必須單獨一行：${STRATEGY_STATE_DELIMITER}`;
+}
 
-  await addSessionMessage({
-    sessionId,
-    userId: auth.user.id,
-    role: "user",
-    content,
-    structured: { source: fromWeb ? "web" : "cursor" },
-  });
+function advisorSystem(label: string): string {
+  return `你是會議室顧問「${label}」。用繁體中文給出精簡審查意見（風險、漏洞、可執行建議）。只要純文字，不要 JSON、不要程式碼圍欄、不要分隔標記。控制在 400 字內。`;
+}
 
+async function buildContextBlock(
+  authUserId: string,
+  session: StrategySession,
+  fromWeb: boolean,
+): Promise<{ contextBlock: string; dossier: ReturnType<typeof readDossier> }> {
   const dossier = readDossier(session.meta);
-  const history = await listSessionMessages(auth.user.id, sessionId, L.historyMessages);
-  const reports = await listSessionReports(auth.user.id, sessionId, 30);
-  const runs = await listRunsForSession(auth.user.id, sessionId, 3);
-  const { text: workspaceBrief } = await buildWorkspaceBrief(auth.user.id, session.workspaceId, {
-    excludeSessionId: sessionId,
+  const reports = await listSessionReports(authUserId, session.id, 30);
+  const runs = await listRunsForSession(authUserId, session.id, 3);
+  const { text: workspaceBrief } = await buildWorkspaceBrief(authUserId, session.workspaceId, {
+    excludeSessionId: session.id,
   });
   const queryResults = readRoomQueryResults(session.meta);
   const awaitingApproval = session.autoDispatch
     ? []
-    : (await listSessionDispatch(auth.user.id, sessionId, 50)).filter((d) => d.status === "pending");
+    : (await listSessionDispatch(authUserId, session.id, 50)).filter((d) => d.status === "pending");
 
   const reportIndex = reports
     .map((r) => `- ${r.id}${r.requestId ? ` [${r.requestId}]` : ""}：${r.title}（${r.chars} 字）`)
@@ -178,7 +138,6 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     ),
     L.runsInjectMaxChars,
   );
-
   const queryBodies = queryResults
     .map((q) => `\n### 查詢 ${q.roomName}（${q.roomId}）：${q.question}\n${q.snippet}\n`)
     .join("");
@@ -196,67 +155,47 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     reports.length ? `## 已收到的報告索引\n${reportIndex}` : "## 尚未收到任何報告",
     reportBodies ? `## 最近報告內容${reportBodies}` : "",
     runBodies ? `## 已掛載 run${runBodies}` : "",
+    `## 發言來源提示\n本回合訊息來自：${fromWeb ? "使用者（網頁）" : "Cursor"}`,
   ]
     .filter(Boolean)
     .join("\n\n");
 
+  return { contextBlock, dossier };
+}
+
+async function buildUpstream(
+  authUserId: string,
+  sessionId: string,
+  contextBlock: string,
+  content: string,
+  includeCurrentUserInHistory: boolean,
+): Promise<ChatMessage[]> {
+  const history = await listSessionMessages(authUserId, sessionId, L.historyMessages);
   const upstream: ChatMessage[] = history
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-  while (upstream.length && upstream[0].role !== "user") upstream.shift();
-  const last = upstream[upstream.length - 1];
-  if (last?.role === "user") {
-    last.content = `${contextBlock}\n\n---\n# ${fromWeb ? "使用者（網頁）" : "Cursor"} 本回合訊息\n${last.content}`;
-  }
+  while (upstream.length && upstream[0]!.role !== "user") upstream.shift();
 
-  const convId = await createConversation(auth.user.id, `strategy-session ${session.name}`, model.id, {
-    hidden: true,
-  });
-  await addUserMessage(convId, content, model.id);
-
-  let answer = "";
-  let doneEv: {
-    usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number };
-    officialCostPoints: number;
-    chargedPoints: number;
-    sourceId: string;
-    jobId?: string;
-  } | null = null;
-
-  try {
-    for await (const ev of routeChat(model, upstream, auth.user.id, req.signal, undefined, SYSTEM)) {
-      if (ev.type === "text") answer += ev.text;
-      if (ev.type === "done") {
-        doneEv = {
-          usage: ev.usage,
-          officialCostPoints: ev.officialCostPoints,
-          chargedPoints: ev.chargedPoints,
-          sourceId: ev.sourceId,
-          jobId: ev.jobId,
-        };
-      }
+  if (includeCurrentUserInHistory) {
+    const last = upstream[upstream.length - 1];
+    if (last?.role === "user") {
+      last.content = `${contextBlock}\n\n---\n# 本回合訊息\n${last.content}`;
     }
-  } catch (e) {
-    const status = e instanceof NoSourceError ? 503 : 500;
-    return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status });
-  }
-
-  if (doneEv) {
-    await settleAssistantMessage({
-      userId: auth.user.id,
-      conversationId: convId,
-      content: answer,
-      model: model.id,
-      sourceId: doneEv.sourceId,
-      inputTokens: doneEv.usage.inputTokens,
-      cachedInputTokens: doneEv.usage.cachedInputTokens,
-      outputTokens: doneEv.usage.outputTokens,
-      officialCostPoints: doneEv.officialCostPoints,
-      chargedPoints: doneEv.chargedPoints,
-      jobId: doneEv.jobId,
+  } else {
+    upstream.push({
+      role: "user",
+      content: `${contextBlock}\n\n---\n# 本回合訊息\n${content}`,
     });
   }
+  return upstream;
+}
 
+function parseAssistantStructured(
+  answer: string,
+  session: StrategySession,
+  dossier: ReturnType<typeof readDossier>,
+  contextChars: number,
+) {
   const parsed = extractJsonObject(answer) || {};
   const reply =
     typeof parsed.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : answer.slice(0, 4000);
@@ -277,68 +216,654 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
 
   const nextDossier = mergeDossier(dossier, parsed.memoryUpdates);
   const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
-
-  const nextQueryResults: RoomQueryResult[] = [];
   const roomQueries = Array.isArray(parsed.roomQueries) ? parsed.roomQueries.slice(0, L.roomQueriesPerTurn) : [];
-  for (const q of roomQueries) {
-    if (!q || typeof q !== "object") continue;
-    const { roomId, question } = q as { roomId?: unknown; question?: unknown };
-    if (typeof roomId !== "string" || typeof question !== "string" || !question.trim()) continue;
-    const hit = await queryRoomContent(auth.user.id, session, roomId.trim(), question.trim());
-    if (hit) nextQueryResults.push(hit);
+
+  return {
+    parsed,
+    reply,
+    instructions,
+    reportRequests,
+    openQuestions,
+    nextStatus,
+    nextDossier,
+    summary,
+    roomQueries,
+    contextChars,
+  };
+}
+
+async function resolveTemplateForSession(userId: string, session: StrategySession): Promise<StrategyTemplate> {
+  if (session.templateId) return getStrategyTemplate(session.templateId);
+  if (session.workspaceId) {
+    const ws = await getStrategyWorkspace(userId, session.workspaceId);
+    if (ws?.templateId) return getStrategyTemplate(ws.templateId);
+  }
+  return getStrategyTemplate("automax");
+}
+
+export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
+  const auth = await authenticateStrategyActor(req);
+  if (!auth) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const fromWeb = auth.via === "session";
+
+  const { id: sessionId } = await ctx.params;
+  let session = await getStrategySession(auth.user.id, sessionId);
+  if (!session) return Response.json({ error: "Not found" }, { status: 404 });
+  if (!session.workspaceId) {
+    await ensureDefaultWorkspace(auth.user.id);
+    session = (await getStrategySession(auth.user.id, sessionId))!;
+  }
+  if (session.status === "closed") {
+    return Response.json({ error: "Session closed" }, { status: 409 });
   }
 
-  const toDispatch = [...instructions, ...reportRequests];
+  const body = (await req.json().catch(() => ({}))) as {
+    content?: string;
+    model?: string;
+    stream?: boolean;
+  };
+  const content = (body.content || "").trim();
+  if (!content) return Response.json({ error: "content required" }, { status: 400 });
+  if (content.length > L.messageMaxChars) {
+    return Response.json(
+      {
+        error: `訊息 ${content.length} 字，超過上限 ${L.messageMaxChars} 字；長內容請改用報告上傳（/report）`,
+        limits: L,
+      },
+      { status: 413 },
+    );
+  }
 
-  // 防競態：AI 思考期間使用者可能已按暫停，寫入前重讀 pauseState / autoDispatch
-  const freshSession = await getStrategySession(auth.user.id, sessionId);
+  if ((await balance(auth.user.id)) <= 0) {
+    return Response.json({ error: "Insufficient credits" }, { status: 402 });
+  }
+
+  const wantStream = body.stream === true;
+  const template = await resolveTemplateForSession(auth.user.id, session);
+  const members = resolveSessionMembers(session).map((m) => ({ ...m }));
+  if (body.model?.trim()) {
+    const lead = members.find((m) => m.role === "lead");
+    if (lead) lead.modelId = body.model.trim();
+  }
+
+  if (!wantStream) {
+    return handleJsonMode({
+      req,
+      authUserId: auth.user.id,
+      fromWeb,
+      session,
+      sessionId,
+      content,
+      template,
+      members,
+    });
+  }
+
+  return handleStreamMode({
+    req,
+    authUserId: auth.user.id,
+    fromWeb,
+    session,
+    sessionId,
+    content,
+    template,
+    members,
+  });
+}
+
+async function handleJsonMode(opts: {
+  req: Request;
+  authUserId: string;
+  fromWeb: boolean;
+  session: StrategySession;
+  sessionId: string;
+  content: string;
+  template: StrategyTemplate;
+  members: SessionMember[];
+}) {
+  const { req, authUserId, fromWeb, session, sessionId, content, template, members } = opts;
+  const lead = members.find((m) => m.role === "lead") ?? members[0]!;
+  const model = findModel(lead.modelId) || findModel("gemini-4-neon-high");
+  if (!model) return Response.json({ error: `Unknown model: ${lead.modelId}` }, { status: 400 });
+
+  await addSessionMessage({
+    sessionId,
+    userId: authUserId,
+    role: "user",
+    content,
+    structured: { source: fromWeb ? "web" : "cursor" },
+  });
+
+  const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb);
+  const upstream = await buildUpstream(authUserId, sessionId, contextBlock, content, true);
+
+  const convId = await createConversation(authUserId, `strategy-session ${session.name}`, model.id, {
+    hidden: true,
+  });
+  await addUserMessage(convId, content, model.id);
+
+  let answer = "";
+  let doneEv: DoneBill | null = null;
+  try {
+    for await (const ev of routeChat(
+      model,
+      upstream,
+      authUserId,
+      req.signal,
+      undefined,
+      jsonOnlySystem(template),
+    )) {
+      if (ev.type === "text") answer += ev.text;
+      if (ev.type === "done") {
+        doneEv = {
+          usage: ev.usage,
+          officialCostPoints: ev.officialCostPoints,
+          chargedPoints: ev.chargedPoints,
+          sourceId: ev.sourceId,
+          jobId: ev.jobId,
+        };
+      }
+    }
+  } catch (e) {
+    if (isAbortError(e) || req.signal.aborted) {
+      return Response.json({ error: "aborted", aborted: true }, { status: 499 });
+    }
+    const status = e instanceof NoSourceError ? 503 : 500;
+    return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status });
+  }
+
+  if (doneEv) {
+    await settleAssistantMessage({
+      userId: authUserId,
+      conversationId: convId,
+      content: answer,
+      model: model.id,
+      sourceId: doneEv.sourceId,
+      inputTokens: doneEv.usage.inputTokens,
+      cachedInputTokens: doneEv.usage.cachedInputTokens,
+      outputTokens: doneEv.usage.outputTokens,
+      officialCostPoints: doneEv.officialCostPoints,
+      chargedPoints: doneEv.chargedPoints,
+      jobId: doneEv.jobId,
+    });
+  }
+
+  const structured = await finalizeTurn({
+    authUserId,
+    session,
+    sessionId,
+    dossier,
+    contextChars: contextBlock.length,
+    answer,
+    leadModelId: model.id,
+    writeUser: false,
+    content,
+    fromWeb,
+    advisorTexts: [],
+  });
+
+  const updated = await getStrategySession(authUserId, sessionId);
+  return Response.json({ session: updated, assistant: structured, dossier: structured.nextDossier, limits: L });
+}
+
+async function finalizeTurn(input: {
+  authUserId: string;
+  session: StrategySession;
+  sessionId: string;
+  dossier: ReturnType<typeof readDossier>;
+  contextChars: number;
+  answer: string;
+  leadModelId: string;
+  writeUser: boolean;
+  content: string;
+  fromWeb: boolean;
+  advisorTexts: { member: SessionMember; text: string }[];
+  baseTs?: number;
+  skipMemoryAndDispatch?: boolean;
+}) {
+  const parsedPack = parseAssistantStructured(
+    input.answer,
+    input.session,
+    input.dossier,
+    input.contextChars,
+  );
+  const {
+    reply,
+    instructions,
+    reportRequests,
+    openQuestions,
+    nextStatus,
+    nextDossier,
+    summary,
+    roomQueries,
+  } = parsedPack;
+
+  const nextQueryResults: RoomQueryResult[] = [];
+  if (!input.skipMemoryAndDispatch) {
+    for (const q of roomQueries) {
+      if (!q || typeof q !== "object") continue;
+      const { roomId, question } = q as { roomId?: unknown; question?: unknown };
+      if (typeof roomId !== "string" || typeof question !== "string" || !question.trim()) continue;
+      const hit = await queryRoomContent(input.authUserId, input.session, roomId.trim(), question.trim());
+      if (hit) nextQueryResults.push(hit);
+    }
+  }
+
+  const toDispatch = input.skipMemoryAndDispatch ? [] : [...instructions, ...reportRequests];
+  const freshSession = await getStrategySession(input.authUserId, input.sessionId);
   const shouldAutoDispatch =
-    (freshSession?.pauseState ?? "none") === "none" && Boolean(freshSession?.autoDispatch);
+    !input.skipMemoryAndDispatch &&
+    (freshSession?.pauseState ?? "none") === "none" &&
+    Boolean(freshSession?.autoDispatch);
 
   const dispatchIds = toDispatch.length
     ? await addDispatchItems({
-        userId: auth.user.id,
-        sessionId,
+        userId: input.authUserId,
+        sessionId: input.sessionId,
         items: toDispatch,
         dispatched: shouldAutoDispatch,
       })
     : [];
 
+  const baseTs = input.baseTs ?? Date.now();
+  let idx = 0;
+  if (input.writeUser) {
+    await addSessionMessage({
+      sessionId: input.sessionId,
+      userId: input.authUserId,
+      role: "user",
+      content: input.content,
+      structured: { source: input.fromWeb ? "web" : "cursor" },
+      createdAt: baseTs + idx,
+    });
+    idx += 1;
+  }
+  for (const a of input.advisorTexts) {
+    await addSessionMessage({
+      sessionId: input.sessionId,
+      userId: input.authUserId,
+      role: "assistant",
+      content: a.text,
+      structured: { kind: "advisor" },
+      createdAt: baseTs + idx,
+      speakerModel: a.member.modelId,
+      speakerRole: a.member.role,
+      speakerLabel: a.member.label,
+    });
+    idx += 1;
+  }
+
   const structured = {
     reply,
     phase: nextStatus,
-    instructions,
-    reportRequests,
+    instructions: input.skipMemoryAndDispatch ? [] : instructions,
+    reportRequests: input.skipMemoryAndDispatch ? [] : reportRequests,
     openQuestions,
     canStartRun: nextStatus === "ready_to_run" || nextStatus === "ready_next_run",
-    fPlan: nextDossier.fPlan,
-    contextChars: contextBlock.length,
-    summary,
-    roomQueries: nextQueryResults.map((r) => ({ roomId: r.roomId, roomName: r.roomName, question: r.question })),
+    fPlan: input.skipMemoryAndDispatch ? input.dossier.fPlan : nextDossier.fPlan,
+    contextChars: input.contextChars,
+    summary: input.skipMemoryAndDispatch ? input.session.summary : summary,
+    roomQueries: nextQueryResults.map((r) => ({
+      roomId: r.roomId,
+      roomName: r.roomName,
+      question: r.question,
+    })),
     autoDispatch: shouldAutoDispatch,
     pauseState: freshSession?.pauseState ?? "none",
     dispatchIds,
+    nextDossier: input.skipMemoryAndDispatch ? input.dossier : nextDossier,
   };
 
   await addSessionMessage({
-    sessionId,
-    userId: auth.user.id,
+    sessionId: input.sessionId,
+    userId: input.authUserId,
     role: "assistant",
     content: reply,
     structured,
-  });
-  await updateStrategySession(auth.user.id, sessionId, {
-    status: nextStatus,
-    ...(shouldAutoDispatch ? { pendingInstructions: toDispatch } : {}),
-    meta: {
-      ...(freshSession?.meta ?? session.meta),
-      dossier: nextDossier,
-      roomQueryResults: nextQueryResults,
-    },
-    model: model.id,
-    summary,
+    createdAt: baseTs + idx,
+    speakerModel: input.leadModelId,
+    speakerRole: "lead",
+    speakerLabel: "主導",
   });
 
-  const updated = await getStrategySession(auth.user.id, sessionId);
-  return Response.json({ session: updated, assistant: structured, dossier: nextDossier, limits: L });
+  if (!input.skipMemoryAndDispatch) {
+    await updateStrategySession(input.authUserId, input.sessionId, {
+      status: nextStatus,
+      ...(shouldAutoDispatch ? { pendingInstructions: toDispatch } : {}),
+      meta: {
+        ...(freshSession?.meta ?? input.session.meta),
+        dossier: nextDossier,
+        roomQueryResults: nextQueryResults,
+      },
+      model: input.leadModelId,
+      summary,
+    });
+  } else {
+    await updateStrategySession(input.authUserId, input.sessionId, {
+      model: input.leadModelId,
+    });
+  }
+
+  return structured;
+}
+
+async function handleStreamMode(opts: {
+  req: Request;
+  authUserId: string;
+  fromWeb: boolean;
+  session: StrategySession;
+  sessionId: string;
+  content: string;
+  template: StrategyTemplate;
+  members: SessionMember[];
+}) {
+  const { req, authUserId, fromWeb, session, sessionId, content, template, members } = opts;
+  const leadMember = members.find((m) => m.role === "lead") ?? members[0]!;
+  const advisors = members.filter((m) => m.role !== "lead");
+  const leadModel = findModel(leadMember.modelId) || findModel("gemini-4-neon-high");
+  if (!leadModel) {
+    return Response.json({ error: `Unknown model: ${leadMember.modelId}` }, { status: 400 });
+  }
+
+  const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb);
+  const upstreamBase = await buildUpstream(authUserId, sessionId, contextBlock, content, false);
+
+  const startedAt = Date.now();
+  const encoder = encodeNdjson;
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (obj: unknown) => {
+        try {
+          controller.enqueue(encoder(obj));
+        } catch {
+          /* client gone */
+        }
+      };
+
+      let hiddenConvId: string | null = null;
+      const advisorTexts: { member: SessionMember; text: string }[] = [];
+      let leadAnswer = "";
+      let aborted = false;
+      let softTimeout = false;
+
+      const ensureHiddenConv = async (modelId: string) => {
+        if (hiddenConvId) return hiddenConvId;
+        hiddenConvId = await createConversation(
+          authUserId,
+          `strategy-session ${session.name}`,
+          modelId,
+          { hidden: true },
+        );
+        return hiddenConvId;
+      };
+
+      const settle = async (model: ModelInfo, text: string, done: DoneBill) => {
+        const convId = await ensureHiddenConv(model.id);
+        await settleAssistantMessage({
+          userId: authUserId,
+          conversationId: convId,
+          content: text,
+          model: model.id,
+          sourceId: done.sourceId,
+          inputTokens: done.usage.inputTokens,
+          cachedInputTokens: done.usage.cachedInputTokens,
+          outputTokens: done.usage.outputTokens,
+          officialCostPoints: done.officialCostPoints,
+          chargedPoints: done.chargedPoints,
+          jobId: done.jobId,
+        });
+      };
+
+      try {
+        // Advisors
+        for (const adv of advisors) {
+          if (req.signal.aborted) {
+            aborted = true;
+            break;
+          }
+          if (Date.now() - startedAt > ADVISOR_BUDGET_MS) {
+            send({
+              type: "notice",
+              message: "已超過 180 秒顧問預算，略過剩餘顧問，交由主導彙總",
+            });
+            break;
+          }
+          if ((await balance(authUserId)) <= 0) {
+            send({ type: "notice", message: "餘額不足，略過剩餘顧問" });
+            break;
+          }
+          const advModel = findModel(adv.modelId);
+          if (!advModel) {
+            send({ type: "notice", message: `略過未知模型 ${adv.modelId}` });
+            continue;
+          }
+
+          send({
+            type: "member_start",
+            role: adv.role,
+            modelId: adv.modelId,
+            label: adv.label,
+          });
+
+          let text = "";
+          let doneEv: DoneBill | null = null;
+          const advUpstream: ChatMessage[] = [
+            ...upstreamBase,
+            {
+              role: "user",
+              content: `請針對上一則使用者訊息與脈絡，以「${adv.label}」視角給出審查意見。`,
+            },
+          ];
+          try {
+            for await (const ev of routeChat(
+              advModel,
+              advUpstream,
+              authUserId,
+              req.signal,
+              undefined,
+              advisorSystem(adv.label),
+            )) {
+              if (ev.type === "thinking") send({ type: "thinking", text: ev.text, modelId: adv.modelId });
+              if (ev.type === "text") {
+                text += ev.text;
+                send({ type: "text", text: ev.text, modelId: adv.modelId, role: adv.role });
+              }
+              if (ev.type === "done") {
+                doneEv = {
+                  usage: ev.usage,
+                  officialCostPoints: ev.officialCostPoints,
+                  chargedPoints: ev.chargedPoints,
+                  sourceId: ev.sourceId,
+                  jobId: ev.jobId,
+                };
+              }
+            }
+          } catch (e) {
+            if (isAbortError(e) || req.signal.aborted) {
+              aborted = true;
+              break;
+            }
+            send({
+              type: "notice",
+              message: `顧問 ${adv.label} 失敗：${e instanceof Error ? e.message : String(e)}`,
+            });
+            continue;
+          }
+
+          if (aborted || req.signal.aborted) {
+            aborted = true;
+            break;
+          }
+          if (doneEv && text.trim()) {
+            await settle(advModel, text, doneEv);
+            advisorTexts.push({ member: adv, text: text.trim() });
+            send({ type: "member_done", role: adv.role, modelId: adv.modelId, label: adv.label });
+          }
+        }
+
+        if (aborted || req.signal.aborted) {
+          send({ type: "error", message: "aborted", aborted: true });
+          send({ type: "done", completionStatus: "failed", aborted: true });
+          controller.close();
+          return;
+        }
+
+        // Lead
+        send({
+          type: "member_start",
+          role: "lead",
+          modelId: leadModel.id,
+          label: leadMember.label,
+        });
+        send({ type: "stage", stage: "lead" });
+
+        const advisorDigest =
+          advisorTexts.length === 0
+            ? ""
+            : `\n\n## 本回合顧問意見\n${advisorTexts
+                .map((a) => `### ${a.member.label}（${a.member.modelId}）\n${a.text}`)
+                .join("\n\n")}`;
+
+        const leadUpstream: ChatMessage[] = upstreamBase.map((m, i) =>
+          i === upstreamBase.length - 1 && m.role === "user"
+            ? { role: "user", content: `${m.content}${advisorDigest}` }
+            : m,
+        );
+
+        const tail = new StrategyJsonTailBuffer(STRATEGY_STATE_DELIMITER);
+        let doneEv: DoneBill | null = null;
+
+        try {
+          for await (const ev of routeChat(
+            leadModel,
+            leadUpstream,
+            authUserId,
+            req.signal,
+            undefined,
+            streamLeadSystem(template),
+          )) {
+            if (Date.now() - startedAt > SOFT_DEADLINE_MS) {
+              softTimeout = true;
+              break;
+            }
+            if (ev.type === "thinking") send({ type: "thinking", text: ev.text, modelId: leadModel.id });
+            if (ev.type === "text") {
+              const visible = tail.push(ev.text);
+              if (visible) send({ type: "text", text: visible, modelId: leadModel.id, role: "lead" });
+            }
+            if (ev.type === "done") {
+              doneEv = {
+                usage: ev.usage,
+                officialCostPoints: ev.officialCostPoints,
+                chargedPoints: ev.chargedPoints,
+                sourceId: ev.sourceId,
+                jobId: ev.jobId,
+              };
+            }
+          }
+        } catch (e) {
+          if (isAbortError(e) || req.signal.aborted) {
+            aborted = true;
+          } else {
+            send({ type: "error", message: e instanceof Error ? e.message : String(e) });
+            send({ type: "done", completionStatus: "failed" });
+            controller.close();
+            return;
+          }
+        }
+
+        const flushed = tail.flushVisible();
+        if (flushed) send({ type: "text", text: flushed, modelId: leadModel.id, role: "lead" });
+
+        if (aborted || req.signal.aborted) {
+          send({ type: "error", message: "aborted", aborted: true });
+          send({ type: "done", completionStatus: "failed", aborted: true });
+          controller.close();
+          return;
+        }
+
+        const visibleText = tail.getVisibleText();
+        const jsonRaw = tail.getJsonRaw();
+        leadAnswer = jsonRaw || visibleText;
+        // Prefer combining: if we have visible + json, extractJsonObject on jsonRaw; reply fallback visible
+        if (visibleText && jsonRaw && jsonRaw !== visibleText) {
+          const parsed = extractJsonObject(jsonRaw);
+          if (parsed && typeof parsed.reply !== "string") {
+            parsed.reply = visibleText;
+            leadAnswer = JSON.stringify(parsed);
+          } else if (!parsed) {
+            leadAnswer = `${visibleText}\n${STRATEGY_STATE_DELIMITER}\n${jsonRaw}`;
+          } else {
+            leadAnswer = jsonRaw;
+          }
+        } else if (visibleText && !extractJsonObject(jsonRaw || "")) {
+          leadAnswer = visibleText;
+        }
+
+        if (doneEv && (visibleText || jsonRaw)) {
+          await settle(leadModel, visibleText || jsonRaw, doneEv);
+        }
+
+        const skipMemory = softTimeout && !extractJsonObject(leadAnswer);
+        if (softTimeout) {
+          send({
+            type: "notice",
+            message: skipMemory
+              ? "已達 270 秒軟截止：僅保留純文字回覆，不更新記憶與派送"
+              : "已達 270 秒軟截止：盡力完成結構化收尾",
+          });
+        }
+
+        const structured = await finalizeTurn({
+          authUserId,
+          session,
+          sessionId,
+          dossier,
+          contextChars: contextBlock.length,
+          answer: leadAnswer || visibleText,
+          leadModelId: leadModel.id,
+          writeUser: true,
+          content,
+          fromWeb,
+          advisorTexts,
+          baseTs: Date.now(),
+          skipMemoryAndDispatch: skipMemory,
+        });
+
+        // 若有可見文字但 JSON reply 不同，確保前端已看過的文字與存檔一致
+        send({
+          type: "member_done",
+          role: "lead",
+          modelId: leadModel.id,
+          label: leadMember.label,
+        });
+        send({
+          type: "done",
+          completionStatus: softTimeout ? "degraded" : "ok",
+          assistant: {
+            reply: structured.reply,
+            phase: structured.phase,
+            dispatchIds: structured.dispatchIds,
+            pauseState: structured.pauseState,
+          },
+          limits: L,
+        });
+      } catch (e) {
+        if (isAbortError(e) || req.signal.aborted) {
+          send({ type: "error", message: "aborted", aborted: true });
+          send({ type: "done", completionStatus: "failed", aborted: true });
+        } else {
+          send({ type: "error", message: e instanceof Error ? e.message : String(e) });
+          send({ type: "done", completionStatus: "failed" });
+        }
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, { headers: STRATEGY_STREAM_HEADERS });
 }

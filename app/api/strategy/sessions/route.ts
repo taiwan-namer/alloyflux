@@ -3,8 +3,10 @@ import { authenticateStrategyActor, authenticateStrategyReader } from "@/lib/pla
 import {
   createStrategySession,
   listStrategySessions,
+  validateSessionModels,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
+import { isValidTemplateId } from "@/lib/strategy-templates";
 
 export const dynamic = "force-dynamic";
 
@@ -36,9 +38,20 @@ export async function POST(req: Request) {
       workspaceId?: string;
       topic?: string;
       autoDispatch?: boolean;
+      templateId?: string;
+      models?: unknown;
     };
     if (!body.name?.trim()) {
       return Response.json({ error: "name required" }, { status: 400 });
+    }
+    if (body.templateId != null && body.templateId !== "" && !isValidTemplateId(body.templateId)) {
+      return Response.json({ error: "unknown templateId" }, { status: 400 });
+    }
+    let models;
+    if (body.models !== undefined) {
+      const v = validateSessionModels(body.models);
+      if (!v.ok) return Response.json({ error: v.error }, { status: 400 });
+      models = v.models;
     }
     const created = await createStrategySession({
       userId: auth.user.id,
@@ -51,6 +64,8 @@ export async function POST(req: Request) {
       workspaceId: body.workspaceId,
       topic: body.topic,
       autoDispatch: typeof body.autoDispatch === "boolean" ? body.autoDispatch : !fromWeb,
+      templateId: body.templateId,
+      models,
     });
     return Response.json({ session: { id: created.id } });
   } catch (e) {

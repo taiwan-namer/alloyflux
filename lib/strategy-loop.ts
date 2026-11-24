@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./db";
+import { findModel } from "./models";
+import { isValidTemplateId } from "./strategy-templates";
 
 export type StrategyPlanStatus =
   | "pending_code"
@@ -196,6 +198,11 @@ async function createTables(): Promise<void> {
     `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary_updated_at BIGINT NOT NULL DEFAULT 0`,
     `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS auto_dispatch INT NOT NULL DEFAULT 1`,
     `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS pause_state TEXT NOT NULL DEFAULT 'none'`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS models_json TEXT`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS template_id TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_model TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_role TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_label TEXT`,
     `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_workspace
       ON strategy_sessions(workspace_id, updated_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_dispatch_items (
@@ -479,6 +486,65 @@ function safeJson<T>(raw: unknown, fallback: T): T {
   }
 }
 
+export type SessionMemberRole = "lead" | "critic" | "engineer" | "custom";
+
+export type SessionMember = {
+  modelId: string;
+  role: SessionMemberRole;
+  label: string;
+};
+
+const MEMBER_ROLES: SessionMemberRole[] = ["lead", "critic", "engineer", "custom"];
+
+export function parseSessionModels(raw: unknown): SessionMember[] | null {
+  if (raw == null || raw === "") return null;
+  const arr = typeof raw === "string" ? safeJson(raw, null as unknown) : raw;
+  if (!Array.isArray(arr) || arr.length === 0) return null;
+  return arr
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const o = item as Record<string, unknown>;
+      const modelId = String(o.modelId ?? "").trim();
+      const role = String(o.role ?? "custom") as SessionMemberRole;
+      if (!modelId || !MEMBER_ROLES.includes(role)) return null;
+      const label = clip(String(o.label ?? role).trim() || role, 80);
+      return { modelId, role, label } satisfies SessionMember;
+    })
+    .filter((m): m is SessionMember => !!m);
+}
+
+/** 驗證 1–4 位成員、剛好 1 位 lead、modelId 存在於目錄 */
+export function validateSessionModels(input: unknown): { ok: true; models: SessionMember[] } | { ok: false; error: string } {
+  if (!Array.isArray(input)) return { ok: false, error: "models must be an array" };
+  if (input.length < 1 || input.length > 4) return { ok: false, error: "models must have 1..4 members" };
+  const models: SessionMember[] = [];
+  for (const item of input) {
+    if (!item || typeof item !== "object") return { ok: false, error: "invalid member" };
+    const o = item as Record<string, unknown>;
+    const modelId = String(o.modelId ?? "").trim();
+    const role = String(o.role ?? "") as SessionMemberRole;
+    if (!MEMBER_ROLES.includes(role)) return { ok: false, error: `invalid role: ${role}` };
+    if (!findModel(modelId)) return { ok: false, error: `unknown modelId: ${modelId}` };
+    models.push({
+      modelId,
+      role,
+      label: clip(String(o.label ?? role).trim() || role, 80),
+    });
+  }
+  const leads = models.filter((m) => m.role === "lead");
+  if (leads.length !== 1) return { ok: false, error: "models must contain exactly one lead" };
+  return { ok: true, models };
+}
+
+export function resolveSessionMembers(session: {
+  models: SessionMember[] | null;
+  model: string;
+}): SessionMember[] {
+  if (session.models && session.models.length > 0) return session.models;
+  const modelId = session.model?.trim() || "gemini-4-neon-high";
+  return [{ modelId, role: "lead", label: "主導" }];
+}
+
 export async function createStrategySession(input: {
   userId: string;
   name: string;
@@ -490,6 +556,8 @@ export async function createStrategySession(input: {
   workspaceId?: string;
   topic?: string;
   autoDispatch?: boolean;
+  templateId?: string;
+  models?: SessionMember[];
 }): Promise<{ id: string }> {
   await ensureTables();
   const id = `sess_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
@@ -497,18 +565,25 @@ export async function createStrategySession(input: {
   const status =
     input.status && STRATEGY_SESSION_STATUSES.includes(input.status) ? input.status : "collecting";
   let workspaceId = input.workspaceId?.trim() || "";
+  let wsTemplate = "automax";
   if (workspaceId) {
     const ws = await getStrategyWorkspace(input.userId, workspaceId);
     if (!ws) throw new Error("workspace not found");
+    wsTemplate = ws.templateId || "automax";
   } else {
-    workspaceId = (await ensureDefaultWorkspace(input.userId)).id;
+    const ws = await ensureDefaultWorkspace(input.userId);
+    workspaceId = ws.id;
+    wsTemplate = ws.templateId || "automax";
   }
+  const templateId =
+    input.templateId && isValidTemplateId(input.templateId) ? input.templateId : wsTemplate;
+  const modelsJson = input.models && input.models.length ? JSON.stringify(input.models) : null;
   await db()
     .prepare(
       `INSERT INTO strategy_sessions
         (id, user_id, name, profile_id, strategy_version, status, model, pending_instructions_json, meta_json,
-         workspace_id, topic, auto_dispatch, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?)`,
+         workspace_id, topic, auto_dispatch, template_id, models_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -517,11 +592,13 @@ export async function createStrategySession(input: {
       input.profileId ?? "",
       input.strategyVersion ?? "",
       status,
-      input.model ?? "",
+      input.model ?? (input.models?.find((m) => m.role === "lead")?.modelId || ""),
       JSON.stringify(input.meta ?? {}),
       workspaceId,
       clip((input.topic ?? "").trim(), 500),
       input.autoDispatch === false ? 0 : 1,
+      templateId,
+      modelsJson,
       ts,
       ts,
     );
@@ -663,6 +740,8 @@ export async function updateStrategySession(
     summary?: string;
     autoDispatch?: boolean;
     pauseState?: PauseState;
+    models?: SessionMember[] | null;
+    templateId?: string | null;
   },
 ): Promise<boolean> {
   await ensureTables();
@@ -671,7 +750,9 @@ export async function updateStrategySession(
   const status = patch.status ?? cur.status;
   const pending = patch.pendingInstructions ?? cur.pendingInstructions;
   const meta = patch.meta ?? cur.meta;
-  const model = patch.model ?? cur.model;
+  const models = patch.models !== undefined ? patch.models : cur.models;
+  const leadModel = models?.find((m) => m.role === "lead")?.modelId;
+  const model = patch.model ?? leadModel ?? cur.model;
   const name = patch.name?.trim() ? clip(patch.name.trim(), 120) : cur.name;
   const topic = patch.topic !== undefined ? clip(patch.topic.trim(), 500) : cur.topic;
   const summaryChanged = patch.summary !== undefined && patch.summary.trim() !== "";
@@ -681,12 +762,19 @@ export async function updateStrategySession(
   const summaryAt = summaryChanged ? nowMs() : cur.summaryUpdatedAt;
   const autoDispatch = patch.autoDispatch ?? cur.autoDispatch;
   const pauseState = patch.pauseState !== undefined ? normalizePauseState(patch.pauseState) : cur.pauseState;
+  const templateId =
+    patch.templateId !== undefined
+      ? patch.templateId && isValidTemplateId(patch.templateId)
+        ? patch.templateId
+        : cur.templateId
+      : cur.templateId;
   const ts = nowMs();
   await db()
     .prepare(
       `UPDATE strategy_sessions
        SET status = ?, pending_instructions_json = ?, meta_json = ?, model = ?, name = ?, topic = ?,
            summary = ?, summary_updated_at = ?, auto_dispatch = ?, pause_state = ?,
+           models_json = ?, template_id = ?,
            updated_at = GREATEST(updated_at + 1, ?)
        WHERE id = ? AND user_id = ?`,
     )
@@ -701,6 +789,8 @@ export async function updateStrategySession(
       summaryAt,
       autoDispatch ? 1 : 0,
       pauseState,
+      models && models.length ? JSON.stringify(models) : null,
+      templateId,
       ts,
       sessionId,
       userId,
@@ -718,6 +808,8 @@ function mapSession(row: Record<string, unknown>) {
     strategyVersion: String(row.strategy_version ?? ""),
     status: String(row.status) as StrategySessionStatus,
     model: String(row.model ?? ""),
+    models: parseSessionModels(row.models_json),
+    templateId: row.template_id == null || row.template_id === "" ? null : String(row.template_id),
     pendingInstructions: safeJson(row.pending_instructions_json, [] as unknown[]),
     meta: safeJson(row.meta_json, {} as Record<string, unknown>),
     workspaceId: String(row.workspace_id ?? ""),
@@ -1249,14 +1341,19 @@ export async function addSessionMessage(input: {
   role: "user" | "assistant" | "system";
   content: string;
   structured?: Record<string, unknown>;
+  createdAt?: number;
+  speakerModel?: string | null;
+  speakerRole?: string | null;
+  speakerLabel?: string | null;
 }): Promise<{ id: string }> {
   await ensureTables();
   const id = `smsg_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
   await db()
     .prepare(
       `INSERT INTO strategy_session_messages
-        (id, session_id, user_id, role, content, structured_json, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (id, session_id, user_id, role, content, structured_json, created_at,
+         speaker_model, speaker_role, speaker_label)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -1265,7 +1362,10 @@ export async function addSessionMessage(input: {
       input.role,
       input.content,
       JSON.stringify(input.structured ?? {}),
-      nowMs(),
+      input.createdAt ?? nowMs(),
+      input.speakerModel ?? null,
+      input.speakerRole ?? null,
+      input.speakerLabel ?? null,
     );
   await touchSessionUpdatedAt(input.userId, input.sessionId);
   return { id };
@@ -1275,21 +1375,26 @@ export async function listSessionMessages(userId: string, sessionId: string, lim
   await ensureTables();
   const rows = (await db()
     .prepare(
-      `SELECT * FROM strategy_session_messages
-       WHERE session_id = ? AND user_id = ?
-       ORDER BY created_at DESC LIMIT ?`,
+      `SELECT * FROM (
+         SELECT * FROM strategy_session_messages
+         WHERE session_id = ? AND user_id = ?
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?
+       ) t
+       ORDER BY created_at ASC, id ASC`,
     )
     .all(sessionId, userId, Math.min(Math.max(limit, 1), 100))) as Record<string, unknown>[];
-  return rows
-    .map((row) => ({
-      id: String(row.id),
-      sessionId: String(row.session_id),
-      role: String(row.role) as "user" | "assistant" | "system",
-      content: String(row.content ?? ""),
-      structured: safeJson(row.structured_json, {} as Record<string, unknown>),
-      createdAt: Number(row.created_at),
-    }))
-    .reverse();
+  return rows.map((row) => ({
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    role: String(row.role) as "user" | "assistant" | "system",
+    content: String(row.content ?? ""),
+    structured: safeJson(row.structured_json, {} as Record<string, unknown>),
+    createdAt: Number(row.created_at),
+    speakerModel: row.speaker_model == null ? null : String(row.speaker_model),
+    speakerRole: row.speaker_role == null ? null : String(row.speaker_role),
+    speakerLabel: row.speaker_label == null ? null : String(row.speaker_label),
+  }));
 }
 
 export async function listRunsForSession(userId: string, sessionId: string, limit = 10) {

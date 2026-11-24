@@ -2,11 +2,75 @@ export type PauseState = "none" | "pausing" | "paused";
 export type PauseAction = "graceful_pause" | "force_pause" | "resume";
 export type ViewMode = "chat" | "strategy" | "split";
 
+export type StrategyMemberRole = "lead" | "critic" | "engineer" | "custom";
+
+export type StrategyMemberConfig = {
+  modelId: string;
+  role: StrategyMemberRole;
+  label: string;
+};
+
+export type StrategyTemplateInfo = {
+  id: string;
+  name: string;
+  description: string;
+  stages: string[];
+  quickPrompts: string[];
+  recommendedModels: StrategyMemberConfig[];
+};
+
+export type StrategyModelOption = {
+  id: string;
+  label: string;
+  familyId?: string;
+  familyLabel?: string;
+  provider?: string;
+  category?: string;
+  categoryLabel?: string;
+  tier?: "top" | "main" | "light";
+  available: boolean;
+  note?: string;
+};
+
+export type StrategyStreamEvent =
+  | { type: "member_start"; role?: string; modelId?: string; label?: string }
+  | { type: "thinking"; text: string; modelId?: string }
+  | { type: "text"; text: string; modelId?: string; role?: string }
+  | { type: "stage"; stage: string }
+  | { type: "member_done"; role?: string; modelId?: string; label?: string }
+  | { type: "notice"; message: string }
+  | { type: "error"; message: string; aborted?: boolean }
+  | {
+      type: "done";
+      completionStatus?: "ok" | "degraded" | "failed";
+      aborted?: boolean;
+      assistant?: {
+        reply?: string;
+        phase?: string;
+        dispatchIds?: string[];
+        pauseState?: PauseState;
+      };
+      limits?: unknown;
+    };
+
+export type StreamingMemberBubble = {
+  key: string;
+  role: string;
+  modelId: string;
+  label: string;
+  content: string;
+  thinking: string;
+  thinkingOpen: boolean;
+  done: boolean;
+};
+
 export interface StrategySessionBrief {
   id: string;
   name: string;
   status: string;
   model?: string;
+  models?: StrategyMemberConfig[] | null;
+  templateId?: string | null;
   topic?: string;
   summary?: string;
   autoDispatch?: boolean;
@@ -25,8 +89,11 @@ export interface StrategySessionMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  structured?: { source?: string };
+  structured?: { source?: string; kind?: string };
   createdAt: number;
+  speakerModel?: string | null;
+  speakerRole?: string | null;
+  speakerLabel?: string | null;
 }
 
 export interface StrategyDispatchItem {
@@ -104,6 +171,13 @@ export const PAUSE_STATE_LABEL: Record<PauseState, string> = {
   paused: "已暫停",
 };
 
+export const MEMBER_ROLE_LABEL: Record<StrategyMemberRole, string> = {
+  lead: "主導",
+  critic: "審查",
+  engineer: "工程",
+  custom: "顧問",
+};
+
 export function strategyStatusLabel(status: string): string {
   return STRATEGY_STATUS_LABEL[status] ?? status;
 }
@@ -117,4 +191,13 @@ export function dispatchText(instruction: unknown): string {
     }
   }
   return JSON.stringify(instruction);
+}
+
+export function speakerBadge(m: StrategySessionMessage): string {
+  if (m.role !== "assistant") return "";
+  if (m.speakerLabel) return m.speakerLabel;
+  if (m.speakerRole && m.speakerRole in MEMBER_ROLE_LABEL) {
+    return MEMBER_ROLE_LABEL[m.speakerRole as StrategyMemberRole];
+  }
+  return "會議室";
 }

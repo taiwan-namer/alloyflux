@@ -12,9 +12,11 @@ import {
   STRATEGY_LIMITS,
   STRATEGY_SESSION_STATUSES,
   updateStrategySession,
+  validateSessionModels,
   type PauseAction,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
+import { isValidTemplateId } from "@/lib/strategy-templates";
 
 export const dynamic = "force-dynamic";
 
@@ -66,6 +68,8 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     autoDispatch?: boolean;
     pauseAction?: string;
     pauseState?: unknown;
+    models?: unknown;
+    templateId?: string;
   };
 
   if (body.pauseState !== undefined) {
@@ -94,6 +98,16 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   if (body.status && !STRATEGY_SESSION_STATUSES.includes(body.status)) {
     return Response.json({ error: "Invalid status" }, { status: 400 });
   }
+
+  let modelsPatch: ReturnType<typeof validateSessionModels> | undefined;
+  if (body.models !== undefined) {
+    modelsPatch = validateSessionModels(body.models);
+    if (!modelsPatch.ok) return Response.json({ error: modelsPatch.error }, { status: 400 });
+  }
+  if (body.templateId !== undefined && body.templateId !== "" && !isValidTemplateId(body.templateId)) {
+    return Response.json({ error: "unknown templateId" }, { status: 400 });
+  }
+
   const patch =
     auth.via === "api_key"
       ? {
@@ -104,12 +118,16 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
           name: body.name,
           topic: body.topic,
           autoDispatch: body.autoDispatch,
+          models: modelsPatch?.ok ? modelsPatch.models : undefined,
+          templateId: typeof body.templateId === "string" ? body.templateId : undefined,
         }
       : {
           name: typeof body.name === "string" ? body.name : undefined,
           topic: typeof body.topic === "string" ? body.topic : undefined,
           autoDispatch: typeof body.autoDispatch === "boolean" ? body.autoDispatch : undefined,
           model: typeof body.model === "string" ? body.model : undefined,
+          models: modelsPatch?.ok ? modelsPatch.models : undefined,
+          templateId: typeof body.templateId === "string" ? body.templateId : undefined,
         };
   const ok = await updateStrategySession(auth.user.id, id, patch);
   if (!ok) return Response.json({ error: "Not found" }, { status: 404 });

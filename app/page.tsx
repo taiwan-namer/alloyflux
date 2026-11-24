@@ -19,8 +19,10 @@ import {
   strategyStatusLabel,
   type PauseAction,
   type StrategyDispatchItem,
+  type StrategyMemberConfig,
   type StrategySessionDetail,
   type StrategySyncResponse,
+  type StrategyTemplateInfo,
   type StrategyWorkspaceBrief,
   type ViewMode,
 } from "@/components/strategy-types";
@@ -1147,6 +1149,9 @@ export default function ChatPage() {
   const [newRoomWsId, setNewRoomWsId] = useState<string | null>(null);
   const [newRoomName, setNewRoomName] = useState("");
   const [newRoomTopic, setNewRoomTopic] = useState("");
+  const [newRoomTemplateId, setNewRoomTemplateId] = useState("automax");
+  const [strategyTemplates, setStrategyTemplates] = useState<StrategyTemplateInfo[]>([]);
+  const [strategyDefault3Ai, setStrategyDefault3Ai] = useState<StrategyMemberConfig[]>([]);
   const [strategyCreating, setStrategyCreating] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>("chat");
   const [canSplit, setCanSplit] = useState(false);
@@ -1311,6 +1316,21 @@ export default function ChatPage() {
     });
   }, []);
 
+  const refreshStrategyTemplates = useCallback(async () => {
+    try {
+      const res = await fetch("/api/strategy/templates", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        templates?: StrategyTemplateInfo[];
+        default3AiPreset?: StrategyMemberConfig[];
+      };
+      if (Array.isArray(data.templates)) setStrategyTemplates(data.templates);
+      if (Array.isArray(data.default3AiPreset)) setStrategyDefault3Ai(data.default3AiPreset);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   const refreshMe = useCallback(async () => {
     setAuthLoading(true);
     const ac = new AbortController();
@@ -1350,6 +1370,10 @@ export default function ChatPage() {
     void refreshMe();
     void refreshModels();
   }, [refreshMe, refreshModels]);
+
+  useEffect(() => {
+    if (authUser) void refreshStrategyTemplates();
+  }, [authUser, refreshStrategyTemplates]);
 
   useEffect(() => {
     if (authLoading) return;
@@ -1702,13 +1726,19 @@ export default function ChatPage() {
       const res = await fetch("/api/strategy/sessions", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name, topic: newRoomTopic.trim(), workspaceId }),
+        body: JSON.stringify({
+          name,
+          topic: newRoomTopic.trim(),
+          workspaceId,
+          templateId: newRoomTemplateId || undefined,
+        }),
       });
       const data = (await res.json().catch(() => ({}))) as { session?: { id: string } };
       if (res.ok && data.session?.id) {
         setNewRoomWsId(null);
         setNewRoomName("");
         setNewRoomTopic("");
+        setNewRoomTemplateId("automax");
         await refreshStrategySessions();
         await openStrategySession(data.session.id);
       }
@@ -1717,28 +1747,21 @@ export default function ChatPage() {
     }
   }
 
-  async function sendStrategyMessage() {
+  async function patchStrategySessionMeta(patch: {
+    models?: StrategyMemberConfig[];
+    templateId?: string;
+  }): Promise<boolean> {
     const sessionId = strategyDetail?.session.id;
-    const content = strategyDraft.trim();
-    if (!sessionId || !content || strategySending) return;
-    setStrategySending(true);
-    setStrategyError(null);
-    try {
-      const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sessionId)}/message`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ content }),
-      });
-      const data = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        setStrategyError(data.error || "送出失敗");
-        return;
-      }
-      setStrategyDraft("");
-      await Promise.all([openStrategySession(sessionId), refreshStrategySessions(), refreshWallet()]);
-    } finally {
-      setStrategySending(false);
-    }
+    if (!sessionId) return false;
+    const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) return false;
+    await openStrategySession(sessionId);
+    await refreshStrategySessions();
+    return true;
   }
 
   async function decideDispatch(action: "dispatch" | "reject") {
@@ -2713,6 +2736,7 @@ export default function ChatPage() {
                         setNewRoomWsId(newRoomWsId === ws.id ? null : ws.id);
                         setNewRoomName("");
                         setNewRoomTopic("");
+                        setNewRoomTemplateId("automax");
                       }}
                     >
                       ＋
@@ -2739,6 +2763,19 @@ export default function ChatPage() {
                         placeholder="討論主題（選填）"
                         onChange={(e) => setNewRoomTopic(e.target.value)}
                       />
+                      {strategyTemplates.length > 0 ? (
+                        <select
+                          value={newRoomTemplateId}
+                          onChange={(e) => setNewRoomTemplateId(e.target.value)}
+                          aria-label="SOP 範本"
+                        >
+                          {strategyTemplates.map((t) => (
+                            <option key={t.id} value={t.id}>
+                              {t.name}
+                            </option>
+                          ))}
+                        </select>
+                      ) : null}
                       <div className="row" style={{ gap: 6 }}>
                         <button type="submit" disabled={!newRoomName.trim() || strategyCreating}>
                           開會議室
@@ -3463,24 +3500,35 @@ export default function ChatPage() {
             setWsMemoryDirty(true);
           }}
           wsMemoryDirty={wsMemoryDirty}
-          sending={strategySending}
           busy={strategyBusy}
           error={strategyError}
+          onError={setStrategyError}
           canSplit={canSplit}
           viewMode={viewMode}
+          models={models}
+          templates={strategyTemplates}
+          default3AiPreset={strategyDefault3Ai}
           onToggleSplit={() => setViewMode((m) => (m === "split" ? "strategy" : "split"))}
           onBackToChat={() => setViewMode("chat")}
           onOpenSidebar={() => setSidebarOpen(true)}
-          onSend={() => void sendStrategyMessage()}
           onRefresh={() => {
             if (strategyDetail?.session.id) void openStrategySession(strategyDetail.session.id);
           }}
+          onStreamCommitted={async (sid) => {
+            await openStrategySession(sid);
+            await refreshStrategySessions();
+          }}
+          onRefreshWallet={() => {
+            void refreshWallet();
+          }}
+          onStreamingChange={setStrategySending}
           onDecideDispatch={(action) => void decideDispatch(action)}
           onToggleAutoDispatch={(next) => void toggleAutoDispatch(next)}
           onSaveMemory={() => void saveWorkspaceMemory()}
           onPauseAction={(action) => void handlePauseAction(action)}
           onMarkDispatchDone={(id) => void handleMarkDispatchDone(id)}
           onSyncPatch={handleSyncPatch}
+          onPatchSessionMeta={patchStrategySessionMeta}
           wsMemorySaving={wsMemorySaving}
         />
       ) : null}

@@ -3,13 +3,21 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import {
   DISPATCH_STATUS_LABEL,
+  MEMBER_ROLE_LABEL,
   PAUSE_STATE_LABEL,
   dispatchText,
+  speakerBadge,
   strategyStatusLabel,
   type PauseAction,
   type StrategyDispatchItem,
+  type StrategyMemberConfig,
+  type StrategyMemberRole,
+  type StrategyModelOption,
   type StrategySessionDetail,
+  type StrategyStreamEvent,
   type StrategySyncResponse,
+  type StrategyTemplateInfo,
+  type StreamingMemberBubble,
   type ViewMode,
 } from "@/components/strategy-types";
 
@@ -22,22 +30,31 @@ export type StrategyRoomViewProps = {
   wsMemoryDraft: string;
   onWsMemoryChange: (v: string) => void;
   wsMemoryDirty: boolean;
-  sending: boolean;
   busy: boolean;
   error: string | null;
+  onError: (msg: string | null) => void;
   canSplit: boolean;
   viewMode: ViewMode;
+  models: StrategyModelOption[];
+  templates: StrategyTemplateInfo[];
+  default3AiPreset: StrategyMemberConfig[];
   onToggleSplit: () => void;
   onBackToChat: () => void;
   onOpenSidebar: () => void;
-  onSend: () => void;
   onRefresh: () => void;
+  onStreamCommitted: (sessionId: string) => Promise<void>;
+  onRefreshWallet: () => void;
+  onStreamingChange: (streaming: boolean) => void;
   onDecideDispatch: (action: "dispatch" | "reject") => void;
   onToggleAutoDispatch: (next: boolean) => void;
   onSaveMemory: () => void;
   onPauseAction: (action: PauseAction) => void;
   onMarkDispatchDone: (dispatchId: string) => void;
   onSyncPatch: (data: Extract<StrategySyncResponse, { changed: true }>) => void;
+  onPatchSessionMeta: (patch: {
+    models?: StrategyMemberConfig[];
+    templateId?: string;
+  }) => Promise<boolean>;
   wsMemorySaving?: boolean;
 };
 
@@ -50,32 +67,50 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     onDispatchSelectedChange,
     wsMemoryDraft,
     onWsMemoryChange,
-    sending,
     busy,
     error,
+    onError,
     canSplit,
     viewMode,
+    models,
+    templates,
+    default3AiPreset,
     onToggleSplit,
     onBackToChat,
     onOpenSidebar,
-    onSend,
     onRefresh,
+    onStreamCommitted,
+    onRefreshWallet,
+    onStreamingChange,
     onDecideDispatch,
     onToggleAutoDispatch,
     onSaveMemory,
     onPauseAction,
     onMarkDispatchDone,
     onSyncPatch,
+    onPatchSessionMeta,
     wsMemorySaving,
   } = props;
 
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [streaming, setStreaming] = useState(false);
+  const [pendingUser, setPendingUser] = useState<string | null>(null);
+  const [streamBubbles, setStreamBubbles] = useState<StreamingMemberBubble[]>([]);
+  const [notices, setNotices] = useState<string[]>([]);
+  const [degradedHint, setDegradedHint] = useState(false);
+  const [memberDraft, setMemberDraft] = useState<StrategyMemberConfig[]>([]);
+  const [templateDraft, setTemplateDraft] = useState("");
+  const [metaSaving, setMetaSaving] = useState(false);
+
   const roomScrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const syncAbortRef = useRef<AbortController | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const abortReasonRef = useRef<"user" | "switch" | null>(null);
   const lastUpdatedAtRef = useRef(detail.session.updatedAt || 0);
   const sessionIdRef = useRef(detail.session.id);
-  const sendingRef = useRef(sending);
+  const streamingRef = useRef(false);
   const onSyncPatchRef = useRef(onSyncPatch);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -85,19 +120,58 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const dispatchedCount = detail.dispatch.filter((d) => d.status === "dispatched").length;
   const sessionId = detail.session.id;
 
-  sendingRef.current = sending;
+  const activeTemplateId =
+    templateDraft ||
+    detail.session.templateId ||
+    templates.find((t) => t.id === "automax")?.id ||
+    templates[0]?.id ||
+    "automax";
+  const activeTemplate = templates.find((t) => t.id === activeTemplateId) ?? templates[0];
+
+  streamingRef.current = streaming;
   onSyncPatchRef.current = onSyncPatch;
 
   useEffect(() => {
+    onStreamingChange(streaming);
+  }, [streaming, onStreamingChange]);
+
+  useEffect(() => {
+    const prev = sessionIdRef.current;
+    if (prev !== detail.session.id) {
+      abortReasonRef.current = "switch";
+      streamAbortRef.current?.abort();
+      streamAbortRef.current = null;
+      setStreaming(false);
+      setPendingUser(null);
+      setStreamBubbles([]);
+      setNotices([]);
+      setDegradedHint(false);
+      setSettingsOpen(false);
+    }
     sessionIdRef.current = detail.session.id;
     lastUpdatedAtRef.current = detail.session.updatedAt || 0;
   }, [detail.session.id, detail.session.updatedAt]);
 
   useEffect(() => {
+    const modelsCfg =
+      detail.session.models && detail.session.models.length > 0
+        ? detail.session.models.map((m) => ({ ...m }))
+        : [
+            {
+              modelId: detail.session.model || "gemini-4-neon-high",
+              role: "lead" as const,
+              label: "主導",
+            },
+          ];
+    setMemberDraft(modelsCfg);
+    setTemplateDraft(detail.session.templateId || "");
+  }, [detail.session.id, detail.session.models, detail.session.model, detail.session.templateId]);
+
+  useEffect(() => {
     const el = roomScrollRef.current;
     if (!el || !stickToBottomRef.current) return;
     el.scrollTop = el.scrollHeight;
-  }, [detail.messages.length, sending]);
+  }, [detail.messages.length, streaming, pendingUser, streamBubbles, notices]);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -112,7 +186,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
     async function pull(force = false) {
       if (cancelled) return;
-      if (!force && (document.visibilityState === "hidden" || sendingRef.current)) return;
+      if (!force && (document.visibilityState === "hidden" || streamingRef.current)) return;
 
       syncAbortRef.current?.abort();
       const ac = new AbortController();
@@ -133,7 +207,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
           return;
         }
         if (sid !== sessionIdRef.current) return;
-        if (sendingRef.current) return;
+        if (streamingRef.current) return;
         if (data.updatedAt < lastUpdatedAtRef.current) return;
         lastUpdatedAtRef.current = data.updatedAt;
         onSyncPatchRef.current(data);
@@ -153,6 +227,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVis);
       syncAbortRef.current?.abort();
+      abortReasonRef.current = "switch";
+      streamAbortRef.current?.abort();
     };
   }, [sessionId]);
 
@@ -160,13 +236,227 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const el = roomScrollRef.current;
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickToBottomRef.current = dist < 96;
+    stickToBottomRef.current = dist < 60;
+  }
+
+  function stopGeneration() {
+    abortReasonRef.current = "user";
+    streamAbortRef.current?.abort();
+  }
+
+  async function sendStream(text: string) {
+    const sid = sessionId;
+    const content = text.trim();
+    if (!content || streaming || detail.session.status === "closed") return;
+
+    onError(null);
+    setDegradedHint(false);
+    setNotices([]);
+    setPendingUser(content);
+    setStreamBubbles([]);
+    onDraftChange("");
+    setStreaming(true);
+    abortReasonRef.current = null;
+
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
+
+    let lineBuffer = "";
+    let sawDone = false;
+    let completion: StrategyStreamEvent & { type: "done" } | null = null;
+
+    try {
+      const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sid)}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content, stream: true }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        if (sid === sessionIdRef.current) {
+          onError(data.error || "送出失敗");
+          onDraftChange(content);
+          setPendingUser(null);
+          setStreamBubbles([]);
+        }
+        return;
+      }
+      if (!res.body) throw new Error("無串流回應");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        lineBuffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = lineBuffer.indexOf("\n")) >= 0) {
+          const line = lineBuffer.slice(0, nl);
+          lineBuffer = lineBuffer.slice(nl + 1);
+          if (!line.trim()) continue;
+          let ev: StrategyStreamEvent;
+          try {
+            ev = JSON.parse(line) as StrategyStreamEvent;
+          } catch {
+            continue;
+          }
+          if (sid !== sessionIdRef.current) continue;
+          handleStreamEvent(ev);
+          if (ev.type === "done") {
+            sawDone = true;
+            completion = ev;
+          }
+        }
+      }
+
+      if (sid !== sessionIdRef.current) return;
+
+      if (completion?.aborted || completion?.completionStatus === "failed") {
+        if (abortReasonRef.current === "user") {
+          setPendingUser(null);
+          setStreamBubbles([]);
+          onDraftChange(content);
+          requestAnimationFrame(() => textareaRef.current?.focus());
+          void onRefreshWallet();
+        } else if (abortReasonRef.current === "switch") {
+          setPendingUser(null);
+          setStreamBubbles([]);
+        } else {
+          onError("生成失敗或已中斷");
+          setPendingUser(null);
+          setStreamBubbles([]);
+          onDraftChange(content);
+        }
+        return;
+      }
+
+      if (sawDone && (completion?.completionStatus === "ok" || completion?.completionStatus === "degraded")) {
+        if (completion.completionStatus === "degraded") setDegradedHint(true);
+        await onStreamCommitted(sid);
+        if (sid === sessionIdRef.current) {
+          setPendingUser(null);
+          setStreamBubbles([]);
+          void onRefreshWallet();
+        }
+        return;
+      }
+
+      // 無 done：當失敗處理
+      if (abortReasonRef.current === "user") {
+        setPendingUser(null);
+        setStreamBubbles([]);
+        onDraftChange(content);
+        requestAnimationFrame(() => textareaRef.current?.focus());
+        void onRefreshWallet();
+      } else if (abortReasonRef.current !== "switch") {
+        onError("連線中斷，回覆未完成");
+        setPendingUser(null);
+        setStreamBubbles([]);
+        onDraftChange(content);
+      }
+    } catch (e) {
+      if ((e as Error)?.name === "AbortError") {
+        if (sid === sessionIdRef.current && abortReasonRef.current === "user") {
+          setPendingUser(null);
+          setStreamBubbles([]);
+          onDraftChange(content);
+          requestAnimationFrame(() => textareaRef.current?.focus());
+          void onRefreshWallet();
+        } else if (sid === sessionIdRef.current && abortReasonRef.current === "switch") {
+          setPendingUser(null);
+          setStreamBubbles([]);
+        }
+      } else if (sid === sessionIdRef.current) {
+        onError(e instanceof Error ? e.message : String(e));
+        setPendingUser(null);
+        setStreamBubbles([]);
+        onDraftChange(content);
+      }
+    } finally {
+      if (streamAbortRef.current === controller) streamAbortRef.current = null;
+      if (sid === sessionIdRef.current) setStreaming(false);
+      abortReasonRef.current = null;
+    }
+  }
+
+  function handleStreamEvent(ev: StrategyStreamEvent) {
+    if (ev.type === "notice" && ev.message) {
+      setNotices((prev) => [...prev, ev.message]);
+      return;
+    }
+    if (ev.type === "error" && ev.message && !ev.aborted) {
+      onError(ev.message);
+      return;
+    }
+    if (ev.type === "member_start") {
+      const key = `${ev.role || "m"}-${ev.modelId || "x"}-${Date.now()}`;
+      setStreamBubbles((prev) => [
+        ...prev,
+        {
+          key,
+          role: String(ev.role || "custom"),
+          modelId: String(ev.modelId || ""),
+          label: String(ev.label || ev.role || "AI"),
+          content: "",
+          thinking: "",
+          thinkingOpen: false,
+          done: false,
+        },
+      ]);
+      return;
+    }
+    if (ev.type === "text" && ev.text) {
+      setStreamBubbles((prev) => {
+        if (!prev.length) {
+          return [
+            {
+              key: `lead-${Date.now()}`,
+              role: String(ev.role || "lead"),
+              modelId: String(ev.modelId || ""),
+              label: "主導",
+              content: ev.text,
+              thinking: "",
+              thinkingOpen: false,
+              done: false,
+            },
+          ];
+        }
+        const next = [...prev];
+        const last = { ...next[next.length - 1]! };
+        last.content += ev.text;
+        next[next.length - 1] = last;
+        return next;
+      });
+      return;
+    }
+    if (ev.type === "thinking" && ev.text) {
+      setStreamBubbles((prev) => {
+        if (!prev.length) return prev;
+        const next = [...prev];
+        const last = { ...next[next.length - 1]! };
+        last.thinking += ev.text;
+        last.thinkingOpen = true;
+        next[next.length - 1] = last;
+        return next;
+      });
+      return;
+    }
+    if (ev.type === "member_done") {
+      setStreamBubbles((prev) => {
+        if (!prev.length) return prev;
+        const next = [...prev];
+        next[next.length - 1] = { ...next[next.length - 1]!, done: true, thinkingOpen: false };
+        return next;
+      });
+    }
   }
 
   function submit(e?: FormEvent) {
     e?.preventDefault();
-    if (!draft.trim() || sending || detail.session.status === "closed") return;
-    onSend();
+    if (!draft.trim() || streaming || detail.session.status === "closed") return;
+    void sendStream(draft);
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -182,6 +472,92 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     else next.delete(id);
     onDispatchSelectedChange(next);
   }
+
+  function applyChip(prompt: string) {
+    const cur = draft.trim();
+    onDraftChange(cur ? `${cur}\n${prompt}` : prompt);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
+  function ensureOneLead(list: StrategyMemberConfig[]): StrategyMemberConfig[] {
+    const copy = list.map((m) => ({ ...m }));
+    const leads = copy.filter((m) => m.role === "lead");
+    if (leads.length === 1) return copy;
+    if (copy.length === 0) {
+      return [{ modelId: "gemini-4-neon-high", role: "lead", label: "主導" }];
+    }
+    copy.forEach((m, i) => {
+      m.role = i === 0 ? "lead" : m.role === "lead" ? "custom" : m.role;
+      if (i === 0) m.label = m.label || "主導";
+    });
+    return copy;
+  }
+
+  function setAsLead(index: number) {
+    setMemberDraft((prev) =>
+      ensureOneLead(
+        prev.map((m, i) => ({
+          ...m,
+          role: i === index ? "lead" : m.role === "lead" ? "custom" : m.role,
+          label: i === index ? m.label || "主導" : m.label,
+        })),
+      ),
+    );
+  }
+
+  function addMember() {
+    setMemberDraft((prev) => {
+      if (prev.length >= 4) return prev;
+      const pick = models.find((m) => m.available && !prev.some((p) => p.modelId === m.id));
+      const modelId = pick?.id || models.find((m) => m.available)?.id || "gemini-4-neon-high";
+      return ensureOneLead([
+        ...prev,
+        { modelId, role: "custom", label: pick?.label?.split("·")[0]?.trim() || "顧問" },
+      ]);
+    });
+  }
+
+  function removeMember(index: number) {
+    setMemberDraft((prev) => {
+      if (prev.length <= 1) return prev;
+      return ensureOneLead(prev.filter((_, i) => i !== index));
+    });
+  }
+
+  function applyPreset(list: StrategyMemberConfig[]) {
+    setMemberDraft(ensureOneLead(list.map((m) => ({ ...m }))));
+  }
+
+  async function saveMeta() {
+    const modelsOk = ensureOneLead(memberDraft);
+    if (modelsOk.length < 1 || modelsOk.length > 4) {
+      onError("成員須為 1–4 位");
+      return;
+    }
+    if (modelsOk.filter((m) => m.role === "lead").length !== 1) {
+      onError("必須剛好 1 位主導");
+      return;
+    }
+    setMetaSaving(true);
+    onError(null);
+    try {
+      const ok = await onPatchSessionMeta({
+        models: modelsOk,
+        templateId: activeTemplateId,
+      });
+      if (!ok) onError("儲存成員／範本失敗");
+      else setSettingsOpen(false);
+    } finally {
+      setMetaSaving(false);
+    }
+  }
+
+  const modelOptionsForSelect = (selectedId: string) => {
+    const selected = models.find((m) => m.id === selectedId);
+    const avail = models.filter((m) => m.available || m.id === selectedId);
+    if (selected && !avail.some((m) => m.id === selected.id)) avail.unshift(selected);
+    return avail;
+  };
 
   return (
     <section className="strategy-room-view" aria-label="策略會議室">
@@ -205,24 +581,29 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
           {pauseState !== "none" ? (
             <span className={`strategy-pause-chip is-${pauseState}`}>{PAUSE_STATE_LABEL[pauseState]}</span>
           ) : null}
-          <span
-            className="strategy-exec-chip"
-            title="依平台派送狀態統計；若 CLI 未回報完成，可於抽屜手動標記完成或按強制立即暫停"
-          >
+          <span className="strategy-exec-chip" title="依平台派送狀態統計">
             執行中 {dispatchedCount}
           </span>
+          <button
+            type="button"
+            className={`ghost${settingsOpen ? " is-active" : ""}`}
+            disabled={streaming}
+            onClick={() => setSettingsOpen((v) => !v)}
+          >
+            成員與範本
+          </button>
           {pauseState === "none" ? (
-            <button type="button" className="ghost" disabled={busy} onClick={() => onPauseAction("graceful_pause")}>
+            <button type="button" className="ghost" disabled={busy || streaming} onClick={() => onPauseAction("graceful_pause")}>
               優雅暫停
             </button>
           ) : null}
           {pauseState === "pausing" ? (
-            <button type="button" className="ghost" disabled={busy} onClick={() => onPauseAction("force_pause")}>
+            <button type="button" className="ghost" disabled={busy || streaming} onClick={() => onPauseAction("force_pause")}>
               強制立即暫停
             </button>
           ) : null}
           {pauseState === "pausing" || pauseState === "paused" ? (
-            <button type="button" className="ghost" disabled={busy} onClick={() => onPauseAction("resume")}>
+            <button type="button" className="ghost" disabled={busy || streaming} onClick={() => onPauseAction("resume")}>
               恢復執行
             </button>
           ) : null}
@@ -231,7 +612,6 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               type="button"
               className={`ghost${viewMode === "split" ? " is-active" : ""}`}
               onClick={onToggleSplit}
-              title="一般聊天｜會議室並排"
             >
               {viewMode === "split" ? "取消並排" : "並排檢視"}
             </button>
@@ -243,16 +623,119 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
           >
             資訊{pending.length ? `（${pending.length}）` : ""}
           </button>
-          <button type="button" className="ghost" disabled={busy} onClick={onRefresh}>
+          <button type="button" className="ghost" disabled={busy || streaming} onClick={onRefresh}>
             重新整理
           </button>
         </div>
       </header>
 
+      {settingsOpen ? (
+        <div className="strategy-settings-panel" aria-label="成員與範本設定">
+          <div className="strategy-settings-row">
+            <label>
+              SOP 範本
+              <select
+                value={activeTemplateId}
+                disabled={metaSaving || streaming}
+                onChange={(e) => setTemplateDraft(e.target.value)}
+              >
+                {templates.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="muted" style={{ fontSize: 12 }}>
+              {activeTemplate?.description}
+            </span>
+          </div>
+          <div className="strategy-settings-actions">
+            <button
+              type="button"
+              className="ghost"
+              disabled={metaSaving || streaming}
+              onClick={() => applyPreset(activeTemplate?.recommendedModels ?? default3AiPreset)}
+            >
+              套用範本推薦
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              disabled={metaSaving || streaming}
+              onClick={() => applyPreset(default3AiPreset)}
+            >
+              一鍵 3 AI
+            </button>
+            <button type="button" className="ghost" disabled={metaSaving || streaming || memberDraft.length >= 4} onClick={addMember}>
+              新增成員
+            </button>
+          </div>
+          <ul className="strategy-member-edit-list">
+            {memberDraft.map((m, i) => (
+              <li key={`${m.modelId}-${i}`}>
+                <select
+                  value={m.modelId}
+                  disabled={metaSaving || streaming}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    const opt = models.find((x) => x.id === id);
+                    setMemberDraft((prev) =>
+                      prev.map((row, j) =>
+                        j === i
+                          ? {
+                              ...row,
+                              modelId: id,
+                              label: row.role === "lead" ? row.label : opt?.label?.split("·")[0]?.trim() || row.label,
+                            }
+                          : row,
+                      ),
+                    );
+                  }}
+                >
+                  {modelOptionsForSelect(m.modelId).map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.label}
+                      {!opt.available ? "（暫不可用）" : ""}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  value={m.label}
+                  maxLength={80}
+                  disabled={metaSaving || streaming}
+                  placeholder="稱呼"
+                  onChange={(e) =>
+                    setMemberDraft((prev) => prev.map((row, j) => (j === i ? { ...row, label: e.target.value } : row)))
+                  }
+                />
+                <span className={`strategy-role-badge is-${m.role}`}>
+                  {MEMBER_ROLE_LABEL[m.role as StrategyMemberRole] ?? m.role}
+                </span>
+                <button type="button" className="ghost" disabled={metaSaving || streaming || m.role === "lead"} onClick={() => setAsLead(i)}>
+                  設為主導
+                </button>
+                <button type="button" className="ghost" disabled={metaSaving || streaming || memberDraft.length <= 1} onClick={() => removeMember(i)}>
+                  移除
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
+            <button type="button" className="ghost" disabled={metaSaving} onClick={() => setSettingsOpen(false)}>
+              取消
+            </button>
+            <button type="button" disabled={metaSaving || streaming} onClick={() => void saveMeta()}>
+              {metaSaving ? "儲存中…" : "儲存"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className={`strategy-room-body${drawerOpen ? " drawer-open" : ""}`}>
         <div className="strategy-room-main">
           <div className="strategy-room-msg-list" ref={roomScrollRef} onScroll={onScroll}>
-            {detail.messages.length === 0 ? (
+            {detail.messages.length === 0 && !pendingUser && streamBubbles.length === 0 ? (
               <div className="muted" style={{ fontSize: 13, padding: "12px 0" }}>
                 尚無訊息
               </div>
@@ -260,25 +743,84 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               detail.messages.map((m) => (
                 <div key={m.id} className={`strategy-msg strategy-msg-${m.role}`}>
                   <div className="strategy-msg-role">
-                    {m.role === "assistant"
-                      ? "會議室"
-                      : m.role === "user"
-                        ? m.structured?.source === "web"
-                          ? "你（網頁）"
-                          : m.structured?.source === "cursor"
-                            ? "Cursor"
-                            : "Cursor／你"
-                        : "系統"}
+                    {m.role === "assistant" ? (
+                      <>
+                        <span className="strategy-role-badge">{speakerBadge(m)}</span>
+                        {m.speakerModel ? <span className="muted"> · {m.speakerModel}</span> : null}
+                      </>
+                    ) : m.role === "user" ? (
+                      m.structured?.source === "web" ? (
+                        "你（網頁）"
+                      ) : m.structured?.source === "cursor" ? (
+                        "Cursor"
+                      ) : (
+                        "Cursor／你"
+                      )
+                    ) : (
+                      "系統"
+                    )}
                   </div>
                   <pre className="strategy-msg-body">{m.content}</pre>
                 </div>
               ))
             )}
+
+            {pendingUser ? (
+              <div className="strategy-msg strategy-msg-user is-pending">
+                <div className="strategy-msg-role">你（網頁）· 送出中</div>
+                <pre className="strategy-msg-body">{pendingUser}</pre>
+              </div>
+            ) : null}
+
+            {streamBubbles.map((b) => (
+              <div key={b.key} className={`strategy-msg strategy-msg-assistant is-streaming${b.done ? " is-done" : ""}`}>
+                <div className="strategy-msg-role">
+                  <span className={`strategy-role-badge is-${b.role}`}>{b.label}</span>
+                  {b.modelId ? <span className="muted"> · {b.modelId}</span> : null}
+                  {!b.done ? <span className="muted"> · 生成中</span> : null}
+                </div>
+                {b.thinking ? (
+                  <details
+                    className="strategy-thinking"
+                    open={b.thinkingOpen}
+                    onToggle={(e) => {
+                      const open = (e.target as HTMLDetailsElement).open;
+                      setStreamBubbles((prev) =>
+                        prev.map((x) => (x.key === b.key ? { ...x, thinkingOpen: open } : x)),
+                      );
+                    }}
+                  >
+                    <summary>思考過程</summary>
+                    <pre className="strategy-msg-body">{b.thinking}</pre>
+                  </details>
+                ) : null}
+                <pre className="strategy-msg-body">{b.content || "…"}</pre>
+              </div>
+            ))}
+
+            {notices.map((n, i) => (
+              <div key={`n-${i}`} className="strategy-stream-notice">
+                {n}
+              </div>
+            ))}
+            {degradedHint ? (
+              <div className="strategy-stream-notice is-degraded">本回合因時限降級為純文字收尾（可能未更新記憶／派送）</div>
+            ) : null}
           </div>
 
           {error ? (
             <div className="strategy-room-error" role="alert">
               {error}
+            </div>
+          ) : null}
+
+          {activeTemplate?.quickPrompts?.length ? (
+            <div className="strategy-quick-chips" aria-label="快捷引導">
+              {activeTemplate.quickPrompts.map((p) => (
+                <button key={p} type="button" className="strategy-chip" disabled={streaming} onClick={() => applyChip(p)}>
+                  {p}
+                </button>
+              ))}
             </div>
           ) : null}
 
@@ -288,22 +830,30 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               value={draft}
               maxLength={8000}
               rows={3}
-              disabled={sending || detail.session.status === "closed"}
+              disabled={streaming || detail.session.status === "closed"}
               placeholder={
                 detail.session.status === "closed"
                   ? "會議室已關閉"
-                  : "在會議室發言（Enter 送出，Shift+Enter 換行）"
+                  : streaming
+                    ? "生成中…可按停止"
+                    : "在會議室發言（Enter 送出，Shift+Enter 換行）"
               }
               onChange={(e) => onDraftChange(e.target.value)}
               onKeyDown={onKeyDown}
             />
             <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
               <span className="muted" style={{ fontSize: 12 }}>
-                {sending ? "主持人思考中…" : "每次發言會依 token 扣點"}
+                {streaming ? "逐字生成中…" : "每次發言會依 token 扣點"}
               </span>
-              <button type="submit" disabled={sending || !draft.trim() || detail.session.status === "closed"}>
-                送出
-              </button>
+              {streaming ? (
+                <button type="button" className="strategy-stop-btn" onClick={stopGeneration}>
+                  停止生成
+                </button>
+              ) : (
+                <button type="submit" disabled={!draft.trim() || detail.session.status === "closed"}>
+                  送出
+                </button>
+              )}
             </div>
           </form>
         </div>
