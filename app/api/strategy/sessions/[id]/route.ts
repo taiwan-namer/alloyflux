@@ -11,12 +11,12 @@ import {
   readDossier,
   STRATEGY_LIMITS,
   STRATEGY_SESSION_STATUSES,
+  templateIdExists,
   updateStrategySession,
   validateSessionModels,
   type PauseAction,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
-import { isValidTemplateId } from "@/lib/strategy-templates";
 
 export const dynamic = "force-dynamic";
 
@@ -104,7 +104,7 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     modelsPatch = validateSessionModels(body.models);
     if (!modelsPatch.ok) return Response.json({ error: modelsPatch.error }, { status: 400 });
   }
-  if (body.templateId !== undefined && body.templateId !== "" && !isValidTemplateId(body.templateId)) {
+  if (body.templateId !== undefined && body.templateId !== "" && !(await templateIdExists(body.templateId))) {
     return Response.json({ error: "unknown templateId" }, { status: 400 });
   }
 

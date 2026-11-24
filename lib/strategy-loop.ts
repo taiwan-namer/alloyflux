@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { db } from "./db";
 import { findModel } from "./models";
-import { isValidTemplateId } from "./strategy-templates";
+import {
+  BUILTIN_STRATEGY_TEMPLATES,
+  TEMPLATE_ID_RE,
+  type RecommendedModelSlot,
+  type StrategyTemplate,
+} from "./strategy-templates";
 
 export type StrategyPlanStatus =
   | "pending_code"
@@ -220,9 +225,54 @@ async function createTables(): Promise<void> {
       ON strategy_dispatch_items(session_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_user_status
       ON strategy_dispatch_items(user_id, status, created_at ASC)`,
+    `CREATE TABLE IF NOT EXISTS strategy_templates (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      stages_json TEXT NOT NULL DEFAULT '[]',
+      quick_prompts_json TEXT NOT NULL DEFAULT '[]',
+      recommended_models_json TEXT NOT NULL DEFAULT '[]',
+      system_prompt TEXT NOT NULL DEFAULT '',
+      stream_lead_preface TEXT NOT NULL DEFAULT '',
+      enabled INT NOT NULL DEFAULT 1,
+      sort_order INT NOT NULL DEFAULT 100,
+      is_builtin INT NOT NULL DEFAULT 0,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_templates_enabled
+      ON strategy_templates(enabled, sort_order ASC, id ASC)`,
   ];
   for (const sql of stmts) {
     await db().exec(sql);
+  }
+  await seedBuiltinStrategyTemplates();
+}
+
+async function seedBuiltinStrategyTemplates(): Promise<void> {
+  const ts = nowMs();
+  for (const t of BUILTIN_STRATEGY_TEMPLATES) {
+    await db()
+      .prepare(
+        `INSERT INTO strategy_templates (
+          id, name, description, stages_json, quick_prompts_json, recommended_models_json,
+          system_prompt, stream_lead_preface, enabled, sort_order, is_builtin, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
+        ON CONFLICT (id) DO NOTHING`,
+      )
+      .run(
+        t.id,
+        t.name,
+        t.description,
+        JSON.stringify(t.stages),
+        JSON.stringify(t.quickPrompts),
+        JSON.stringify(t.recommendedModels),
+        t.systemPrompt,
+        t.streamLeadPreface,
+        t.sortOrder ?? 100,
+        ts,
+        ts,
+      );
   }
 }
 
@@ -576,7 +626,7 @@ export async function createStrategySession(input: {
     wsTemplate = ws.templateId || "automax";
   }
   const templateId =
-    input.templateId && isValidTemplateId(input.templateId) ? input.templateId : wsTemplate;
+    input.templateId && (await templateIdExists(input.templateId)) ? input.templateId : wsTemplate;
   const modelsJson = input.models && input.models.length ? JSON.stringify(input.models) : null;
   await db()
     .prepare(
@@ -762,12 +812,14 @@ export async function updateStrategySession(
   const summaryAt = summaryChanged ? nowMs() : cur.summaryUpdatedAt;
   const autoDispatch = patch.autoDispatch ?? cur.autoDispatch;
   const pauseState = patch.pauseState !== undefined ? normalizePauseState(patch.pauseState) : cur.pauseState;
-  const templateId =
-    patch.templateId !== undefined
-      ? patch.templateId && isValidTemplateId(patch.templateId)
-        ? patch.templateId
-        : cur.templateId
-      : cur.templateId;
+  let templateId = cur.templateId;
+  if (patch.templateId !== undefined) {
+    if (patch.templateId && (await templateIdExists(patch.templateId))) {
+      templateId = patch.templateId;
+    } else if (patch.templateId === "" || patch.templateId === null) {
+      templateId = cur.templateId;
+    }
+  }
   const ts = nowMs();
   await db()
     .prepare(
@@ -1420,6 +1472,203 @@ export async function attachRunToSession(userId: string, sessionId: string, runI
     .run(sessionId, runId, userId);
   await touchSessionUpdatedAt(userId, sessionId);
   return (r.changes ?? 0) > 0;
+}
+
+// ─── SOP 範本（strategy_templates）────────────────────────────────
+
+function mapTemplateRow(row: Record<string, unknown>): StrategyTemplate {
+  return {
+    id: String(row.id),
+    name: String(row.name ?? ""),
+    description: String(row.description ?? ""),
+    stages: safeJson(row.stages_json, [] as string[]),
+    quickPrompts: safeJson(row.quick_prompts_json, [] as string[]),
+    recommendedModels: safeJson(row.recommended_models_json, [] as RecommendedModelSlot[]),
+    systemPrompt: String(row.system_prompt ?? ""),
+    streamLeadPreface: String(row.stream_lead_preface ?? ""),
+    enabled: Number(row.enabled ?? 1) !== 0,
+    sortOrder: Number(row.sort_order ?? 100),
+    isBuiltin: Number(row.is_builtin ?? 0) !== 0,
+  };
+}
+
+export async function listStrategyTemplatesFromDb(opts: {
+  includeDisabled?: boolean;
+} = {}): Promise<StrategyTemplate[]> {
+  await ensureTables();
+  const rows = opts.includeDisabled
+    ? ((await db()
+        .prepare(`SELECT * FROM strategy_templates ORDER BY sort_order ASC, id ASC`)
+        .all()) as Record<string, unknown>[])
+    : ((await db()
+        .prepare(
+          `SELECT * FROM strategy_templates WHERE enabled = 1 ORDER BY sort_order ASC, id ASC`,
+        )
+        .all()) as Record<string, unknown>[]);
+  if (rows.length) return rows.map(mapTemplateRow);
+  return BUILTIN_STRATEGY_TEMPLATES.filter((t) => t.enabled !== false);
+}
+
+export async function getStrategyTemplateById(id: string | null | undefined): Promise<StrategyTemplate> {
+  await ensureTables();
+  const tid = (id || "").trim();
+  if (tid) {
+    const row = (await db()
+      .prepare(`SELECT * FROM strategy_templates WHERE id = ?`)
+      .get(tid)) as Record<string, unknown> | undefined;
+    if (row) return mapTemplateRow(row);
+    const builtin = BUILTIN_STRATEGY_TEMPLATES.find((t) => t.id === tid);
+    if (builtin) return builtin;
+  }
+  return BUILTIN_STRATEGY_TEMPLATES[0]!;
+}
+
+export async function templateIdExists(id: string): Promise<boolean> {
+  const tid = id.trim();
+  if (!tid || !TEMPLATE_ID_RE.test(tid)) return false;
+  await ensureTables();
+  const row = (await db()
+    .prepare(`SELECT id FROM strategy_templates WHERE id = ?`)
+    .get(tid)) as { id: string } | undefined;
+  if (row) return true;
+  return BUILTIN_STRATEGY_TEMPLATES.some((t) => t.id === tid);
+}
+
+export async function createStrategyTemplate(input: {
+  id: string;
+  name: string;
+  description?: string;
+  stages?: string[];
+  quickPrompts?: string[];
+  recommendedModels?: RecommendedModelSlot[];
+  systemPrompt?: string;
+  streamLeadPreface?: string;
+  enabled?: boolean;
+  sortOrder?: number;
+}): Promise<StrategyTemplate> {
+  await ensureTables();
+  const id = input.id.trim();
+  if (!TEMPLATE_ID_RE.test(id)) {
+    throw Object.assign(new Error("id 須符合 /^[a-z0-9_-]{2,48}$/"), { status: 400 });
+  }
+  const exists = await db().prepare(`SELECT id FROM strategy_templates WHERE id = ?`).get(id);
+  if (exists) {
+    throw Object.assign(new Error("template id 已存在"), { status: 409 });
+  }
+  const ts = nowMs();
+  const name = clip(input.name.trim() || id, 120);
+  const description = clip((input.description ?? "").trim(), 500);
+  const stages = Array.isArray(input.stages) ? input.stages.map(String) : [];
+  const quickPrompts = Array.isArray(input.quickPrompts) ? input.quickPrompts.map(String) : [];
+  const recommendedModels = Array.isArray(input.recommendedModels) ? input.recommendedModels : [];
+  const systemPrompt = String(input.systemPrompt ?? "");
+  const streamLeadPreface = String(input.streamLeadPreface ?? "");
+  const enabled = input.enabled === false ? 0 : 1;
+  const sortOrder = Number.isFinite(input.sortOrder) ? Number(input.sortOrder) : 100;
+  await db()
+    .prepare(
+      `INSERT INTO strategy_templates (
+        id, name, description, stages_json, quick_prompts_json, recommended_models_json,
+        system_prompt, stream_lead_preface, enabled, sort_order, is_builtin, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+    )
+    .run(
+      id,
+      name,
+      description,
+      JSON.stringify(stages),
+      JSON.stringify(quickPrompts),
+      JSON.stringify(recommendedModels),
+      systemPrompt,
+      streamLeadPreface,
+      enabled,
+      sortOrder,
+      ts,
+      ts,
+    );
+  return getStrategyTemplateById(id);
+}
+
+export async function updateStrategyTemplate(
+  id: string,
+  patch: {
+    name?: string;
+    description?: string;
+    stages?: string[];
+    quickPrompts?: string[];
+    recommendedModels?: RecommendedModelSlot[];
+    systemPrompt?: string;
+    streamLeadPreface?: string;
+    enabled?: boolean;
+    sortOrder?: number;
+  },
+): Promise<StrategyTemplate | null> {
+  await ensureTables();
+  const cur = await getStrategyTemplateById(id);
+  const row = (await db()
+    .prepare(`SELECT id FROM strategy_templates WHERE id = ?`)
+    .get(id)) as { id: string } | undefined;
+  if (!row) {
+    // 尚未 seed 的內建：先插入再更新
+    if (!BUILTIN_STRATEGY_TEMPLATES.some((t) => t.id === id)) return null;
+    await seedBuiltinStrategyTemplates();
+  }
+  const name = patch.name !== undefined ? clip(patch.name.trim() || cur.name, 120) : cur.name;
+  const description =
+    patch.description !== undefined ? clip(patch.description.trim(), 500) : cur.description;
+  const stages = patch.stages !== undefined ? patch.stages.map(String) : cur.stages;
+  const quickPrompts =
+    patch.quickPrompts !== undefined ? patch.quickPrompts.map(String) : cur.quickPrompts;
+  const recommendedModels =
+    patch.recommendedModels !== undefined ? patch.recommendedModels : cur.recommendedModels;
+  const systemPrompt = patch.systemPrompt !== undefined ? String(patch.systemPrompt) : cur.systemPrompt;
+  const streamLeadPreface =
+    patch.streamLeadPreface !== undefined ? String(patch.streamLeadPreface) : cur.streamLeadPreface;
+  const enabled = patch.enabled !== undefined ? (patch.enabled ? 1 : 0) : cur.enabled === false ? 0 : 1;
+  const sortOrder =
+    patch.sortOrder !== undefined && Number.isFinite(patch.sortOrder)
+      ? Number(patch.sortOrder)
+      : (cur.sortOrder ?? 100);
+  const ts = nowMs();
+  await db()
+    .prepare(
+      `UPDATE strategy_templates SET
+        name = ?, description = ?, stages_json = ?, quick_prompts_json = ?, recommended_models_json = ?,
+        system_prompt = ?, stream_lead_preface = ?, enabled = ?, sort_order = ?, updated_at = ?
+       WHERE id = ?`,
+    )
+    .run(
+      name,
+      description,
+      JSON.stringify(stages),
+      JSON.stringify(quickPrompts),
+      JSON.stringify(recommendedModels),
+      systemPrompt,
+      streamLeadPreface,
+      enabled,
+      sortOrder,
+      ts,
+      id,
+    );
+  return getStrategyTemplateById(id);
+}
+
+export async function deleteStrategyTemplate(id: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  await ensureTables();
+  const row = (await db()
+    .prepare(`SELECT id, is_builtin FROM strategy_templates WHERE id = ?`)
+    .get(id)) as { id: string; is_builtin: number } | undefined;
+  if (!row) {
+    if (BUILTIN_STRATEGY_TEMPLATES.some((t) => t.id === id)) {
+      return { ok: false, error: "內建範本不可刪除" };
+    }
+    return { ok: false, error: "not found" };
+  }
+  if (Number(row.is_builtin) !== 0) {
+    return { ok: false, error: "內建範本不可刪除（可停用）" };
+  }
+  await db().prepare(`DELETE FROM strategy_templates WHERE id = ?`).run(id);
+  return { ok: true };
 }
 
 /** 從模型回覆抽出 JSON 物件 */

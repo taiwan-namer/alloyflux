@@ -16,7 +16,7 @@ import {
 } from "@/lib/strategy-stream";
 import {
   STRATEGY_STATE_DELIMITER,
-  getStrategyTemplate,
+  STREAM_REPLY_EMPTY_RULE,
   type StrategyTemplate,
 } from "@/lib/strategy-templates";
 import {
@@ -26,6 +26,7 @@ import {
   ensureDefaultWorkspace,
   extractJsonObject,
   getStrategySession,
+  getStrategyTemplateById,
   getStrategyWorkspace,
   listRunsForSession,
   listSessionDispatch,
@@ -95,7 +96,8 @@ function streamLeadSystem(template: StrategyTemplate): string {
 ${limitsBlock()}
 
 結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, roomQueries。
-分隔標記必須單獨一行：${STRATEGY_STATE_DELIMITER}`;
+分隔標記必須單獨一行：${STRATEGY_STATE_DELIMITER}
+${STREAM_REPLY_EMPTY_RULE}`;
 }
 
 function advisorSystem(label: string): string {
@@ -195,10 +197,13 @@ function parseAssistantStructured(
   session: StrategySession,
   dossier: ReturnType<typeof readDossier>,
   contextChars: number,
+  opts?: { visibleText?: string },
 ) {
   const parsed = extractJsonObject(answer) || {};
-  const reply =
-    typeof parsed.reply === "string" && parsed.reply.trim() ? parsed.reply.trim() : answer.slice(0, 4000);
+  const fromJson = typeof parsed.reply === "string" ? parsed.reply.trim() : "";
+  const visible = (opts?.visibleText ?? "").trim();
+  // stream：可見正文優先；允許 JSON reply 為 ""；非 stream：維持 JSON reply → 全文切片
+  const reply = visible || fromJson || answer.slice(0, 4000);
   const instructions = Array.isArray(parsed.instructions) ? parsed.instructions : [];
   const reportRequests = Array.isArray(parsed.reportRequests) ? parsed.reportRequests : [];
   const openQuestions = Array.isArray(parsed.openQuestions) ? parsed.openQuestions : [];
@@ -233,12 +238,12 @@ function parseAssistantStructured(
 }
 
 async function resolveTemplateForSession(userId: string, session: StrategySession): Promise<StrategyTemplate> {
-  if (session.templateId) return getStrategyTemplate(session.templateId);
+  if (session.templateId) return getStrategyTemplateById(session.templateId);
   if (session.workspaceId) {
     const ws = await getStrategyWorkspace(userId, session.workspaceId);
-    if (ws?.templateId) return getStrategyTemplate(ws.templateId);
+    if (ws?.templateId) return getStrategyTemplateById(ws.templateId);
   }
-  return getStrategyTemplate("automax");
+  return getStrategyTemplateById("automax");
 }
 
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -422,12 +427,15 @@ async function finalizeTurn(input: {
   advisorTexts: { member: SessionMember; text: string }[];
   baseTs?: number;
   skipMemoryAndDispatch?: boolean;
+  /** stream 分隔線前可見正文；優先於 JSON reply 落庫 */
+  visibleText?: string;
 }) {
   const parsedPack = parseAssistantStructured(
     input.answer,
     input.session,
     input.dossier,
     input.contextChars,
+    { visibleText: input.visibleText },
   );
   const {
     reply,
@@ -666,7 +674,7 @@ async function handleStreamMode(opts: {
               undefined,
               advisorSystem(adv.label),
             )) {
-              if (ev.type === "thinking") send({ type: "thinking", text: ev.text, modelId: adv.modelId });
+              // thinking 靜默丟棄，不轉發前端
               if (ev.type === "text") {
                 text += ev.text;
                 send({ type: "text", text: ev.text, modelId: adv.modelId, role: adv.role });
@@ -749,7 +757,7 @@ async function handleStreamMode(opts: {
               softTimeout = true;
               break;
             }
-            if (ev.type === "thinking") send({ type: "thinking", text: ev.text, modelId: leadModel.id });
+            // thinking 靜默丟棄，不轉發前端
             if (ev.type === "text") {
               const visible = tail.push(ev.text);
               if (visible) send({ type: "text", text: visible, modelId: leadModel.id, role: "lead" });
@@ -787,14 +795,11 @@ async function handleStreamMode(opts: {
 
         const visibleText = tail.getVisibleText();
         const jsonRaw = tail.getJsonRaw();
+        // 結構化欄位取 JSON；落庫正文由 finalizeTurn 以 visibleText 優先（允許 reply===""）
         leadAnswer = jsonRaw || visibleText;
-        // Prefer combining: if we have visible + json, extractJsonObject on jsonRaw; reply fallback visible
         if (visibleText && jsonRaw && jsonRaw !== visibleText) {
           const parsed = extractJsonObject(jsonRaw);
-          if (parsed && typeof parsed.reply !== "string") {
-            parsed.reply = visibleText;
-            leadAnswer = JSON.stringify(parsed);
-          } else if (!parsed) {
+          if (!parsed) {
             leadAnswer = `${visibleText}\n${STRATEGY_STATE_DELIMITER}\n${jsonRaw}`;
           } else {
             leadAnswer = jsonRaw;
@@ -831,6 +836,7 @@ async function handleStreamMode(opts: {
           advisorTexts,
           baseTs: Date.now(),
           skipMemoryAndDispatch: skipMemory,
+          visibleText,
         });
 
         // 若有可見文字但 JSON reply 不同，確保前端已看過的文字與存檔一致

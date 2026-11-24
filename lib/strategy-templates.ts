@@ -1,4 +1,4 @@
-/** 會議室 SOP 靜態範本庫（template_id 真正驅動 system prompt／階段／快捷提問） */
+/** 會議室 SOP 靜態範本庫（內建 seed／fallback；執行時優先讀 DB） */
 
 export type StrategyTemplateId =
   | "automax"
@@ -13,7 +13,7 @@ export type RecommendedModelSlot = {
 };
 
 export type StrategyTemplate = {
-  id: StrategyTemplateId;
+  id: string;
   name: string;
   description: string;
   stages: string[];
@@ -22,6 +22,19 @@ export type StrategyTemplate = {
   systemPrompt: string;
   /** stream 主導：先自然語言，再分隔線＋JSON */
   streamLeadPreface: string;
+  recommendedModels: RecommendedModelSlot[];
+  enabled?: boolean;
+  sortOrder?: number;
+  isBuiltin?: boolean;
+};
+
+/** 公開 API／前端列表用（不外洩 prompt） */
+export type PublicStrategyTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  stages: string[];
+  quickPrompts: string[];
   recommendedModels: RecommendedModelSlot[];
 };
 
@@ -32,6 +45,9 @@ export const DEFAULT_3_AI_PRESET: RecommendedModelSlot[] = [
   { role: "critic", modelId: "agy-claude-sonnet-5-5-medium", label: "批判審查員" },
   { role: "engineer", modelId: "gpt-6.1-terra", label: "實作工程師" },
 ];
+
+/** stream 模式：JSON reply 留空，正文以分隔線前可見文字為準 */
+export const STREAM_REPLY_EMPTY_RULE = `重要（stream）：分隔線後 JSON 的 "reply" 必須固定填空字串 ""，不要把分隔線前已寫過的長文再重寫進 reply（節省輸出時間與費用）。其他欄位照常填。`;
 
 const AUTOMAX_FLOW = `## 流程（phase）
 1. discovery：透過 Cursor 了解過往策略與證據。
@@ -61,7 +77,7 @@ const JSON_SCHEMA_CORE = `## 每次只輸出一個 JSON 物件
 }
 規則：只限 paper／testnet／本機驗證，不建議實盤下單。引用數字要來自報告或 dossier，不可臆造。fPlan 未定案時給 null。`;
 
-export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
+export const BUILTIN_STRATEGY_TEMPLATES: StrategyTemplate[] = [
   {
     id: "automax",
     name: "automax 量化策略",
@@ -86,8 +102,12 @@ ${JSON_SCHEMA_CORE}
 - 發言者可能是 Cursor 或使用者（網頁）；instructions 不一定立刻派送。`,
     streamLeadPreface: `你是 automax 量化策略「會議室」主導者。先用繁體中文清楚回覆使用者／Cursor（可分段、可列點），不要先輸出 JSON。
 當說明結束後，單獨一行輸出分隔標記 ${STRATEGY_STATE_DELIMITER}，其後再輸出一個結構化 JSON 物件（欄位同會議室協定：reply/phase/instructions/reportRequests/memoryUpdates/canStartRun/openQuestions/summary/roomQueries）。
-分隔線之前禁止出現 JSON 程式碼區塊。`,
+分隔線之前禁止出現 JSON 程式碼區塊。
+${STREAM_REPLY_EMPTY_RULE}`,
     recommendedModels: DEFAULT_3_AI_PRESET,
+    enabled: true,
+    sortOrder: 10,
+    isBuiltin: true,
   },
   {
     id: "general_product",
@@ -106,8 +126,12 @@ ${JSON_SCHEMA_CORE}
 ${JSON_SCHEMA_CORE}
 
 phase 沿用 discovery／designing／ready_to_run／await_code／reviewing 等。禁止建議實盤金融下單。`,
-    streamLeadPreface: `你是產品／架構優化會議室主導者。先用繁體中文回覆（吐字給使用者看），結束後一行輸出 ${STRATEGY_STATE_DELIMITER}，再輸出結構化 JSON（reply/phase/instructions/reportRequests/memoryUpdates/…）。分隔前不要輸出 JSON。`,
+    streamLeadPreface: `你是產品／架構優化會議室主導者。先用繁體中文回覆（吐字給使用者看），結束後一行輸出 ${STRATEGY_STATE_DELIMITER}，再輸出結構化 JSON（reply/phase/instructions/reportRequests/memoryUpdates/…）。分隔前不要輸出 JSON。
+${STREAM_REPLY_EMPTY_RULE}`,
     recommendedModels: DEFAULT_3_AI_PRESET,
+    enabled: true,
+    sortOrder: 20,
+    isBuiltin: true,
   },
   {
     id: "code_refactor",
@@ -124,8 +148,12 @@ phase 沿用 discovery／designing／ready_to_run／await_code／reviewing 等�
 先證據後改碼；instructions 要具體到路徑與驗收指令。
 
 ${JSON_SCHEMA_CORE}`,
-    streamLeadPreface: `你是重構／除錯會議室主導者。先繁中說明分析與建議，再輸出 ${STRATEGY_STATE_DELIMITER} 與 JSON 狀態。分隔前不要 JSON。`,
+    streamLeadPreface: `你是重構／除錯會議室主導者。先繁中說明分析與建議，再輸出 ${STRATEGY_STATE_DELIMITER} 與 JSON 狀態。分隔前不要 JSON。
+${STREAM_REPLY_EMPTY_RULE}`,
     recommendedModels: DEFAULT_3_AI_PRESET,
+    enabled: true,
+    sortOrder: 30,
+    isBuiltin: true,
   },
   {
     id: "business_ops",
@@ -142,20 +170,50 @@ ${JSON_SCHEMA_CORE}`,
 另一端 Cursor 可協助蒐集資料或實作儀表／文件，但決策由你結構化輸出。
 
 ${JSON_SCHEMA_CORE}`,
-    streamLeadPreface: `你是商業決策會議室主導者。先繁中陳述分析，再輸出 ${STRATEGY_STATE_DELIMITER} 與 JSON。分隔前不要 JSON。`,
+    streamLeadPreface: `你是商業決策會議室主導者。先繁中陳述分析，再輸出 ${STRATEGY_STATE_DELIMITER} 與 JSON。分隔前不要 JSON。
+${STREAM_REPLY_EMPTY_RULE}`,
     recommendedModels: DEFAULT_3_AI_PRESET,
+    enabled: true,
+    sortOrder: 40,
+    isBuiltin: true,
   },
 ];
 
+/** @deprecated 請改用 BUILTIN_STRATEGY_TEMPLATES；保留別名以免舊 import 斷裂 */
+export const STRATEGY_TEMPLATES = BUILTIN_STRATEGY_TEMPLATES;
+
+export function toPublicStrategyTemplate(t: StrategyTemplate): PublicStrategyTemplate {
+  return {
+    id: t.id,
+    name: t.name,
+    description: t.description,
+    stages: t.stages,
+    quickPrompts: t.quickPrompts,
+    recommendedModels: t.recommendedModels,
+  };
+}
+
+/** 同步：僅內建 fallback（執行路徑請用 strategy-loop 的 getStrategyTemplateById） */
+export function listBuiltinStrategyTemplates(): StrategyTemplate[] {
+  return BUILTIN_STRATEGY_TEMPLATES;
+}
+
 export function listStrategyTemplates(): StrategyTemplate[] {
-  return STRATEGY_TEMPLATES;
+  return BUILTIN_STRATEGY_TEMPLATES;
 }
 
 export function getStrategyTemplate(id: string | null | undefined): StrategyTemplate {
-  const found = STRATEGY_TEMPLATES.find((t) => t.id === id);
-  return found ?? STRATEGY_TEMPLATES[0]!;
+  const found = BUILTIN_STRATEGY_TEMPLATES.find((t) => t.id === id);
+  return found ?? BUILTIN_STRATEGY_TEMPLATES[0]!;
 }
 
-export function isValidTemplateId(id: string): id is StrategyTemplateId {
-  return STRATEGY_TEMPLATES.some((t) => t.id === id);
+export function isBuiltinTemplateId(id: string): boolean {
+  return BUILTIN_STRATEGY_TEMPLATES.some((t) => t.id === id);
 }
+
+/** 僅檢查內建四套；自訂 SOP 請用 strategy-loop 的 templateIdExists */
+export function isValidTemplateId(id: string): boolean {
+  return isBuiltinTemplateId(id);
+}
+
+export const TEMPLATE_ID_RE = /^[a-z0-9_-]{2,48}$/;

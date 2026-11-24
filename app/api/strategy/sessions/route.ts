@@ -3,10 +3,10 @@ import { authenticateStrategyActor, authenticateStrategyReader } from "@/lib/pla
 import {
   createStrategySession,
   listStrategySessions,
+  templateIdExists,
   validateSessionModels,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
-import { isValidTemplateId } from "@/lib/strategy-templates";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +44,7 @@ export async function POST(req: Request) {
     if (!body.name?.trim()) {
       return Response.json({ error: "name required" }, { status: 400 });
     }
-    if (body.templateId != null && body.templateId !== "" && !isValidTemplateId(body.templateId)) {
+    if (body.templateId != null && body.templateId !== "" && !(await templateIdExists(body.templateId))) {
       return Response.json({ error: "unknown templateId" }, { status: 400 });
     }
     let models;
