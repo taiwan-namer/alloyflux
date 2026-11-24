@@ -1,6 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+} from "react";
+import { flushSync } from "react-dom";
 import {
   DISPATCH_STATUS_LABEL,
   MEMBER_ROLE_LABEL,
@@ -14,6 +24,7 @@ import {
   type StrategyMemberRole,
   type StrategyModelOption,
   type StrategySessionDetail,
+  type StrategySessionMessage,
   type StrategyStreamEvent,
   type StrategySyncResponse,
   type StrategyTemplateInfo,
@@ -57,6 +68,128 @@ export type StrategyRoomViewProps = {
   }) => Promise<boolean>;
   wsMemorySaving?: boolean;
 };
+
+/** 外部（/sync）新訊息：延遲 ~300ms 後逐步顯示（0.6–1.8s，依長度），點擊可立即顯示全文 */
+const REVEAL_DELAY_MS = 300;
+
+function revealDurationMs(len: number): number {
+  return Math.min(1800, Math.max(600, 600 + len * 2));
+}
+
+function messageRoleLabel(m: StrategySessionMessage) {
+  if (m.role === "assistant") {
+    return (
+      <>
+        <span className="strategy-role-badge">{speakerBadge(m)}</span>
+        {m.speakerModel ? <span className="muted"> · {m.speakerModel}</span> : null}
+      </>
+    );
+  }
+  if (m.role === "user") {
+    if (m.structured?.source === "web") return "你（網頁）";
+    if (m.structured?.source === "cursor") return "Cursor";
+    return "Cursor／你";
+  }
+  return "系統";
+}
+
+type MessageItemProps = {
+  m: StrategySessionMessage;
+  reveal: boolean;
+  onProgress: () => void;
+};
+
+const MessageItem = memo(
+  function MessageItem({ m, reveal, onProgress }: MessageItemProps) {
+    const total = m.content.length;
+    const [started, setStarted] = useState(false);
+    const [shown, setShown] = useState(0);
+    const [revealDone, setRevealDone] = useState(false);
+    const active = reveal && !revealDone;
+
+    useEffect(() => {
+      if (!active) return;
+      let raf = 0;
+      const timer = window.setTimeout(() => {
+        setStarted(true);
+        const dur = revealDurationMs(total);
+        const t0 = performance.now();
+        const tick = (now: number) => {
+          const p = Math.min(1, (now - t0) / dur);
+          setShown(Math.ceil(total * p));
+          if (p < 1) raf = requestAnimationFrame(tick);
+          else setRevealDone(true);
+        };
+        raf = requestAnimationFrame(tick);
+      }, REVEAL_DELAY_MS);
+      return () => {
+        window.clearTimeout(timer);
+        cancelAnimationFrame(raf);
+      };
+    }, [active, total]);
+
+    // 逐步顯示時，於 DOM 更新後貼底（僅在 reveal 期間）
+    useLayoutEffect(() => {
+      if (active && started) onProgress();
+    }, [active, started, shown, onProgress]);
+
+    const waiting = active && !started;
+    const text = active ? m.content.slice(0, shown) : m.content;
+
+    return (
+      <div
+        className={`strategy-msg strategy-msg-${m.role}${active ? " strategy-msg-reveal" : ""}${waiting ? " is-waiting" : ""}`}
+        onClick={active ? () => setRevealDone(true) : undefined}
+        title={active ? "點擊顯示全文" : undefined}
+      >
+        <div className="strategy-msg-role">{messageRoleLabel(m)}</div>
+        <pre className="strategy-msg-body">{text}</pre>
+      </div>
+    );
+  },
+  (a, b) =>
+    a.reveal === b.reveal &&
+    a.onProgress === b.onProgress &&
+    a.m.id === b.m.id &&
+    a.m.content === b.m.content &&
+    a.m.role === b.m.role &&
+    a.m.speakerLabel === b.m.speakerLabel &&
+    a.m.speakerModel === b.m.speakerModel &&
+    a.m.speakerRole === b.m.speakerRole &&
+    a.m.structured?.source === b.m.structured?.source,
+);
+
+/** 歷史訊息：串流更新（streamBubbles／pendingUser）不會重繪此區 */
+const HistoryMessages = memo(function HistoryMessages(props: {
+  messages: StrategySessionMessage[];
+  revealIds: ReadonlySet<string>;
+  onProgress: () => void;
+}) {
+  const { messages, revealIds, onProgress } = props;
+  return (
+    <>
+      {messages.map((m) => (
+        <MessageItem key={m.id} m={m} reveal={revealIds.has(m.id)} onProgress={onProgress} />
+      ))}
+    </>
+  );
+});
+
+function modelOptionText(opt: StrategyModelOption): string {
+  const base = opt.familyLabel
+    ? `${opt.familyLabel}${opt.effort ? ` · ${opt.effort}` : ""}`
+    : opt.label;
+  if (opt.available) return base;
+  return `${base}（${opt.note?.trim() || "暫不可用"}）`;
+}
+
+function modelOptionTitle(opt: StrategyModelOption): string {
+  const parts = [opt.label];
+  if (opt.categoryLabel) parts.push(opt.categoryLabel);
+  if (!opt.available) parts.push(opt.note?.trim() || "暫不可用");
+  else if (opt.note?.trim()) parts.push(opt.note.trim());
+  return parts.join("｜");
+}
 
 export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const {
@@ -102,12 +235,26 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const [memberDraft, setMemberDraft] = useState<StrategyMemberConfig[]>([]);
   const [templateDraft, setTemplateDraft] = useState("");
   const [metaSaving, setMetaSaving] = useState(false);
+  const [toast, setToast] = useState<{ key: number; text: string } | null>(null);
+  const [revealIds, setRevealIds] = useState<ReadonlySet<string>>(() => new Set());
 
   const roomScrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const syncAbortRef = useRef<AbortController | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
+  const streamRunIdRef = useRef(0);
+  const streamContentRef = useRef("");
+  const streamCommittingRef = useRef(false);
   const abortReasonRef = useRef<"user" | "switch" | null>(null);
+  /** 串流文字緩衝（rAF 才 flush 進 streamBubbles） */
+  const bubblesRef = useRef<StreamingMemberBubble[]>([]);
+  const flushRafRef = useRef(0);
+  const seenMessageIdsRef = useRef<Set<string>>(new Set());
+  const seenSessionIdRef = useRef<string | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const toastSeqRef = useRef(0);
+  const onStreamingChangeRef = useRef(onStreamingChange);
   const lastUpdatedAtRef = useRef(detail.session.updatedAt || 0);
   const sessionIdRef = useRef(detail.session.id);
   const streamingRef = useRef(false);
@@ -130,27 +277,112 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
   streamingRef.current = streaming;
   onSyncPatchRef.current = onSyncPatch;
+  onStreamingChangeRef.current = onStreamingChange;
+
+  const cancelFlush = useCallback(() => {
+    if (flushRafRef.current) {
+      cancelAnimationFrame(flushRafRef.current);
+      flushRafRef.current = 0;
+    }
+  }, []);
+
+  /** 失效目前串流：++runId、取消 rAF、cancel reader、abort controller、清空緩衝 */
+  const invalidateStream = useCallback(
+    (reason: "user" | "switch") => {
+      streamRunIdRef.current += 1;
+      abortReasonRef.current = reason;
+      cancelFlush();
+      bubblesRef.current = [];
+      const reader = streamReaderRef.current;
+      streamReaderRef.current = null;
+      if (reader) {
+        try {
+          void reader.cancel().catch(() => {});
+        } catch {
+          /* ignore */
+        }
+      }
+      const ctrl = streamAbortRef.current;
+      streamAbortRef.current = null;
+      ctrl?.abort();
+      streamCommittingRef.current = false;
+    },
+    [cancelFlush],
+  );
+
+  /** rAF flush：緩衝 → streamBubbles；僅此處做貼底捲動 */
+  const flushBubbles = useCallback(() => {
+    flushRafRef.current = 0;
+    const snapshot = bubblesRef.current.map((b) => ({ ...b }));
+    flushSync(() => {
+      setStreamBubbles(snapshot);
+    });
+    const el = roomScrollRef.current;
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (flushRafRef.current) return;
+    flushRafRef.current = requestAnimationFrame(flushBubbles);
+  }, [flushBubbles]);
+
+  const scrollIfSticky = useCallback(() => {
+    const el = roomScrollRef.current;
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, []);
 
   useEffect(() => {
     onStreamingChange(streaming);
   }, [streaming, onStreamingChange]);
 
+  // 卸載：失效串流與計時器（不還原草稿）
+  useEffect(() => {
+    return () => {
+      invalidateStream("switch");
+      if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+      onStreamingChangeRef.current(false);
+    };
+  }, [invalidateStream]);
+
   useEffect(() => {
     const prev = sessionIdRef.current;
     if (prev !== detail.session.id) {
-      abortReasonRef.current = "switch";
-      streamAbortRef.current?.abort();
-      streamAbortRef.current = null;
+      invalidateStream("switch");
       setStreaming(false);
       setPendingUser(null);
       setStreamBubbles([]);
       setNotices([]);
       setDegradedHint(false);
       setSettingsOpen(false);
+      setToast(null);
     }
     sessionIdRef.current = detail.session.id;
     lastUpdatedAtRef.current = detail.session.updatedAt || 0;
-  }, [detail.session.id, detail.session.updatedAt]);
+  }, [detail.session.id, detail.session.updatedAt, invalidateStream]);
+
+  // 首次載入／切房：現有訊息全部標記為已看過（不重播）；同房外部新訊息才逐步顯示
+  useLayoutEffect(() => {
+    const seen = seenMessageIdsRef.current;
+    if (seenSessionIdRef.current !== sessionId) {
+      seenSessionIdRef.current = sessionId;
+      seen.clear();
+      for (const m of detail.messages) seen.add(m.id);
+      setRevealIds((cur) => (cur.size ? new Set() : cur));
+      return;
+    }
+    const fresh = detail.messages.filter((m) => !seen.has(m.id));
+    if (!fresh.length) return;
+    for (const m of fresh) seen.add(m.id);
+    // 本機串流（含送出／commit 重新載入）期間產生的訊息：直接顯示，不 reveal
+    if (streamingRef.current) return;
+    setRevealIds((cur) => {
+      const next = new Set(cur);
+      for (const m of fresh) next.add(m.id);
+      return next;
+    });
+  }, [sessionId, detail.messages]);
+
+  const modelsKey = JSON.stringify(detail.session.models ?? null);
 
   useEffect(() => {
     const modelsCfg =
@@ -164,14 +396,18 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
             },
           ];
     setMemberDraft(modelsCfg);
-    setTemplateDraft(detail.session.templateId || "");
-  }, [detail.session.id, detail.session.models, detail.session.model, detail.session.templateId]);
+    // 以 modelsKey（內容）而非陣列參照為依賴：sync／套用範本重新載入時不會洗掉尚未儲存的成員編輯
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detail.session.id, modelsKey, detail.session.model]);
 
   useEffect(() => {
-    const el = roomScrollRef.current;
-    if (!el || !stickToBottomRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [detail.messages.length, streaming, pendingUser, streamBubbles, notices]);
+    setTemplateDraft(detail.session.templateId || "");
+  }, [detail.session.id, detail.session.templateId]);
+
+  // 離散事件貼底（送出、新訊息、notice）；串流文字chunk 僅在 rAF flush 內貼底
+  useEffect(() => {
+    scrollIfSticky();
+  }, [detail.messages.length, pendingUser, notices, scrollIfSticky]);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -227,8 +463,6 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", onVis);
       syncAbortRef.current?.abort();
-      abortReasonRef.current = "switch";
-      streamAbortRef.current?.abort();
     };
   }, [sessionId]);
 
@@ -236,18 +470,41 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const el = roomScrollRef.current;
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-    stickToBottomRef.current = dist < 60;
+    // 使用者明顯上捲時立刻關閉貼底，避免 sync／reveal 把捲動拉回底部
+    stickToBottomRef.current = dist < 80;
   }
 
   function stopGeneration() {
-    abortReasonRef.current = "user";
-    streamAbortRef.current?.abort();
+    // 已收到 done 並進入 commit 階段：生成其實已完成，不再中斷
+    if (!streamingRef.current || streamCommittingRef.current) return;
+    const content = streamContentRef.current;
+    // 立即失效本輪：任何殘留的非同步路徑都會因 runId 不符而靜默結束（不會出現「生成失敗或已中斷」）
+    invalidateStream("user");
+    setStreamBubbles([]);
+    setPendingUser(null);
+    setNotices([]);
+    setDegradedHint(false);
+    setStreaming(false);
+    onError(null);
+    if (content) onDraftChange(content);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+    void onRefreshWallet();
   }
 
   async function sendStream(text: string) {
     const sid = sessionId;
     const content = text.trim();
     if (!content || streaming || detail.session.status === "closed") return;
+
+    const runId = ++streamRunIdRef.current;
+    const isCurrent = () => runId === streamRunIdRef.current && sid === sessionIdRef.current;
+
+    streamContentRef.current = content;
+    streamCommittingRef.current = false;
+    abortReasonRef.current = null;
+    cancelFlush();
+    bubblesRef.current = [];
+    stickToBottomRef.current = true;
 
     onError(null);
     setDegradedHint(false);
@@ -256,14 +513,13 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     setStreamBubbles([]);
     onDraftChange("");
     setStreaming(true);
-    abortReasonRef.current = null;
 
     const controller = new AbortController();
     streamAbortRef.current = controller;
 
     let lineBuffer = "";
     let sawDone = false;
-    let completion: StrategyStreamEvent & { type: "done" } | null = null;
+    let completion: (StrategyStreamEvent & { type: "done" }) | null = null;
 
     try {
       const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sid)}/message`, {
@@ -272,23 +528,31 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         body: JSON.stringify({ content, stream: true }),
         signal: controller.signal,
       });
+      if (!isCurrent()) {
+        void res.body?.cancel().catch(() => {});
+        return;
+      }
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
-        if (sid === sessionIdRef.current) {
-          onError(data.error || "送出失敗");
-          onDraftChange(content);
-          setPendingUser(null);
-          setStreamBubbles([]);
-        }
+        if (!isCurrent()) return;
+        onError(data.error || "送出失敗");
+        onDraftChange(content);
+        setPendingUser(null);
+        setStreamBubbles([]);
         return;
       }
       if (!res.body) throw new Error("無串流回應");
 
       const reader = res.body.getReader();
+      streamReaderRef.current = reader;
       const decoder = new TextDecoder();
 
       while (true) {
         const { done, value } = await reader.read();
+        if (!isCurrent()) {
+          void reader.cancel().catch(() => {});
+          return;
+        }
         if (done) break;
         lineBuffer += decoder.decode(value, { stream: true });
         let nl: number;
@@ -302,8 +566,11 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
           } catch {
             continue;
           }
-          if (sid !== sessionIdRef.current) continue;
-          handleStreamEvent(ev);
+          if (!isCurrent()) {
+            void reader.cancel().catch(() => {});
+            return;
+          }
+          handleStreamEvent(ev, isCurrent);
           if (ev.type === "done") {
             sawDone = true;
             completion = ev;
@@ -311,77 +578,66 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         }
       }
 
-      if (sid !== sessionIdRef.current) return;
+      if (!isCurrent()) return;
 
       if (completion?.aborted || completion?.completionStatus === "failed") {
-        if (abortReasonRef.current === "user") {
-          setPendingUser(null);
-          setStreamBubbles([]);
-          onDraftChange(content);
-          requestAnimationFrame(() => textareaRef.current?.focus());
-          void onRefreshWallet();
-        } else if (abortReasonRef.current === "switch") {
-          setPendingUser(null);
-          setStreamBubbles([]);
-        } else {
-          onError("生成失敗或已中斷");
-          setPendingUser(null);
-          setStreamBubbles([]);
-          onDraftChange(content);
-        }
+        // 非使用者／切房造成（那些情況 runId 已失效，不會走到這裡）：伺服器端失敗
+        cancelFlush();
+        bubblesRef.current = [];
+        onError("生成失敗或已中斷");
+        setPendingUser(null);
+        setStreamBubbles([]);
+        onDraftChange(content);
         return;
       }
 
       if (sawDone && (completion?.completionStatus === "ok" || completion?.completionStatus === "degraded")) {
         if (completion.completionStatus === "degraded") setDegradedHint(true);
+        streamCommittingRef.current = true;
         await onStreamCommitted(sid);
-        if (sid === sessionIdRef.current) {
-          setPendingUser(null);
-          setStreamBubbles([]);
-          void onRefreshWallet();
-        }
+        if (!isCurrent()) return;
+        cancelFlush();
+        bubblesRef.current = [];
+        setPendingUser(null);
+        setStreamBubbles([]);
+        void onRefreshWallet();
         return;
       }
 
       // 無 done：當失敗處理
-      if (abortReasonRef.current === "user") {
-        setPendingUser(null);
-        setStreamBubbles([]);
-        onDraftChange(content);
-        requestAnimationFrame(() => textareaRef.current?.focus());
-        void onRefreshWallet();
-      } else if (abortReasonRef.current !== "switch") {
-        onError("連線中斷，回覆未完成");
-        setPendingUser(null);
-        setStreamBubbles([]);
-        onDraftChange(content);
-      }
+      cancelFlush();
+      bubblesRef.current = [];
+      onError("連線中斷，回覆未完成");
+      setPendingUser(null);
+      setStreamBubbles([]);
+      onDraftChange(content);
     } catch (e) {
+      if (!isCurrent()) return;
+      cancelFlush();
+      bubblesRef.current = [];
       if ((e as Error)?.name === "AbortError") {
-        if (sid === sessionIdRef.current && abortReasonRef.current === "user") {
-          setPendingUser(null);
-          setStreamBubbles([]);
-          onDraftChange(content);
-          requestAnimationFrame(() => textareaRef.current?.focus());
-          void onRefreshWallet();
-        } else if (sid === sessionIdRef.current && abortReasonRef.current === "switch") {
-          setPendingUser(null);
-          setStreamBubbles([]);
-        }
-      } else if (sid === sessionIdRef.current) {
+        onError("連線中斷，回覆未完成");
+      } else {
         onError(e instanceof Error ? e.message : String(e));
-        setPendingUser(null);
-        setStreamBubbles([]);
-        onDraftChange(content);
       }
+      setPendingUser(null);
+      setStreamBubbles([]);
+      onDraftChange(content);
     } finally {
-      if (streamAbortRef.current === controller) streamAbortRef.current = null;
-      if (sid === sessionIdRef.current) setStreaming(false);
-      abortReasonRef.current = null;
+      if (runId === streamRunIdRef.current) {
+        if (streamAbortRef.current === controller) streamAbortRef.current = null;
+        streamReaderRef.current = null;
+        streamCommittingRef.current = false;
+        abortReasonRef.current = null;
+        if (sid === sessionIdRef.current) setStreaming(false);
+      }
     }
   }
 
-  function handleStreamEvent(ev: StrategyStreamEvent) {
+  function handleStreamEvent(ev: StrategyStreamEvent, isCurrent: () => boolean) {
+    if (!isCurrent()) return;
+    // thinking：靜默忽略
+    if (ev.type === "thinking") return;
     if (ev.type === "notice" && ev.message) {
       setNotices((prev) => [...prev, ev.message]);
       return;
@@ -391,65 +647,47 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       return;
     }
     if (ev.type === "member_start") {
-      const key = `${ev.role || "m"}-${ev.modelId || "x"}-${Date.now()}`;
-      setStreamBubbles((prev) => [
-        ...prev,
-        {
-          key,
-          role: String(ev.role || "custom"),
-          modelId: String(ev.modelId || ""),
-          label: String(ev.label || ev.role || "AI"),
-          content: "",
-          thinking: "",
-          thinkingOpen: false,
-          done: false,
-        },
-      ]);
+      const key = `${ev.role || "m"}-${ev.modelId || "x"}-${Date.now()}-${bubblesRef.current.length}`;
+      bubblesRef.current.push({
+        key,
+        role: String(ev.role || "custom"),
+        modelId: String(ev.modelId || ""),
+        label: String(ev.label || ev.role || "AI"),
+        content: "",
+        done: false,
+      });
+      scheduleFlush();
       return;
     }
     if (ev.type === "text" && ev.text) {
-      setStreamBubbles((prev) => {
-        if (!prev.length) {
-          return [
-            {
-              key: `lead-${Date.now()}`,
-              role: String(ev.role || "lead"),
-              modelId: String(ev.modelId || ""),
-              label: "主導",
-              content: ev.text,
-              thinking: "",
-              thinkingOpen: false,
-              done: false,
-            },
-          ];
-        }
-        const next = [...prev];
-        const last = { ...next[next.length - 1]! };
-        last.content += ev.text;
-        next[next.length - 1] = last;
-        return next;
-      });
-      return;
-    }
-    if (ev.type === "thinking" && ev.text) {
-      setStreamBubbles((prev) => {
-        if (!prev.length) return prev;
-        const next = [...prev];
-        const last = { ...next[next.length - 1]! };
-        last.thinking += ev.text;
-        last.thinkingOpen = true;
-        next[next.length - 1] = last;
-        return next;
-      });
+      const buf = bubblesRef.current;
+      if (!buf.length) {
+        buf.push({
+          key: `lead-${Date.now()}`,
+          role: String(ev.role || "lead"),
+          modelId: String(ev.modelId || ""),
+          label: "主導",
+          content: ev.text,
+          done: false,
+        });
+      } else {
+        buf[buf.length - 1]!.content += ev.text;
+      }
+      scheduleFlush();
       return;
     }
     if (ev.type === "member_done") {
-      setStreamBubbles((prev) => {
-        if (!prev.length) return prev;
-        const next = [...prev];
-        next[next.length - 1] = { ...next[next.length - 1]!, done: true, thinkingOpen: false };
-        return next;
-      });
+      const buf = bubblesRef.current;
+      if (buf.length) buf[buf.length - 1]!.done = true;
+      scheduleFlush();
+      return;
+    }
+    if (ev.type === "done") {
+      // 收尾：把緩衝立即 flush 一次，讓畫面停在最終文字
+      if (flushRafRef.current) {
+        cancelFlush();
+        flushBubbles();
+      }
     }
   }
 
@@ -552,6 +790,41 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     }
   }
 
+  function showToast(text: string) {
+    if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
+    toastSeqRef.current += 1;
+    setToast({ key: toastSeqRef.current, text });
+    toastTimerRef.current = window.setTimeout(() => {
+      toastTimerRef.current = null;
+      setToast(null);
+    }, 2600);
+  }
+
+  /** SOP 範本：選擇即儲存（PATCH templateId），失敗則還原並顯示錯誤 */
+  async function changeTemplate(nextId: string) {
+    const sid = sessionId;
+    const prevDraft = templateDraft;
+    if (nextId === activeTemplateId) return;
+    setTemplateDraft(nextId);
+    setMetaSaving(true);
+    onError(null);
+    let ok = false;
+    try {
+      ok = await onPatchSessionMeta({ templateId: nextId });
+    } catch {
+      ok = false;
+    } finally {
+      if (sid === sessionIdRef.current) setMetaSaving(false);
+    }
+    if (sid !== sessionIdRef.current) return;
+    if (ok) {
+      showToast("已套用範本");
+    } else {
+      setTemplateDraft(prevDraft);
+      onError("套用範本失敗");
+    }
+  }
+
   const modelOptionsForSelect = (selectedId: string) => {
     const selected = models.find((m) => m.id === selectedId);
     const avail = models.filter((m) => m.available || m.id === selectedId);
@@ -559,8 +832,28 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     return avail;
   };
 
+  /** 依 categoryLabel 分組（保留首次出現順序） */
+  const groupedModelOptions = (selectedId: string) => {
+    const groups: { label: string; items: StrategyModelOption[] }[] = [];
+    for (const opt of modelOptionsForSelect(selectedId)) {
+      const label = opt.categoryLabel?.trim() || "其他";
+      let g = groups.find((x) => x.label === label);
+      if (!g) {
+        g = { label, items: [] };
+        groups.push(g);
+      }
+      g.items.push(opt);
+    }
+    return groups;
+  };
+
   return (
     <section className="strategy-room-view" aria-label="策略會議室">
+      {toast ? (
+        <div key={toast.key} className="strategy-toast" role="status">
+          {toast.text}
+        </div>
+      ) : null}
       <header className="strategy-room-topbar">
         <div className="strategy-room-topbar-left">
           <button type="button" className="strategy-room-menu-btn" aria-label="開啟側欄" onClick={onOpenSidebar}>
@@ -637,7 +930,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               <select
                 value={activeTemplateId}
                 disabled={metaSaving || streaming}
-                onChange={(e) => setTemplateDraft(e.target.value)}
+                onChange={(e) => void changeTemplate(e.target.value)}
               >
                 {templates.map((t) => (
                   <option key={t.id} value={t.id}>
@@ -676,6 +969,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               <li key={`${m.modelId}-${i}`}>
                 <select
                   value={m.modelId}
+                  title={(() => {
+                    const cur = models.find((x) => x.id === m.modelId);
+                    return cur ? modelOptionTitle(cur) : m.modelId;
+                  })()}
                   disabled={metaSaving || streaming}
                   onChange={(e) => {
                     const id = e.target.value;
@@ -693,11 +990,17 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                     );
                   }}
                 >
-                  {modelOptionsForSelect(m.modelId).map((opt) => (
-                    <option key={opt.id} value={opt.id}>
-                      {opt.label}
-                      {!opt.available ? "（暫不可用）" : ""}
-                    </option>
+                  {!models.some((x) => x.id === m.modelId) ? (
+                    <option value={m.modelId}>{m.modelId}</option>
+                  ) : null}
+                  {groupedModelOptions(m.modelId).map((g) => (
+                    <optgroup key={g.label} label={g.label}>
+                      {g.items.map((opt) => (
+                        <option key={opt.id} value={opt.id} title={modelOptionTitle(opt)}>
+                          {modelOptionText(opt)}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))}
                 </select>
                 <input
@@ -735,34 +1038,14 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       <div className={`strategy-room-body${drawerOpen ? " drawer-open" : ""}`}>
         <div className="strategy-room-main">
           <div className="strategy-room-msg-list" ref={roomScrollRef} onScroll={onScroll}>
+            {/* spacer：短對話貼底；min-height:0 可收縮，桌面可上捲到第一則 */}
+            <div className="strategy-room-msg-spacer" aria-hidden />
             {detail.messages.length === 0 && !pendingUser && streamBubbles.length === 0 ? (
               <div className="muted" style={{ fontSize: 13, padding: "12px 0" }}>
                 尚無訊息
               </div>
             ) : (
-              detail.messages.map((m) => (
-                <div key={m.id} className={`strategy-msg strategy-msg-${m.role}`}>
-                  <div className="strategy-msg-role">
-                    {m.role === "assistant" ? (
-                      <>
-                        <span className="strategy-role-badge">{speakerBadge(m)}</span>
-                        {m.speakerModel ? <span className="muted"> · {m.speakerModel}</span> : null}
-                      </>
-                    ) : m.role === "user" ? (
-                      m.structured?.source === "web" ? (
-                        "你（網頁）"
-                      ) : m.structured?.source === "cursor" ? (
-                        "Cursor"
-                      ) : (
-                        "Cursor／你"
-                      )
-                    ) : (
-                      "系統"
-                    )}
-                  </div>
-                  <pre className="strategy-msg-body">{m.content}</pre>
-                </div>
-              ))
+              <HistoryMessages messages={detail.messages} revealIds={revealIds} onProgress={scrollIfSticky} />
             )}
 
             {pendingUser ? (
@@ -777,23 +1060,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                 <div className="strategy-msg-role">
                   <span className={`strategy-role-badge is-${b.role}`}>{b.label}</span>
                   {b.modelId ? <span className="muted"> · {b.modelId}</span> : null}
-                  {!b.done ? <span className="muted"> · 生成中</span> : null}
                 </div>
-                {b.thinking ? (
-                  <details
-                    className="strategy-thinking"
-                    open={b.thinkingOpen}
-                    onToggle={(e) => {
-                      const open = (e.target as HTMLDetailsElement).open;
-                      setStreamBubbles((prev) =>
-                        prev.map((x) => (x.key === b.key ? { ...x, thinkingOpen: open } : x)),
-                      );
-                    }}
-                  >
-                    <summary>思考過程</summary>
-                    <pre className="strategy-msg-body">{b.thinking}</pre>
-                  </details>
-                ) : null}
                 <pre className="strategy-msg-body">{b.content || "…"}</pre>
               </div>
             ))}
@@ -834,16 +1101,14 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               placeholder={
                 detail.session.status === "closed"
                   ? "會議室已關閉"
-                  : streaming
-                    ? "生成中…可按停止"
-                    : "在會議室發言（Enter 送出，Shift+Enter 換行）"
+                  : "在會議室發言（Enter 送出，Shift+Enter 換行）"
               }
               onChange={(e) => onDraftChange(e.target.value)}
               onKeyDown={onKeyDown}
             />
             <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
               <span className="muted" style={{ fontSize: 12 }}>
-                {streaming ? "逐字生成中…" : "每次發言會依 token 扣點"}
+                每次發言會依 token 扣點
               </span>
               {streaming ? (
                 <button type="button" className="strategy-stop-btn" onClick={stopGeneration}>

@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import type { AdminStrategyTemplate } from "@/components/strategy-types";
 
 /* ───────── 型別 ───────── */
 
@@ -119,6 +120,7 @@ type ViewId =
   | "partners"
   | "mint"
   | "ledger"
+  | "strategyTemplates"
   | "compliance";
 
 type IconName =
@@ -285,6 +287,12 @@ const NAV: NavGroup[] = [
       { id: "ledger", label: "全站帳本與分潤對帳" },
     ],
   },
+  {
+    key: "strategy",
+    label: "策略會議室",
+    icon: "route",
+    children: [{ id: "strategyTemplates", label: "SOP 範本管理" }],
+  },
   { key: "compliance", label: "合規與條款規範", icon: "shield", view: "compliance" },
 ];
 
@@ -298,8 +306,58 @@ const VIEW_TITLES: Record<ViewId, string> = {
   partners: "算力節點夥伴",
   mint: "產生服務費序號",
   ledger: "全站帳本與分潤對帳",
+  strategyTemplates: "策略會議室 · SOP 範本管理",
   compliance: "合規與條款規範",
 };
+
+/* SOP 範本表單 */
+interface TplForm {
+  id: string;
+  name: string;
+  description: string;
+  sortOrder: string;
+  enabled: boolean;
+  stagesText: string;
+  quickPromptsText: string;
+  systemPrompt: string;
+  streamLeadPreface: string;
+  recommendedModelsText: string;
+}
+
+const EMPTY_TPL_FORM: TplForm = {
+  id: "",
+  name: "",
+  description: "",
+  sortOrder: "100",
+  enabled: true,
+  stagesText: "",
+  quickPromptsText: "",
+  systemPrompt: "",
+  streamLeadPreface: "",
+  recommendedModelsText: "[]",
+};
+
+function linesToList(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function tplToForm(t: AdminStrategyTemplate): TplForm {
+  return {
+    id: t.id,
+    name: t.name ?? "",
+    description: t.description ?? "",
+    sortOrder: String(t.sortOrder ?? 100),
+    enabled: t.enabled !== false,
+    stagesText: (t.stages ?? []).join("\n"),
+    quickPromptsText: (t.quickPrompts ?? []).join("\n"),
+    systemPrompt: t.systemPrompt ?? "",
+    streamLeadPreface: t.streamLeadPreface ?? "",
+    recommendedModelsText: JSON.stringify(t.recommendedModels ?? [], null, 2),
+  };
+}
 
 const COMPLIANCE_ROWS: { item: string; term: string; avoid: string }[] = [
   {
@@ -724,6 +782,190 @@ export default function AdminPage() {
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
     window.location.href = "/";
+  }
+
+  /* ───── SOP 範本管理 ───── */
+  const [tplList, setTplList] = useState<AdminStrategyTemplate[]>([]);
+  const [tplLoading, setTplLoading] = useState(false);
+  const [tplErr, setTplErr] = useState<string | null>(null);
+  const [tplForm, setTplForm] = useState<TplForm | null>(null);
+  const [tplEditingId, setTplEditingId] = useState<string | null>(null);
+  const [tplSaving, setTplSaving] = useState(false);
+  const [tplFormErr, setTplFormErr] = useState<string | null>(null);
+  const [tplBusyId, setTplBusyId] = useState<string | null>(null);
+
+  const loadTemplates = useCallback(async () => {
+    setTplLoading(true);
+    setTplErr(null);
+    try {
+      const res = await fetch("/api/admin/strategy-templates", { cache: "no-store" });
+      const data = (await res.json().catch(() => ({}))) as {
+        templates?: AdminStrategyTemplate[];
+        error?: string;
+      };
+      if (!res.ok) {
+        setTplErr(data.error || (res.status === 401 || res.status === 403 ? "需要管理員權限" : "載入範本失敗"));
+        return;
+      }
+      const list = Array.isArray(data.templates) ? data.templates : [];
+      setTplList(
+        [...list].sort(
+          (a, b) => (a.sortOrder ?? 100) - (b.sortOrder ?? 100) || a.id.localeCompare(b.id),
+        ),
+      );
+    } catch {
+      setTplErr("載入範本失敗：網路錯誤");
+    } finally {
+      setTplLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (active === "strategyTemplates") void loadTemplates();
+  }, [active, loadTemplates]);
+
+  function startCreateTemplate() {
+    setTplEditingId(null);
+    setTplForm({ ...EMPTY_TPL_FORM });
+    setTplFormErr(null);
+  }
+
+  function startEditTemplate(t: AdminStrategyTemplate) {
+    setTplEditingId(t.id);
+    setTplForm(tplToForm(t));
+    setTplFormErr(null);
+  }
+
+  function closeTemplateForm() {
+    setTplForm(null);
+    setTplEditingId(null);
+    setTplFormErr(null);
+  }
+
+  function patchTplForm(patch: Partial<TplForm>) {
+    setTplForm((f) => (f ? { ...f, ...patch } : f));
+  }
+
+  async function saveTemplate() {
+    if (!tplForm || tplSaving) return;
+    const isEdit = tplEditingId !== null;
+    const id = tplForm.id.trim();
+    const name = tplForm.name.trim();
+    if (!isEdit && !/^[A-Za-z0-9_-]+$/.test(id)) {
+      setTplFormErr("id 必填，且僅限英數、底線與連字號");
+      return;
+    }
+    if (!name) {
+      setTplFormErr("名稱必填");
+      return;
+    }
+    const sortOrder = Number(tplForm.sortOrder);
+    if (!Number.isFinite(sortOrder)) {
+      setTplFormErr("排序必須為數字");
+      return;
+    }
+    let recommendedModels: { role: string; modelId: string; label: string }[] = [];
+    const rmText = tplForm.recommendedModelsText.trim();
+    if (rmText) {
+      try {
+        const parsed: unknown = JSON.parse(rmText);
+        if (!Array.isArray(parsed)) throw new Error("須為陣列");
+        recommendedModels = parsed.map((row, i) => {
+          const r = row as { role?: unknown; modelId?: unknown; label?: unknown };
+          if (!r || typeof r.role !== "string" || !r.role.trim() || typeof r.modelId !== "string" || !r.modelId.trim()) {
+            throw new Error(`第 ${i + 1} 筆需有 role 與 modelId 字串`);
+          }
+          return {
+            role: r.role.trim(),
+            modelId: r.modelId.trim(),
+            label: typeof r.label === "string" && r.label.trim() ? r.label.trim() : r.role.trim(),
+          };
+        });
+      } catch (e) {
+        setTplFormErr(`recommendedModels JSON 無效：${e instanceof Error ? e.message : String(e)}`);
+        return;
+      }
+    }
+    const fields = {
+      name,
+      description: tplForm.description,
+      stages: linesToList(tplForm.stagesText),
+      quickPrompts: linesToList(tplForm.quickPromptsText),
+      recommendedModels,
+      systemPrompt: tplForm.systemPrompt,
+      streamLeadPreface: tplForm.streamLeadPreface,
+      enabled: tplForm.enabled,
+      sortOrder,
+    };
+    setTplSaving(true);
+    setTplFormErr(null);
+    try {
+      const res = await fetch(
+        isEdit
+          ? `/api/admin/strategy-templates/${encodeURIComponent(tplEditingId!)}`
+          : "/api/admin/strategy-templates",
+        {
+          method: isEdit ? "PATCH" : "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(isEdit ? fields : { id, ...fields }),
+        },
+      );
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok || data.error) {
+        setTplFormErr(data.error || "儲存失敗");
+        return;
+      }
+      setMsg(isEdit ? `已更新範本 ${tplEditingId}` : `已建立範本 ${id}`);
+      closeTemplateForm();
+      await loadTemplates();
+    } catch {
+      setTplFormErr("儲存失敗：網路錯誤");
+    } finally {
+      setTplSaving(false);
+    }
+  }
+
+  async function toggleTemplateEnabled(t: AdminStrategyTemplate) {
+    setTplBusyId(t.id);
+    setMsg(null);
+    try {
+      const res = await fetch(`/api/admin/strategy-templates/${encodeURIComponent(t.id)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: t.enabled === false }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok || data.error) setMsg(data.error || "更新失敗");
+      else setMsg(`${t.name} 已${t.enabled === false ? "啟用" : "停用"}`);
+      await loadTemplates();
+    } catch {
+      setMsg("更新失敗：網路錯誤");
+    } finally {
+      setTplBusyId(null);
+    }
+  }
+
+  async function deleteTemplate(t: AdminStrategyTemplate) {
+    if (t.isBuiltin) return;
+    if (!confirm(`確定刪除範本「${t.name}」（${t.id}）？此動作無法復原。`)) return;
+    setTplBusyId(t.id);
+    setMsg(null);
+    try {
+      const res = await fetch(`/api/admin/strategy-templates/${encodeURIComponent(t.id)}`, {
+        method: "DELETE",
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      if (!res.ok || data.error) setMsg(data.error || "刪除失敗");
+      else {
+        setMsg(`已刪除範本 ${t.id}`);
+        if (tplEditingId === t.id) closeTemplateForm();
+      }
+      await loadTemplates();
+    } catch {
+      setMsg("刪除失敗：網路錯誤");
+    } finally {
+      setTplBusyId(null);
+    }
   }
 
   function go(id: ViewId) {
@@ -1609,6 +1851,235 @@ export default function AdminPage() {
     );
   }
 
+  function renderStrategyTemplates() {
+    const isEdit = tplEditingId !== null;
+    const editingBuiltin = isEdit && tplList.find((t) => t.id === tplEditingId)?.isBuiltin;
+    return (
+      <>
+        <section className="adm-section">
+          <p className="adm-sub">
+            管理策略會議室的 SOP 範本（階段、快捷引導、推薦成員、system prompt）。內建範本可編輯但不可刪除。
+          </p>
+          <div className="adm-toolbar">
+            <button type="button" className="adm-btn adm-btn-primary" onClick={startCreateTemplate} disabled={tplSaving}>
+              新增範本
+            </button>
+            <button type="button" className="adm-btn" onClick={() => void loadTemplates()} disabled={tplLoading}>
+              {tplLoading ? "載入中…" : "重新整理"}
+            </button>
+          </div>
+          {tplErr && <div className="adm-alert">{tplErr}</div>}
+        </section>
+
+        {tplForm && (
+          <section className="adm-section">
+            <h3 className="adm-section-title">
+              {isEdit ? `編輯範本：${tplEditingId}` : "新增範本"}
+              {editingBuiltin && <span className="adm-pill" style={{ marginLeft: 8 }}>內建</span>}
+            </h3>
+            <div className="adm-form">
+              <label className="adm-field">
+                id{isEdit ? "（不可修改）" : "（必填，英數／_／-）"}
+                <input
+                  className="adm-input"
+                  value={tplForm.id}
+                  readOnly={isEdit}
+                  disabled={isEdit}
+                  placeholder="例如 my-sop"
+                  onChange={(e) => patchTplForm({ id: e.target.value })}
+                />
+              </label>
+              <label className="adm-field">
+                名稱（必填）
+                <input
+                  className="adm-input"
+                  value={tplForm.name}
+                  onChange={(e) => patchTplForm({ name: e.target.value })}
+                />
+              </label>
+              <label className="adm-field is-wide">
+                描述
+                <input
+                  className="adm-input"
+                  value={tplForm.description}
+                  onChange={(e) => patchTplForm({ description: e.target.value })}
+                />
+              </label>
+              <label className="adm-field">
+                排序（小的在前）
+                <input
+                  className="adm-input"
+                  type="number"
+                  value={tplForm.sortOrder}
+                  onChange={(e) => patchTplForm({ sortOrder: e.target.value })}
+                />
+              </label>
+              <label className="adm-field">
+                啟用
+                <span>
+                  <button
+                    type="button"
+                    className={`adm-switch ${tplForm.enabled ? "is-on" : ""}`}
+                    aria-pressed={tplForm.enabled}
+                    aria-label={tplForm.enabled ? "停用" : "啟用"}
+                    onClick={() => patchTplForm({ enabled: !tplForm.enabled })}
+                  >
+                    <span />
+                  </button>
+                </span>
+              </label>
+              <label className="adm-field">
+                階段 stages（一行一個）
+                <textarea
+                  className="adm-textarea"
+                  rows={5}
+                  value={tplForm.stagesText}
+                  onChange={(e) => patchTplForm({ stagesText: e.target.value })}
+                />
+              </label>
+              <label className="adm-field">
+                快捷引導 quickPrompts（一行一個）
+                <textarea
+                  className="adm-textarea"
+                  rows={5}
+                  value={tplForm.quickPromptsText}
+                  onChange={(e) => patchTplForm({ quickPromptsText: e.target.value })}
+                />
+              </label>
+              <label className="adm-field is-wide">
+                systemPrompt
+                <textarea
+                  className="adm-textarea"
+                  rows={6}
+                  value={tplForm.systemPrompt}
+                  onChange={(e) => patchTplForm({ systemPrompt: e.target.value })}
+                />
+              </label>
+              <label className="adm-field is-wide">
+                streamLeadPreface
+                <textarea
+                  className="adm-textarea"
+                  rows={3}
+                  value={tplForm.streamLeadPreface}
+                  onChange={(e) => patchTplForm({ streamLeadPreface: e.target.value })}
+                />
+              </label>
+              <label className="adm-field is-wide">
+                recommendedModels（JSON 陣列：{`[{ "role": "lead", "modelId": "...", "label": "..." }]`}）
+                <textarea
+                  className="adm-textarea is-mono"
+                  rows={6}
+                  value={tplForm.recommendedModelsText}
+                  onChange={(e) => patchTplForm({ recommendedModelsText: e.target.value })}
+                />
+              </label>
+            </div>
+            {tplFormErr && <div className="adm-alert">{tplFormErr}</div>}
+            <div className="adm-toolbar">
+              <button
+                type="button"
+                className="adm-btn adm-btn-primary"
+                onClick={() => void saveTemplate()}
+                disabled={tplSaving}
+              >
+                {tplSaving ? "儲存中…" : isEdit ? "儲存變更" : "建立範本"}
+              </button>
+              <button type="button" className="adm-btn" onClick={closeTemplateForm} disabled={tplSaving}>
+                取消
+              </button>
+            </div>
+          </section>
+        )}
+
+        <section className="adm-section">
+          <h3 className="adm-section-title">
+            範本列表 <span className="adm-count">{tplList.length}</span>
+          </h3>
+          <div className="adm-table-wrap">
+            <table className="adm-table">
+              <thead>
+                <tr>
+                  <th>排序</th>
+                  <th>範本</th>
+                  <th>階段／引導／成員</th>
+                  <th>啟用</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tplList.map((t) => {
+                  const on = t.enabled !== false;
+                  return (
+                    <tr key={t.id}>
+                      <td>{t.sortOrder ?? "—"}</td>
+                      <td>
+                        <strong>{t.name}</strong>{" "}
+                        {t.isBuiltin && <span className="adm-pill">內建</span>}
+                        <div className="adm-sub">
+                          <code>{t.id}</code>
+                          {t.description ? ` · ${t.description}` : ""}
+                        </div>
+                      </td>
+                      <td className="adm-sub">
+                        {t.stages?.length ?? 0} 階段 · {t.quickPrompts?.length ?? 0} 引導 ·{" "}
+                        {t.recommendedModels?.length ?? 0} 成員
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className={`adm-switch ${on ? "is-on" : ""}`}
+                          onClick={() => void toggleTemplateEnabled(t)}
+                          disabled={tplBusyId === t.id}
+                          aria-pressed={on}
+                          aria-label={`${on ? "停用" : "啟用"} ${t.name}`}
+                        >
+                          <span />
+                        </button>
+                      </td>
+                      <td>
+                        <div className="adm-toolbar" style={{ marginBottom: 0 }}>
+                          <button
+                            type="button"
+                            className="adm-btn"
+                            onClick={() => startEditTemplate(t)}
+                            disabled={tplBusyId === t.id}
+                          >
+                            編輯
+                          </button>
+                          {t.isBuiltin ? (
+                            <button type="button" className="adm-btn" disabled title="內建範本不可刪除">
+                              刪除
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="adm-btn"
+                              onClick={() => void deleteTemplate(t)}
+                              disabled={tplBusyId === t.id}
+                            >
+                              刪除
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {tplList.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="adm-empty-cell">
+                      {tplLoading ? "載入中…" : "尚無範本"}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </>
+    );
+  }
+
   const views: Record<ViewId, () => ReactNode> = {
     dashboard: renderDashboard,
     reservoir: renderReservoir,
@@ -1619,6 +2090,7 @@ export default function AdminPage() {
     partners: renderPartners,
     mint: renderMint,
     ledger: renderLedger,
+    strategyTemplates: renderStrategyTemplates,
     compliance: renderCompliance,
   };
 
@@ -1698,7 +2170,7 @@ export default function AdminPage() {
         <div className="adm-body">
           {ovErr && <div className="adm-alert">{ovErr}</div>}
           {msg && <div className="adm-toast">{msg}</div>}
-          {!ov && !ovErr && active !== "mint" && active !== "compliance" ? (
+          {!ov && !ovErr && active !== "mint" && active !== "compliance" && active !== "strategyTemplates" ? (
             <div className="adm-empty">載入中…</div>
           ) : (
             views[active]()

@@ -20,6 +20,7 @@ import {
   type PauseAction,
   type StrategyDispatchItem,
   type StrategyMemberConfig,
+  type StrategyModelOption,
   type StrategySessionDetail,
   type StrategySyncResponse,
   type StrategyTemplateInfo,
@@ -1090,6 +1091,24 @@ async function readZipAttachment(file: File, maxParts: number): Promise<PendingF
 
 export default function ChatPage() {
   const [models, setModels] = useState<ModelOption[]>([]);
+  /** 會議室成員下拉：帶入 familyLabel／effort／note／categoryLabel／available */
+  const strategyModelOptions = useMemo<StrategyModelOption[]>(
+    () =>
+      models.map((m) => ({
+        id: m.id,
+        label: m.label,
+        familyId: m.familyId,
+        familyLabel: m.familyLabel,
+        provider: m.provider,
+        category: m.category,
+        categoryLabel: m.categoryLabel,
+        tier: m.tier,
+        effort: m.effort ?? undefined,
+        note: m.note,
+        available: m.available,
+      })),
+    [models],
+  );
   const [familyId, setFamilyId] = useState(AUTO_FAMILY_ID);
   /** 僅手動選 top 模型時可開；預設關閉 */
   const [deepThink, setDeepThink] = useState(false);
@@ -3505,7 +3524,7 @@ export default function ChatPage() {
           onError={setStrategyError}
           canSplit={canSplit}
           viewMode={viewMode}
-          models={models}
+          models={strategyModelOptions}
           templates={strategyTemplates}
           default3AiPreset={strategyDefault3Ai}
           onToggleSplit={() => setViewMode((m) => (m === "split" ? "strategy" : "split"))}

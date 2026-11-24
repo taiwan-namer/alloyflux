@@ -28,8 +28,25 @@ export type StrategyModelOption = {
   category?: string;
   categoryLabel?: string;
   tier?: "top" | "main" | "light";
+  /** 推理強度（如 low / medium / high），僅供下拉顯示 */
+  effort?: string | null;
   available: boolean;
   note?: string;
+};
+
+/** 後台 SOP 範本（GET /api/admin/strategy-templates，camelCase） */
+export type AdminStrategyTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  stages: string[];
+  quickPrompts: string[];
+  recommendedModels: { role: string; modelId: string; label: string }[];
+  systemPrompt: string;
+  streamLeadPreface: string;
+  enabled?: boolean;
+  sortOrder?: number;
+  isBuiltin?: boolean;
 };
 
 export type StrategyStreamEvent =
@@ -59,8 +76,6 @@ export type StreamingMemberBubble = {
   modelId: string;
   label: string;
   content: string;
-  thinking: string;
-  thinkingOpen: boolean;
   done: boolean;
 };
 
