@@ -29,9 +29,10 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   const auth = await authenticateStrategyReader(req);
   if (!auth) return Response.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await ctx.params;
-  const session = await getStrategySession(auth.user.id, id);
-  if (!session) return Response.json({ error: "Not found" }, { status: 404 });
   const url = new URL(req.url);
+  const threadOnly = url.searchParams.get("part") === "thread";
+  const session = await getStrategySession(auth.user.id, id, threadOnly ? { omitMeta: true } : undefined);
+  if (!session) return Response.json({ error: "Not found" }, { status: 404 });
   const withMessages = url.searchParams.get("messages") !== "0";
   const before = url.searchParams.get("before");
   const rawLimit = url.searchParams.get("limit");
@@ -57,9 +58,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
           nextCursor: null as string | null,
           total: 0,
         }),
-    listRunsForSessionBrief(auth.user.id, id, lite ? 5 : 10),
-    listSessionReports(auth.user.id, id, lite ? 20 : 30, { includeContent: false }),
-    listSessionDispatch(auth.user.id, id, lite ? 30 : 50),
+    threadOnly ? Promise.resolve([]) : listRunsForSessionBrief(auth.user.id, id, lite ? 5 : 10),
+    threadOnly ? Promise.resolve([]) : listSessionReports(auth.user.id, id, lite ? 20 : 30, { includeContent: false }),
+    threadOnly ? Promise.resolve([]) : listSessionDispatch(auth.user.id, id, lite ? 30 : 50),
   ]);
 
   const reports = reportRows.map((r) => ({
@@ -70,14 +71,28 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     chars: r.chars,
     createdAt: r.createdAt,
   }));
-  const ledger = readLedger(session.meta);
+  const messages = threadOnly
+    ? page.messages.map((m) => {
+        const structured = m.structured ?? {};
+        const source = typeof structured.source === "string" ? structured.source : undefined;
+        const kind = typeof structured.kind === "string" ? structured.kind : undefined;
+        return {
+          ...m,
+          structured: source || kind ? { source, kind } : {},
+        };
+      })
+    : page.messages;
+  const ledger = threadOnly ? null : readLedger(session.meta);
+  const { meta: _meta, pendingInstructions: _pending, ...threadSession } = session;
   return Response.json({
-    session,
-    dossier: readDossier(session.meta),
+    session: threadOnly ? threadSession : session,
+    dossier: threadOnly
+      ? { strategies: {}, findings: [], decisions: [], fPlan: null }
+      : readDossier(session.meta),
     ledger,
-    ledgerText: renderLedgerForHuman(ledger),
+    ledgerText: ledger ? renderLedgerForHuman(ledger) : "",
     mode: readRoomMode(session.meta),
-    messages: page.messages,
+    messages,
     hasMore: page.hasMore,
     nextCursor: page.nextCursor,
     messageTotal: page.total,

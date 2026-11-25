@@ -9,6 +9,7 @@ import {
   createConversation,
   settleAssistantMessage,
 } from "@/lib/store";
+import { absorbStrategyRoomMemory, formatStrategyRoomMemory } from "@/lib/strategy-room-memory";
 import {
   STRATEGY_STREAM_HEADERS,
   StrategyJsonTailBuffer,
@@ -145,6 +146,8 @@ async function buildContextBlock(
 ): Promise<{ contextBlock: string; dossier: ReturnType<typeof readDossier> }> {
   const dossier = readDossier(session.meta);
   const ledger = readLedger(session.meta);
+  const roomMemory = formatStrategyRoomMemory(session.meta, session.id);
+  const memoryBlock = roomMemory ? `## 會議室記憶（狀態筆記與較早對話摘要）\n${roomMemory}` : "";
 
   if (lean) {
     // 像一般聊天：只有專案錨點＋上一回合之後新上傳的報告，其餘全靠對話紀錄
@@ -155,6 +158,7 @@ async function buildContextBlock(
     });
     const contextBlock = [
       renderLedgerAnchor(ledger),
+      memoryBlock,
       bodies ? `## 上一回合之後 Cursor 上傳的報告${bodies}` : "",
       `## 發言來源\n本回合訊息來自：${fromWeb ? "使用者（網頁）" : "Cursor"}`,
     ]
@@ -194,6 +198,7 @@ async function buildContextBlock(
     `# 會議室 ${session.name}（${session.id}）｜phase=${session.status}${session.topic ? `｜主題：${session.topic}` : ""}`,
     session.summary ? `## 本會議室上一版摘要\n${session.summary}` : "",
     queryBodies ? `## 上一回合 roomQueries 的結果${queryBodies}` : "",
+    memoryBlock,
     `## 策略檔案夾 dossier\n${JSON.stringify(dossier)}`,
     // 帳本已列「你上一回合下的指令」時不重複
     ledger.lastHostTurn
@@ -237,7 +242,6 @@ async function buildUpstream(
           offset,
           minKeep: L.leanHistoryMinMessages,
           maxChars: L.leanHistoryCharBudget,
-          olderUserMaxChars: L.leanOlderUserMaxChars,
           olderAssistantMaxChars: L.leanOlderAssistantMaxChars,
         }
       : { offset },
@@ -730,16 +734,27 @@ async function finalizeTurn(input: {
   });
 
   if (!input.skipMemoryAndDispatch) {
+    let nextMeta: Record<string, unknown> = {
+      ...baseMeta,
+      dossier: nextDossier,
+      roomQueryResults: nextQueryResults,
+      reportFocus: readReportFocus({ reportFocus: parsedPack.parsed.reportFocus }),
+      ...(ledgerResult ? { ledger: ledgerResult.ledger } : {}),
+    };
+    try {
+      nextMeta = await absorbStrategyRoomMemory({
+        userId: input.authUserId,
+        sessionId: input.sessionId,
+        meta: nextMeta,
+        lean: readRoomMode(baseMeta) === "lean",
+      });
+    } catch (e) {
+      console.warn("[strategy-memory] absorb failed", e instanceof Error ? e.message : e);
+    }
     await updateStrategySession(input.authUserId, input.sessionId, {
       status: nextStatus,
       ...(shouldAutoDispatch ? { pendingInstructions: toDispatch } : {}),
-      meta: {
-        ...baseMeta,
-        dossier: nextDossier,
-        roomQueryResults: nextQueryResults,
-        reportFocus: readReportFocus({ reportFocus: parsedPack.parsed.reportFocus }),
-        ...(ledgerResult ? { ledger: ledgerResult.ledger } : {}),
-      },
+      meta: nextMeta,
       model: input.leadModelId,
       summary,
     });

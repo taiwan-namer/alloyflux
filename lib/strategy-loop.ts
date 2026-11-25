@@ -82,9 +82,8 @@ export const STRATEGY_LIMITS = {
   historyMinMessages: 8,
   historyWindowStep: 4,
   strategyHistoryCharBudget: 14000,
-  /** 歷史中較舊訊息的固定壓縮上限（依訊息本身決定，不隨回合變動） */
-  historyOlderAssistantMaxChars: 800,
-  historyOlderUserMaxChars: 3000,
+  /** 歷史中較舊主持人回覆的固定壓縮上限（與聊天的舊回覆相同；使用者原文不裁） */
+  historyOlderAssistantMaxChars: 1800,
   /** 同一系列報告（_p1/_p2…）合併後的注入上限 */
   reportSeriesInjectMaxChars: 12000,
   reportsIndexMaxChars: 1500,
@@ -96,8 +95,7 @@ export const STRATEGY_LIMITS = {
   leanMessageMaxChars: 30000,
   leanHistoryMinMessages: 10,
   leanHistoryCharBudget: 40000,
-  leanOlderUserMaxChars: 4000,
-  leanOlderAssistantMaxChars: 1500,
+  leanOlderAssistantMaxChars: 1800,
   /** 使用者每提出一次需求後，Cursor 最多能觸發幾次主持人回合 */
   leanCursorTurnsPerTask: 4,
 } as const;
@@ -240,7 +238,6 @@ export function selectStrategyHistory<
     step?: number;
     maxChars?: number;
     offset?: number;
-    olderUserMaxChars?: number;
     olderAssistantMaxChars?: number;
   },
 ): T[] {
@@ -275,10 +272,9 @@ export function selectStrategyHistory<
   const lastIdx = slice.length - 1;
   return slice.map((m, i) => {
     if (i === lastIdx || i === lastAssistant) return m;
-    const max =
-      m.role === "assistant"
-        ? opts?.olderAssistantMaxChars ?? STRATEGY_LIMITS.historyOlderAssistantMaxChars
-        : opts?.olderUserMaxChars ?? STRATEGY_LIMITS.historyOlderUserMaxChars;
+    // 使用者原文保留。只壓縮較舊的主持人回覆。
+    if (m.role !== "assistant") return m;
+    const max = opts?.olderAssistantMaxChars ?? STRATEGY_LIMITS.historyOlderAssistantMaxChars;
     const content = headTail(m.content ?? "", max);
     return content === m.content ? m : { ...m, content };
   });
@@ -1119,14 +1115,22 @@ export async function listStrategySessions(userId: string, limit = 20) {
   return rows.map(mapSession);
 }
 
-export async function getStrategySession(userId: string, sessionId: string) {
+export async function getStrategySession(
+  userId: string,
+  sessionId: string,
+  opts?: { omitMeta?: boolean },
+) {
   await ensureTables();
-  const row = (await db()
-    .prepare(
-      `SELECT * FROM strategy_sessions
-       WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
-    )
-    .get(sessionId, userId)) as Record<string, unknown> | undefined;
+  // 點開對話不讀 meta_json／待派送：那兩欄很大，會拖住訊息出現
+  const sql = opts?.omitMeta
+    ? `SELECT id, user_id, name, profile_id, strategy_version, status, model, models_json,
+              template_id, workspace_id, topic, summary, summary_updated_at, auto_dispatch,
+              pause_state, created_at, updated_at
+       FROM strategy_sessions
+       WHERE id = ? AND user_id = ? AND deleted_at IS NULL`
+    : `SELECT * FROM strategy_sessions
+       WHERE id = ? AND user_id = ? AND deleted_at IS NULL`;
+  const row = (await db().prepare(sql).get(sessionId, userId)) as Record<string, unknown> | undefined;
   return row ? mapSession(row) : null;
 }
 
@@ -1989,6 +1993,31 @@ export async function listSessionMessages(
 ) {
   const page = await listSessionMessagesPage(userId, sessionId, { limit });
   return page.messages;
+}
+
+/** 比 afterCreatedAt 新、比 beforeCreatedAt 舊的訊息（升序）。用來吸收已滑出視窗的歷史。 */
+export async function listSessionMessagesBetween(
+  userId: string,
+  sessionId: string,
+  afterCreatedAt: number,
+  beforeCreatedAt: number,
+  limit = 40,
+): Promise<StrategySessionMessageRow[]> {
+  await ensureTables();
+  if (!(beforeCreatedAt > afterCreatedAt)) return [];
+  const cap = Math.min(Math.max(limit, 1), STRATEGY_LIMITS.messagesPageMax);
+  const msgCols = `id, session_id, user_id, role, content, structured_json, created_at,
+                   speaker_model, speaker_role, speaker_label, turn_id, completion_status`;
+  const rows = (await db()
+    .prepare(
+      `SELECT ${msgCols} FROM strategy_session_messages
+       WHERE session_id = ? AND user_id = ?
+         AND created_at > ? AND created_at < ?
+       ORDER BY created_at ASC, id ASC
+       LIMIT ?`,
+    )
+    .all(sessionId, userId, afterCreatedAt, beforeCreatedAt, cap)) as Record<string, unknown>[];
+  return rows.map(mapSessionMessageRow);
 }
 
 export async function listSessionMessagesPage(

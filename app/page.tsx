@@ -81,6 +81,11 @@ const CONV_CACHE_MAX = 48;
 const CONV_SS_KEY = "af-conv-open-v1";
 /** 側欄標題自己一份，重整時先畫標題，不等訊息本體 */
 const CONV_LIST_SS_KEY = "af-conv-list-v1";
+/** 會議室側欄名單，重整時跟對話標題一樣先畫出來 */
+const WS_LIST_SS_KEY = "af-ws-list-v1";
+/** 已開過的會議室只留最近幾則，點下去先畫出來 */
+const STRATEGY_OPEN_SS_KEY = "af-strategy-open-v1";
+const STRATEGY_OPEN_SS_MAX = 6;
 
 type ConvOpenCache = {
   messages: Message[];
@@ -157,6 +162,150 @@ function writeConvListSession(list: Conversation[]) {
           title: c.title,
           model: c.model,
           updatedAt: c.updatedAt,
+        })),
+      ),
+    );
+  } catch {
+    /* quota */
+  }
+}
+
+function readStrategyListSession(): StrategyWorkspaceBrief[] {
+  try {
+    const raw = sessionStorage.getItem(WS_LIST_SS_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw) as StrategyWorkspaceBrief[];
+    if (!Array.isArray(list)) return [];
+    return list.filter((ws) => ws && typeof ws.id === "string" && typeof ws.name === "string");
+  } catch {
+    return [];
+  }
+}
+
+function slimStrategyOpen(detail: StrategySessionDetail): StrategySessionDetail {
+  const all = Array.isArray(detail.messages) ? detail.messages : [];
+  const messages = all.slice(-STRATEGY_OPEN_MESSAGE_LIMIT);
+  const sliced = all.length > messages.length;
+  const oldest = messages[0];
+  const hasMore = Boolean(detail.hasMore) || sliced;
+  const nextCursor =
+    !hasMore || !oldest
+      ? null
+      : sliced
+        ? `${oldest.createdAt}:${oldest.id}`
+        : (detail.nextCursor ?? `${oldest.createdAt}:${oldest.id}`);
+  const session = detail.session;
+  return {
+    session: {
+      id: session.id,
+      name: session.name,
+      status: session.status,
+      model: session.model,
+      models: session.models ?? null,
+      templateId: session.templateId ?? null,
+      topic: session.topic,
+      summary: session.summary,
+      autoDispatch: session.autoDispatch,
+      pauseState: session.pauseState,
+      updatedAt: session.updatedAt,
+      workspaceId: session.workspaceId,
+      profileId: session.profileId,
+      strategyVersion: session.strategyVersion,
+    },
+    dispatch: [],
+    reports: [],
+    runs: [],
+    dossier: { strategies: {}, findings: [], decisions: [], fPlan: null },
+    messages: messages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: typeof m.content === "string" ? m.content : "",
+      createdAt: m.createdAt || 0,
+      structured:
+        m.structured && (m.structured.source || m.structured.kind)
+          ? { source: m.structured.source, kind: m.structured.kind }
+          : undefined,
+      speakerModel: m.speakerModel ?? null,
+      speakerRole: m.speakerRole ?? null,
+      speakerLabel: m.speakerLabel ?? null,
+      turnId: m.turnId ?? null,
+      completionStatus: m.completionStatus ?? null,
+    })),
+    hasMore,
+    nextCursor,
+    messageTotal: typeof detail.messageTotal === "number" ? detail.messageTotal : all.length,
+  };
+}
+
+function readStrategyOpenSession(id: string): StrategyCacheEntry | null {
+  try {
+    const raw = sessionStorage.getItem(STRATEGY_OPEN_SS_KEY);
+    if (!raw) return null;
+    const all = JSON.parse(raw) as Record<string, StrategyCacheEntry>;
+    const hit = all?.[id];
+    if (!hit?.detail?.session || !Array.isArray(hit.detail.messages)) return null;
+    return { detail: normalizeStrategyDetail(hit.detail), at: hit.at || 0 };
+  } catch {
+    return null;
+  }
+}
+
+function writeStrategyOpenSession(id: string, entry: StrategyCacheEntry) {
+  try {
+    const raw = sessionStorage.getItem(STRATEGY_OPEN_SS_KEY);
+    const all = raw ? (JSON.parse(raw) as Record<string, StrategyCacheEntry>) : {};
+    all[id] = entry;
+    const ids = Object.keys(all);
+    if (ids.length > STRATEGY_OPEN_SS_MAX) {
+      ids.sort((a, b) => (all[a]?.at ?? 0) - (all[b]?.at ?? 0));
+      for (const k of ids) {
+        if (Object.keys(all).length <= STRATEGY_OPEN_SS_MAX) break;
+        if (k === id) continue;
+        delete all[k];
+      }
+    }
+    sessionStorage.setItem(STRATEGY_OPEN_SS_KEY, JSON.stringify(all));
+  } catch {
+    /* quota */
+  }
+}
+
+function deleteStrategyOpenSession(id?: string) {
+  try {
+    if (!id) {
+      sessionStorage.removeItem(STRATEGY_OPEN_SS_KEY);
+      return;
+    }
+    const raw = sessionStorage.getItem(STRATEGY_OPEN_SS_KEY);
+    if (!raw) return;
+    const all = JSON.parse(raw) as Record<string, StrategyCacheEntry>;
+    delete all[id];
+    sessionStorage.setItem(STRATEGY_OPEN_SS_KEY, JSON.stringify(all));
+  } catch {
+    /* quota */
+  }
+}
+
+function writeStrategyListSession(list: StrategyWorkspaceBrief[]) {
+  try {
+    if (!list.length) {
+      sessionStorage.removeItem(WS_LIST_SS_KEY);
+      return;
+    }
+    sessionStorage.setItem(
+      WS_LIST_SS_KEY,
+      JSON.stringify(
+        list.map((ws) => ({
+          id: ws.id,
+          name: ws.name,
+          memory: { notes: ws.memory?.notes ?? "" },
+          rooms: (ws.rooms ?? []).map((room) => ({
+            id: room.id,
+            name: room.name,
+            status: room.status,
+            topic: room.topic,
+            updatedAt: room.updatedAt,
+          })),
         })),
       ),
     );
@@ -1326,6 +1475,7 @@ export default function ChatPage() {
   const [trashedConversations, setTrashedConversations] = useState<Conversation[]>([]);
   const [trashBusy, setTrashBusy] = useState(false);
   const [strategyWorkspaces, setStrategyWorkspaces] = useState<StrategyWorkspaceBrief[]>([]);
+  const [strategyListSettled, setStrategyListSettled] = useState(false);
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set());
   const [newWsOpen, setNewWsOpen] = useState(false);
   const [newWsName, setNewWsName] = useState("");
@@ -1490,6 +1640,11 @@ export default function ChatPage() {
     writeConvListSession(conversations);
   }, [conversations]);
 
+  useEffect(() => {
+    if (!strategyListReadyRef.current) return;
+    writeStrategyListSession(strategyWorkspaces);
+  }, [strategyWorkspaces]);
+
   /** 使用者剛問話：立刻把該對話拉到側欄最上（Cursor 式，不必等 AI 跑完） */
   const bumpConversationToTop = useCallback((id: string, patch?: Partial<Conversation>) => {
     if (!id) return;
@@ -1545,18 +1700,24 @@ export default function ChatPage() {
         cache: "no-store",
         priority: "high",
       } as RequestInit);
-      if (!res.ok) {
-        setStrategyWorkspaces([]);
-        return;
-      }
+      if (!res.ok) return;
       const data = (await res.json()) as { workspaces?: StrategyWorkspaceBrief[] };
-      setStrategyWorkspaces(Array.isArray(data.workspaces) ? data.workspaces : []);
+      const list = Array.isArray(data.workspaces) ? data.workspaces : [];
+      setStrategyWorkspaces(list);
+      writeStrategyListSession(list);
     } catch {
       // 側欄清單已在畫面上就留著
     } finally {
       strategyListInflightRef.current = false;
       strategyListReadyRef.current = true;
+      setStrategyListSettled(true);
     }
+  }, []);
+
+  useClientLayoutEffect(() => {
+    const cached = readStrategyListSession();
+    if (!cached.length) return;
+    setStrategyWorkspaces((cur) => (cur.length ? cur : cached));
   }, []);
 
   useEffect(() => {
@@ -1819,6 +1980,7 @@ export default function ChatPage() {
     if (authLoading) return;
     if (!authUser) {
       setStrategyWorkspaces([]);
+      writeStrategyListSession([]);
       return;
     }
     void refreshWallet();
@@ -2216,6 +2378,7 @@ export default function ChatPage() {
       return;
     }
     strategyCacheRef.current.delete(id);
+    deleteStrategyOpenSession(id);
     strategyInflightRef.current.delete(id);
     setStrategyWorkspaces((list) =>
       list.map((ws) => ({
@@ -2291,7 +2454,9 @@ export default function ChatPage() {
 
   function putStrategyCache(id: string, detail: StrategySessionDetail) {
     const map = strategyCacheRef.current;
-    map.set(id, { detail, at: Date.now() });
+    const entry: StrategyCacheEntry = { detail: slimStrategyOpen(detail), at: Date.now() };
+    map.set(id, entry);
+    writeStrategyOpenSession(id, entry);
     while (map.size > STRATEGY_CACHE_MAX) {
       let oldestId: string | null = null;
       let oldestAt = Infinity;
@@ -2307,14 +2472,21 @@ export default function ChatPage() {
     }
   }
 
-  function getStrategyCache(id: string): StrategySessionDetail | null {
-    const hit = strategyCacheRef.current.get(id);
-    if (!hit) return null;
-    if (Date.now() - hit.at > STRATEGY_CACHE_TTL_MS) {
+  function getStrategyCacheEntry(id: string, allowStale = false): StrategyCacheEntry | null {
+    const mem = strategyCacheRef.current.get(id);
+    if (mem) {
+      if (allowStale || Date.now() - mem.at <= STRATEGY_CACHE_TTL_MS) return mem;
       strategyCacheRef.current.delete(id);
-      return null;
     }
-    return hit.detail;
+    const ss = readStrategyOpenSession(id);
+    if (!ss) return null;
+    if (!allowStale && Date.now() - ss.at > STRATEGY_CACHE_TTL_MS) return null;
+    strategyCacheRef.current.set(id, ss);
+    return ss;
+  }
+
+  function getStrategyCache(id: string, allowStale = false): StrategySessionDetail | null {
+    return getStrategyCacheEntry(id, allowStale)?.detail ?? null;
   }
 
   function ensureStrategyFetch(
@@ -2340,7 +2512,7 @@ export default function ChatPage() {
     };
     const promise = (async () => {
       const res = await fetch(
-        `/api/strategy/sessions/${encodeURIComponent(id)}?limit=${STRATEGY_OPEN_MESSAGE_LIMIT}&lite=1`,
+        `/api/strategy/sessions/${encodeURIComponent(id)}?limit=${STRATEGY_OPEN_MESSAGE_LIMIT}&lite=1&part=thread`,
         { cache: "no-store", priority, signal: controller.signal } as RequestInit,
       );
       const data = await res.json().catch(() => ({}));
@@ -2368,9 +2540,51 @@ export default function ChatPage() {
 
   function applyStrategyDetail(
     detail: StrategySessionDetail,
-    opts: { switching: boolean; refreshMemory: boolean },
+    opts: { switching: boolean; refreshMemory: boolean; keepOlder?: boolean },
   ) {
-    setStrategyDetail(detail);
+    setStrategyDetail((prev) => {
+      const same = prev?.session.id === detail.session.id;
+      let messages = detail.messages ?? [];
+      let hasMore = Boolean(detail.hasMore);
+      let nextCursor = detail.nextCursor ?? null;
+      if (opts.keepOlder && same && prev && prev.messages.length) {
+        const byId = new Map(prev.messages.map((m) => [m.id, m]));
+        for (const m of messages) byId.set(m.id, m);
+        messages = [...byId.values()].sort((a, b) => {
+          const dt = (a.createdAt || 0) - (b.createdAt || 0);
+          return dt !== 0 ? dt : String(a.id).localeCompare(String(b.id));
+        });
+        const incomingOldest = detail.messages[0];
+        const mergedOldest = messages[0];
+        if (
+          incomingOldest &&
+          mergedOldest &&
+          (mergedOldest.createdAt < incomingOldest.createdAt ||
+            (mergedOldest.createdAt === incomingOldest.createdAt &&
+              String(mergedOldest.id) < String(incomingOldest.id)))
+        ) {
+          hasMore = Boolean(prev.hasMore);
+          nextCursor = prev.nextCursor ?? null;
+        }
+      }
+      const keepList = <T,>(incoming: T[] | undefined, previous: T[] | undefined) =>
+        incoming && incoming.length ? incoming : same && previous ? previous : (incoming ?? []);
+      const dossierEmpty =
+        !detail.dossier?.findings?.length &&
+        !detail.dossier?.decisions?.length &&
+        !detail.dossier?.fPlan &&
+        !Object.keys(detail.dossier?.strategies ?? {}).length;
+      return {
+        ...detail,
+        messages,
+        hasMore,
+        nextCursor,
+        dispatch: keepList(detail.dispatch, prev?.dispatch),
+        runs: keepList(detail.runs, prev?.runs),
+        reports: keepList(detail.reports, prev?.reports),
+        dossier: dossierEmpty && same && prev ? prev.dossier : detail.dossier,
+      };
+    });
     putStrategyCache(detail.session.id, detail);
     const ws = strategyWorkspaces.find((w) => w.id === detail.session.workspaceId);
     if (opts.refreshMemory && (opts.switching || !wsMemoryDirty)) {
@@ -2385,6 +2599,7 @@ export default function ChatPage() {
     openStrategyAbortRef.current = ac;
 
     setStrategyError(null);
+    abortBackgroundPrefetch();
     setViewMode((m) => (m === "split" && canSplit ? "split" : "strategy"));
     if (!canSplit) setSidebarOpen(false);
     const switching = strategyDetail?.session.id !== id;
@@ -2394,14 +2609,19 @@ export default function ChatPage() {
       setWsMemoryDirty(false);
     }
 
-    const cached = opts?.force ? null : getStrategyCache(id);
-    if (cached) {
-      // 快取命中：立刻上屏，背景靜默重抓
-      applyStrategyDetail(cached, { switching, refreshMemory: true });
+    const hit = opts?.force ? null : getStrategyCacheEntry(id, true);
+    if (hit) {
+      // 看過的會議室先畫最近幾則，不等網路
+      applyStrategyDetail(hit.detail, { switching, refreshMemory: true });
       setStrategyBusy(false);
+      if (Date.now() - hit.at < 20_000) return;
       void ensureStrategyFetch(id).then((fresh) => {
         if (reqId !== openStrategyReqRef.current || ac.signal.aborted || !fresh) return;
-        applyStrategyDetail(fresh, { switching: false, refreshMemory: !wsMemoryDirty });
+        applyStrategyDetail(fresh, {
+          switching: false,
+          refreshMemory: !wsMemoryDirty,
+          keepOlder: true,
+        });
       });
       return;
     }
@@ -2745,7 +2965,12 @@ export default function ChatPage() {
     setTrashOpen(false);
     setTrashedConversations([]);
     setViewMode("chat");
+    strategyListReadyRef.current = false;
+    writeStrategyListSession([]);
+    deleteStrategyOpenSession();
+    strategyCacheRef.current.clear();
     setStrategyWorkspaces([]);
+    setStrategyListSettled(false);
     setStrategyDetail(null);
     changeAttachedWorkspace("");
     setConvMenuId(null);
@@ -3511,13 +3736,13 @@ export default function ChatPage() {
               </div>
             </form>
           )}
-          {!authUser ? (
+          {strategyWorkspaces.length === 0 ? (
             <div className="muted" style={{ padding: "8px 12px", fontSize: 13 }}>
-              登入後可查看策略會議室
-            </div>
-          ) : strategyWorkspaces.length === 0 ? (
-            <div className="muted" style={{ padding: "8px 12px", fontSize: 13 }}>
-              還沒有會議室
+              {!authUser && !authLoading
+                ? "登入後可查看策略會議室"
+                : strategyListSettled
+                  ? "還沒有會議室"
+                  : "載入中…"}
             </div>
           ) : (
             strategyWorkspaces.map((ws) => {

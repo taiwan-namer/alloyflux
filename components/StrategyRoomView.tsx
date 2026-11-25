@@ -216,8 +216,8 @@ function modelOptionTitle(opt: StrategyModelOption): string {
   return parts.join("｜");
 }
 
-/** 往上滑一次補幾則；開房本身只先顯示最近幾則 */
-const STRATEGY_OLDER_PAGE = 10;
+/** 往上滑一次只補幾則，不把更早的歷史一次載完 */
+const STRATEGY_OLDER_PAGE = 5;
 
 export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const {
@@ -278,6 +278,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   /** 補上更早訊息後維持原本視線，避免捲動被拉回頂端 */
   const olderScrollAdjustRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
   const loadingOlderRef = useRef(false);
+  /** 一次上滑只補一頁；離開頂端後才允許再補，避免連載整段歷史 */
+  const olderArmedRef = useRef(true);
   const syncAbortRef = useRef<AbortController | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -447,6 +449,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     if (prev !== detail.session.id) {
       lastUpdatedAtRef.current = detail.session.updatedAt || 0;
       lastMessageCountRef.current = detail.messages.length || 0;
+      olderArmedRef.current = true;
     } else {
       lastUpdatedAtRef.current = Math.max(
         lastUpdatedAtRef.current,
@@ -561,7 +564,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       const count = lastMessageCountRef.current || 0;
       try {
         const res = await fetch(
-          `/api/strategy/sessions/${encodeURIComponent(sid)}/sync?since=${encodeURIComponent(String(since))}&count=${encodeURIComponent(String(count))}&limit=8`,
+          `/api/strategy/sessions/${encodeURIComponent(sid)}/sync?since=${encodeURIComponent(String(since))}&count=${encodeURIComponent(String(count))}&limit=5`,
           { cache: "no-store", signal: ac.signal },
         );
         if (!res.ok || cancelled || ac.signal.aborted) return;
@@ -612,7 +615,12 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     // 使用者明顯上捲時立刻關閉貼底，避免 sync／reveal 把捲動拉回底部
     stickToBottomRef.current = dist < 80;
-    if (el.scrollTop < 72) void loadOlderMessages();
+    if (el.scrollTop > 120) olderArmedRef.current = true;
+    // 貼底時 scrollTop 可能暫時是 0，不要因此把更早的訊息一次補進來
+    if (el.scrollTop < 72 && olderArmedRef.current && !stickToBottomRef.current) {
+      olderArmedRef.current = false;
+      void loadOlderMessages();
+    }
   }
 
   useLayoutEffect(() => {
@@ -666,17 +674,23 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     try {
       const sid = sessionId;
       const res = await fetch(
-        `/api/strategy/sessions/${encodeURIComponent(sid)}?limit=${STRATEGY_OLDER_PAGE}&lite=1&before=${encodeURIComponent(detail.nextCursor)}`,
+        `/api/strategy/sessions/${encodeURIComponent(sid)}?limit=${STRATEGY_OLDER_PAGE}&lite=1&part=thread&before=${encodeURIComponent(detail.nextCursor)}`,
         { cache: "no-store" },
       );
-      if (!res.ok) return;
+      if (!res.ok) {
+        olderArmedRef.current = true;
+        return;
+      }
       const data = (await res.json()) as {
         messages?: StrategySessionMessage[];
         hasMore?: boolean;
         nextCursor?: string | null;
         messageTotal?: number;
       };
-      if (!Array.isArray(data.messages) || !data.messages.length) return;
+      if (!Array.isArray(data.messages) || !data.messages.length) {
+        olderArmedRef.current = true;
+        return;
+      }
       olderScrollAdjustRef.current = { prevHeight, prevTop };
       onOlderMessages({
         messages: data.messages,

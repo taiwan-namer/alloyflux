@@ -248,13 +248,18 @@ describe("精簡會議室回合閘門", () => {
     assert.equal(readRoomMode({}), "classic");
   });
 
-  it("精簡模式的舊訊息壓縮上限可以放寬", () => {
+  it("使用者原文不裁，較舊主持人回覆壓到 1800 字", () => {
     const msgs = Array.from({ length: 6 }, (_, i) => ({
       role: i % 2 === 0 ? "user" : "assistant",
       content: "y".repeat(5000),
       structured: null,
     }));
-    const out = selectStrategyHistory(msgs, { maxChars: 1_000_000, olderUserMaxChars: 4000 });
-    assert.ok(out[0]!.content.length > 3000 && out[0]!.content.length < 5000);
+    const out = selectStrategyHistory(msgs, { maxChars: 1_000_000 });
+    assert.equal(out[0]!.content.length, 5000);
+    const olderAssistant = out.find((m, i) => m.role === "assistant" && i !== out.length - 1);
+    assert.ok(olderAssistant);
+    assert.match(olderAssistant!.content, /中略/);
+    assert.ok(olderAssistant!.content.length < 1900);
+    assert.equal(out[out.length - 1]!.content.length, 5000);
   });
 });
