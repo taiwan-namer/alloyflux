@@ -364,65 +364,55 @@ export async function addOAuthSubscriptionSource(input: {
         ? `Grok 訂閱 ${input.creds.email ?? ""}`.trim()
         : `ChatGPT 訂閱 ${input.creds.email ?? ""}`.trim());
 
-  // 同平台＋同帳號 email 重綁：優先覆寫「同一主人」或「尚無主人」的列，不搶別人的。
-  // 不可寫 `OR ? IS NULL`：Postgres 無法推斷 null 參數型別 → could not determine data type of parameter $N
+  // 同平台＋同訂閱 email：全域只保留一列（避免「交換失敗後重試／雙人綁同一帳」生出雙貨源）
+  // 重綁＝覆寫憑證與配額；owner 改為本次綁定者；其餘同 email 舊列軟刪
   if (input.creds.email) {
     const emailPrefix = `${input.creds.email.toLowerCase()} (`;
     const ownerId = input.ownerUserId?.trim() || null;
-    const existing = (
-      ownerId
-        ? ((await db()
-            .prepare(
-              `SELECT id, label, share_limit_pct, owner_user_id FROM sources
-               WHERE auth_type = 'oauth_sub' AND provider = ? AND LOWER(key_hint) LIKE ?
-                 AND (owner_user_id IS NULL OR owner_user_id = ?)
-               ORDER BY
-                 CASE WHEN owner_user_id = ? THEN 0 WHEN owner_user_id IS NULL THEN 1 ELSE 2 END,
-                 created_at DESC
-               LIMIT 1`,
-            )
-            .get(input.creds.provider, `${emailPrefix}%`, ownerId, ownerId)) as
-            | { id: string; label: string; share_limit_pct: number | null; owner_user_id: string | null }
-            | undefined)
-        : ((await db()
-            .prepare(
-              `SELECT id, label, share_limit_pct, owner_user_id FROM sources
-               WHERE auth_type = 'oauth_sub' AND provider = ? AND LOWER(key_hint) LIKE ?
-                 AND owner_user_id IS NULL
-               ORDER BY created_at DESC
-               LIMIT 1`,
-            )
-            .get(input.creds.provider, `${emailPrefix}%`)) as
-            | { id: string; label: string; share_limit_pct: number | null; owner_user_id: string | null }
-            | undefined)
-    );
+    const existing = (await db()
+      .prepare(
+        `SELECT id, label, share_limit_pct, owner_user_id FROM sources
+         WHERE auth_type = 'oauth_sub' AND provider = ? AND LOWER(key_hint) LIKE ?
+           AND removed_at IS NULL
+         ORDER BY
+           CASE WHEN CAST(owner_user_id AS TEXT) = CAST(? AS TEXT) THEN 0 ELSE 1 END,
+           created_at DESC
+         LIMIT 1`,
+      )
+      .get(input.creds.provider, `${emailPrefix}%`, ownerId ?? "")) as
+      | { id: string; label: string; share_limit_pct: number | null; owner_user_id: string | null }
+      | undefined;
 
     if (existing) {
-      // 若已有主人且不是目前使用者，略過覆寫（理論上 WHERE 已擋；雙重保險）
-      if (existing.owner_user_id && ownerId && existing.owner_user_id !== ownerId) {
-        // fall through to insert
-      } else {
-        await db()
-          .prepare(
-            `UPDATE sources
-             SET label = ?, encrypted_key = ?, key_hint = ?, share_limit_pct = ?,
-                 quota_json = ?, quota_updated_at = ?, enabled = 1,
-                 owner_user_id = COALESCE(CAST(? AS TEXT), owner_user_id)
-             WHERE id = ?`,
-          )
-          .run(
-            input.label?.trim() || existing.label || defaultLabel,
-            encrypt(JSON.stringify(input.creds)),
-            displayHint,
-            clampShareLimitPct(input.shareLimitPct ?? existing.share_limit_pct),
-            JSON.stringify(quota),
-            now,
-            ownerId,
-            existing.id,
-          );
-        health.delete(existing.id);
-        return { id: existing.id, quota };
-      }
+      await db()
+        .prepare(
+          `UPDATE sources
+           SET label = ?, encrypted_key = ?, key_hint = ?, share_limit_pct = ?,
+               quota_json = ?, quota_updated_at = ?, enabled = 1, removed_at = NULL,
+               owner_user_id = COALESCE(CAST(? AS TEXT), owner_user_id)
+           WHERE id = ?`,
+        )
+        .run(
+          input.label?.trim() || existing.label || defaultLabel,
+          encrypt(JSON.stringify(input.creds)),
+          displayHint,
+          clampShareLimitPct(input.shareLimitPct ?? existing.share_limit_pct),
+          JSON.stringify(quota),
+          now,
+          ownerId,
+          existing.id,
+        );
+      // 同 email 其他存活列 → 軟刪，避免後台出現兩條一樣的節點
+      await db()
+        .prepare(
+          `UPDATE sources
+           SET enabled = 0, removed_at = ?
+           WHERE auth_type = 'oauth_sub' AND provider = ? AND LOWER(key_hint) LIKE ?
+             AND id <> ? AND removed_at IS NULL`,
+        )
+        .run(now, input.creds.provider, `${emailPrefix}%`, existing.id);
+      health.delete(existing.id);
+      return { id: existing.id, quota };
     }
   }
 

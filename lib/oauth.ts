@@ -222,8 +222,23 @@ interface PendingOAuth {
 
 const globalForOAuth = globalThis as unknown as {
   __pendingOAuth?: Map<string, PendingOAuth>;
+  __completedDeviceOAuth?: Map<
+    string,
+    { creds: OAuthCredentials; label?: string; shareLimitPct?: number; at: number }
+  >;
 };
 export const pendingOAuth = (globalForOAuth.__pendingOAuth ??= new Map<string, PendingOAuth>());
+/** 裝置碼已成功兌換：後續併發 poll 直接回 completed，避免二次 exchange 噴紅字蓋掉成功 */
+const completedDeviceOAuth = (globalForOAuth.__completedDeviceOAuth ??= new Map());
+
+function rememberCompletedDevice(
+  state: string,
+  payload: { creds: OAuthCredentials; label?: string; shareLimitPct?: number },
+) {
+  completedDeviceOAuth.set(state, { ...payload, at: Date.now() });
+  // 10 分鐘後清掉，避免 Map 無限長大
+  setTimeout(() => completedDeviceOAuth.delete(state), 10 * 60_000).unref?.();
+}
 
 function base64Url(buf: Buffer): string {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -405,6 +420,15 @@ export async function pollChatGptDeviceFlow(state: string): Promise<
   | { status: "pending" }
   | { status: "completed"; creds: OAuthCredentials; label?: string; shareLimitPct?: number }
 > {
+  const cached = completedDeviceOAuth.get(state);
+  if (cached) {
+    return {
+      status: "completed",
+      creds: cached.creds,
+      label: cached.label,
+      shareLimitPct: cached.shareLimitPct,
+    };
+  }
   const pending = decodeStatePayload(state);
   if (!pending || pending.provider !== "openai" || !pending.deviceAuthId || !pending.userCode) {
     throw new Error("找不到對應的驗證狀態，請重新啟動");
@@ -429,7 +453,9 @@ export async function pollChatGptDeviceFlow(state: string): Promise<
   };
   const creds = await exchangeChatGptCode(authorization_code, "https://auth.openai.com/deviceauth/callback", code_verifier);
   pendingOAuth.delete(state);
-  return { status: "completed", creds, label: pending.label, shareLimitPct: pending.shareLimitPct };
+  const done = { creds, label: pending.label, shareLimitPct: pending.shareLimitPct };
+  rememberCompletedDevice(state, done);
+  return { status: "completed", ...done };
 }
 
 // === Grok / SuperGrok Device Code Flow（手機／網頁輸入短碼即可）===
@@ -508,6 +534,15 @@ export async function pollGrokDeviceFlow(state: string): Promise<
   | { status: "completed"; creds: OAuthCredentials; label?: string; shareLimitPct?: number }
   | { status: "slow_down"; interval?: number }
 > {
+  const cached = completedDeviceOAuth.get(state);
+  if (cached) {
+    return {
+      status: "completed",
+      creds: cached.creds,
+      label: cached.label,
+      shareLimitPct: cached.shareLimitPct,
+    };
+  }
   const pending = decodeStatePayload(state);
   if (!pending || pending.provider !== "xai" || !pending.deviceAuthId) {
     throw new Error("找不到對應的 Grok 驗證狀態，請重新啟動");
@@ -537,7 +572,9 @@ export async function pollGrokDeviceFlow(state: string): Promise<
     }
     const creds = await buildGrokCredsFromTokens(t);
     pendingOAuth.delete(state);
-    return { status: "completed", creds, label: pending.label, shareLimitPct: pending.shareLimitPct };
+    const done = { creds, label: pending.label, shareLimitPct: pending.shareLimitPct };
+    rememberCompletedDevice(state, done);
+    return { status: "completed", ...done };
   }
   const err = (await res.json().catch(() => ({}))) as { error?: string; error_description?: string };
   if (err.error === "authorization_pending") return { status: "pending" };

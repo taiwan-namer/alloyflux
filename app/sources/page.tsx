@@ -270,7 +270,9 @@ export default function SourcesPage() {
   // 輪詢 ChatGPT／Grok 裝置碼驗證狀態
   useEffect(() => {
     if (!deviceFlow) return;
+    let finished = false;
     const timer = setInterval(async () => {
+      if (finished) return;
       try {
         const action = deviceFlow.kind === "grok" ? "poll_grok_device" : "poll_chatgpt_device";
         const res = await fetch("/api/oauth", {
@@ -280,6 +282,7 @@ export default function SourcesPage() {
         });
         const data = await res.json();
         if (data.status === "completed") {
+          finished = true;
           setDeviceFlow(null);
           setOauthMsg({
             ok: true,
@@ -290,11 +293,14 @@ export default function SourcesPage() {
           });
           void refresh();
         } else if (data.error) {
+          // 成功後併發輪詢常會噴「找不到驗證狀態」——不可蓋掉已成功的綠字
+          if (finished) return;
+          finished = true;
           setOauthMsg({ ok: false, text: data.error });
           setDeviceFlow(null);
         }
       } catch {
-        // ignore
+        // ignore transient network; keep polling
       }
     }, 3000);
     return () => clearInterval(timer);
