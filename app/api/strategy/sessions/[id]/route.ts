@@ -15,6 +15,7 @@ import {
   templateIdExists,
   updateStrategySession,
   validateSessionModels,
+  readRoomMode,
   type PauseAction,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
@@ -80,6 +81,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     dossier: readDossier(session.meta),
     ledger,
     ledgerText: renderLedgerForHuman(ledger),
+    mode: readRoomMode(session.meta),
     messages,
     hasMore: messagesMeta.hasMore,
     nextCursor: messagesMeta.nextCursor,
@@ -110,7 +112,19 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     models?: unknown;
     templateId?: string;
     ledger?: unknown;
+    mode?: string;
   };
+
+  if (body.mode !== undefined) {
+    if (body.mode !== "lean" && body.mode !== "classic") {
+      return Response.json({ error: "mode 只能是 lean 或 classic" }, { status: 400 });
+    }
+    const cur = await getStrategySession(auth.user.id, id);
+    if (!cur) return Response.json({ error: "Not found" }, { status: 404 });
+    const ok = await updateStrategySession(auth.user.id, id, { meta: { ...cur.meta, mode: body.mode } });
+    if (!ok) return Response.json({ error: "Not found" }, { status: 404 });
+    return Response.json({ session: await getStrategySession(auth.user.id, id), mode: body.mode });
+  }
 
   if (body.ledger !== undefined) {
     const checked = validateLedgerInput(body.ledger);

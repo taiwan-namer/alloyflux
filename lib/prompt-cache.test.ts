@@ -60,6 +60,25 @@ describe("對齊視窗（prompt cache）", () => {
     assert.equal(starts.size, 1);
   });
 
+  it("長回答多輪時，同一視窗期間開頭幾則內容逐字相同", () => {
+    const longConv = (turns: number, lastLen: number): ChatMessage[] => {
+      const out: ChatMessage[] = [];
+      for (let i = 0; i < turns; i++) {
+        out.push({ role: "user", content: `問題 ${i}` });
+        const len = i === turns - 1 ? lastLen : 3000;
+        out.push({ role: "assistant", content: `回答 ${i} ${"內容".repeat(len / 2)}` });
+      }
+      out.push({ role: "user", content: `問題 ${turns}` });
+      return out;
+    };
+    const prefixes = new Set<string>();
+    for (const [turns, lastLen] of [[12, 500], [13, 4000], [14, 1200], [15, 3000]] as const) {
+      const sent = slideMessagesForUpstream(longConv(turns, lastLen));
+      prefixes.add(JSON.stringify(sent.slice(0, 6)));
+    }
+    assert.equal(prefixes.size, 1);
+  });
+
   it("重複套用（route → gateway）結果不變", () => {
     const once = slideMessagesForUpstream(conversation(23));
     assert.deepEqual(slideMessagesForUpstream(once), once);

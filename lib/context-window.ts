@@ -79,6 +79,16 @@ export function scrubRetractMetaTone(content: string): string {
   return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+/** 超出合計額度的舊 assistant：固定只留開頭（重複套用結果不變） */
+export const FOLDED_ASSISTANT_KEEP_CHARS = 200;
+
+function foldToFixed(content: string): string {
+  const text = content ?? "";
+  if (text.endsWith(FOLDED_MARK) && text.length <= FOLDED_ASSISTANT_KEEP_CHARS + FOLDED_MARK.length) return text;
+  if (text.length <= FOLDED_ASSISTANT_KEEP_CHARS) return text;
+  return `${text.slice(0, FOLDED_ASSISTANT_KEEP_CHARS)}${FOLDED_MARK}`;
+}
+
 function hasHtmlFence(content: string): boolean {
   return /```html/i.test(content ?? "");
 }
@@ -142,17 +152,22 @@ export function slimAssistantHistory(messages: ChatMessage[]): ChatMessage[] {
   }
   if (total <= totalCap) return out;
 
+  // 從最新往回分配額度；額度用完後，更早的一律折成固定長度。
+  // 每則只依自身內容與「是否在額度內」決定結果，不會隨總長逐輪微調 → 視窗開頭跨輪一致，才吃得到 prompt cache
   const result = out.map((m) => ({ ...m }));
-  for (let i = 0; i < result.length && total > totalCap; i++) {
-    if (result[i].role !== "assistant") continue;
-    if (i === lastAssistantIdx) continue;
-    const room = total - totalCap;
-    if (result[i].content.length <= 80) continue;
-    const keep = Math.max(80, result[i].content.length - room);
-    const next = alreadyFolded(result[i].content)
-      ? result[i].content.slice(0, keep)
-      : `${result[i].content.slice(0, keep)}${FOLDED_MARK}`;
-    total -= result[i].content.length - next.length;
+  // 預留固定額度給上一則（不用它的實際長度，否則分界會隨上一則長短來回跳）
+  let budget = MAX_HISTORY_ASSISTANT_CHARS - LAST_ASSISTANT_MAX_CHARS;
+  let foldRest = false;
+  for (let i = result.length - 1; i >= 0; i--) {
+    if (result[i].role !== "assistant" || i === lastAssistantIdx) continue;
+    const len = result[i].content.length;
+    if (!foldRest && len <= budget) {
+      budget -= len;
+      continue;
+    }
+    foldRest = true;
+    const next = foldToFixed(result[i].content);
+    total -= len - next.length;
     result[i] = { ...result[i], content: next };
   }
   if (total > totalCap && lastAssistantIdx >= 0) {

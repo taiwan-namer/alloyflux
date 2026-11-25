@@ -92,7 +92,40 @@ export const STRATEGY_LIMITS = {
   /** 未觸發回合的 Cursor 通知：注入則數／單則字數 */
   notesInjectMax: 6,
   noteInjectMaxChars: 600,
+  /** 精簡會議室：像一般聊天只讀對話；回報可整份貼上 */
+  leanMessageMaxChars: 30000,
+  leanHistoryMinMessages: 10,
+  leanHistoryCharBudget: 40000,
+  leanOlderUserMaxChars: 4000,
+  leanOlderAssistantMaxChars: 1500,
+  /** 使用者每提出一次需求後，Cursor 最多能觸發幾次主持人回合 */
+  leanCursorTurnsPerTask: 4,
 } as const;
+
+export type StrategyRoomMode = "classic" | "lean";
+export type LeanTurnType = "align" | "report";
+
+export function readRoomMode(meta: Record<string, unknown> | null | undefined): StrategyRoomMode {
+  return meta?.mode === "lean" ? "lean" : "classic";
+}
+
+export function parseLeanTurnType(raw: unknown): LeanTurnType | null {
+  return raw === "align" || raw === "report" ? raw : null;
+}
+
+/** 從最後一則網頁訊息（使用者提出需求）之後，Cursor 已觸發幾次主持人回合 */
+export function countCursorTurnsSinceWeb(
+  messages: { role: string; structured?: Record<string, unknown> | null }[],
+): number {
+  let n = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== "user" || isHistoryExcluded(m.structured)) continue;
+    if (m.structured?.source === "web") break;
+    n += 1;
+  }
+  return n;
+}
 
 export type StrategyMessageCompletionStatus =
   | "ok"
@@ -202,7 +235,14 @@ export function selectStrategyHistory<
   T extends { role: string; content: string; structured?: Record<string, unknown> | null },
 >(
   messages: T[],
-  opts?: { minKeep?: number; step?: number; maxChars?: number; offset?: number },
+  opts?: {
+    minKeep?: number;
+    step?: number;
+    maxChars?: number;
+    offset?: number;
+    olderUserMaxChars?: number;
+    olderAssistantMaxChars?: number;
+  },
 ): T[] {
   const minKeep = Math.max(2, opts?.minKeep ?? STRATEGY_LIMITS.historyMinMessages);
   const step = Math.max(1, opts?.step ?? STRATEGY_LIMITS.historyWindowStep);
@@ -237,8 +277,8 @@ export function selectStrategyHistory<
     if (i === lastIdx || i === lastAssistant) return m;
     const max =
       m.role === "assistant"
-        ? STRATEGY_LIMITS.historyOlderAssistantMaxChars
-        : STRATEGY_LIMITS.historyOlderUserMaxChars;
+        ? opts?.olderAssistantMaxChars ?? STRATEGY_LIMITS.historyOlderAssistantMaxChars
+        : opts?.olderUserMaxChars ?? STRATEGY_LIMITS.historyOlderUserMaxChars;
     const content = headTail(m.content ?? "", max);
     return content === m.content ? m : { ...m, content };
   });

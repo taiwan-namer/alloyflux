@@ -4,6 +4,7 @@ import {
   applyLedgerTurn,
   emptyLedger,
   readLedger,
+  renderLedgerAnchor,
   renderLedgerForHost,
   validateLedgerInput,
   type StrategyLedger,
@@ -191,5 +192,20 @@ describe("strategy ledger", () => {
     assert.match(text, /\[4B\] 品牌體感與失靈修復 — 🟡 進行中 ◀ 目前/);
     assert.match(text, /\s{2}- \[4B-DE\]/);
     assert.match(text, /你上一回合下的指令\n- 指令：補測試/);
+  });
+});
+
+describe("renderLedgerAnchor", () => {
+  it("空帳本不輸出；有目前項目時輸出一行錨點", () => {
+    assert.equal(renderLedgerAnchor(emptyLedger()), "");
+    const v = validateLedgerInput({
+      items: [{ id: "4A", title: "地基與效能期", status: "in_progress" }],
+      currentItemId: "4A",
+    });
+    assert.ok(v.ok);
+    if (!v.ok) return;
+    const text = renderLedgerAnchor(v.ledger);
+    assert.match(text, /4A「地基與效能期」/);
+    assert.ok(text.length < 400);
   });
 });

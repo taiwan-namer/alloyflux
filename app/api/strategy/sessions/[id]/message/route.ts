@@ -24,6 +24,10 @@ import {
   addSessionMessage,
   buildReportInjection,
   buildWorkspaceBrief,
+  countCursorTurnsSinceWeb,
+  parseLeanTurnType,
+  readRoomMode,
+  type LeanTurnType,
   ensureDefaultWorkspace,
   extractJsonObject,
   getStrategySession,
@@ -51,6 +55,7 @@ import {
   applyLedgerTurn,
   ledgerProtocolBlock,
   readLedger,
+  renderLedgerAnchor,
   renderLedgerForHost,
   type HeldInstruction,
 } from "@/lib/strategy-ledger";
@@ -99,18 +104,31 @@ function limitsBlock(): string {
 - 重要結論寫進 memoryUpdates；summary ≤${L.summaryMaxChars} 字；roomQueries 每回合最多 ${L.roomQueriesPerTurn} 個。`;
 }
 
-function jsonOnlySystem(template: StrategyTemplate): string {
+function leanSopBlock(): string {
+  return `## 工作 SOP（精簡會議室，必須遵守）
+你負責規劃與驗收，不看程式碼；程式碼由 Cursor 在本機讀取、對齊與修改。
+1. 了解：依使用者描述與 Cursor 的架構報告理解專案。資訊不足時，用一個 reportRequests 請 Cursor 交架構摘要（不要原始碼）。
+2. 下指令：instructions 只寫「目標、範圍、驗收標準」，不指定逐行改法；每次最多 5 條，全部屬於目前項目。同時輸出 workPackage（itemId、goal、scope、acceptance）。
+3. 對齊：Cursor 回報「對齊有問題」時，只針對那個問題修正指令，不重新規劃整個專案。
+4. 驗收：Cursor 交「最終報告」時對照驗收標準判定。通過 → verdict "accept"，說明下一步或結束；不通過 → verdict "reject"＋verdictReason，只給一條具體修正指令。
+5. 使用者要求復盤時，再總結得失。
+禁止：要求原始碼或拆段上傳；擴大範圍（新點子寫在 reply 的「建議清單」，不要下成指令）；只為了確認而要求額外報告；部署、git push、正式資料庫寫入一律寫成「待發起人批准」。
+reply 控制在 800 字內。項目完成或要換下一項時，用 ledgerOps（setStatus／setCurrent）更新帳本。`;
+}
+
+function jsonOnlySystem(template: StrategyTemplate, lean: boolean): string {
+  if (lean) {
+    return `${template.systemPrompt}\n\n${leanSopBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, escalationDecision。`;
+  }
   return `${template.systemPrompt}\n\n${limitsBlock()}\n\n${ledgerProtocolBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, escalationDecision, reportFocus。`;
 }
 
-function streamLeadSystem(template: StrategyTemplate): string {
+function streamLeadSystem(template: StrategyTemplate, lean: boolean): string {
   return `${template.streamLeadPreface}
 
-${limitsBlock()}
+${lean ? leanSopBlock() : `${limitsBlock()}\n\n${ledgerProtocolBlock()}`}
 
-${ledgerProtocolBlock()}
-
-結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, roomQueries；需要時另加 ledgerOps, workPackage, verdict, verdictReason, escalationDecision, reportFocus。
+結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, roomQueries；需要時另加 ledgerOps, workPackage, verdict, verdictReason, escalationDecision${lean ? "" : ", reportFocus"}。
 分隔標記必須單獨一行：${STRATEGY_STATE_DELIMITER}
 ${STREAM_REPLY_EMPTY_RULE}`;
 }
@@ -123,9 +141,28 @@ async function buildContextBlock(
   authUserId: string,
   session: StrategySession,
   fromWeb: boolean,
+  lean = false,
 ): Promise<{ contextBlock: string; dossier: ReturnType<typeof readDossier> }> {
   const dossier = readDossier(session.meta);
   const ledger = readLedger(session.meta);
+
+  if (lean) {
+    // 像一般聊天：只有專案錨點＋上一回合之後新上傳的報告，其餘全靠對話紀錄
+    const fresh = await listSessionReports(authUserId, session.id, 10);
+    const { bodies } = buildReportInjection(fresh, {
+      lastHostTurnAt: ledger.lastHostTurn?.at ?? 0,
+      focusIds: [],
+    });
+    const contextBlock = [
+      renderLedgerAnchor(ledger),
+      bodies ? `## 上一回合之後 Cursor 上傳的報告${bodies}` : "",
+      `## 發言來源\n本回合訊息來自：${fromWeb ? "使用者（網頁）" : "Cursor"}`,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    return { contextBlock, dossier };
+  }
+
   const reports = await listSessionReports(authUserId, session.id, 30);
   const runs = await listRunsForSession(authUserId, session.id, 3);
   const { text: workspaceBrief } = await buildWorkspaceBrief(authUserId, session.workspaceId, {
@@ -187,11 +224,24 @@ async function buildUpstream(
   content: string,
   includeCurrentUserInHistory: boolean,
   lastHostTurnAt: number,
+  lean = false,
 ): Promise<ChatMessage[]> {
   // 起點對齊整房絕對序號的格線，連續幾回合開頭相同才吃得到 prompt cache
   const page = await listSessionMessagesPage(authUserId, sessionId, { limit: L.historyFetchLimit });
   const fetched = page.messages;
-  const bounded = selectStrategyHistory(fetched, { offset: Math.max(0, page.total - fetched.length) });
+  const offset = Math.max(0, page.total - fetched.length);
+  const bounded = selectStrategyHistory(
+    fetched,
+    lean
+      ? {
+          offset,
+          minKeep: L.leanHistoryMinMessages,
+          maxChars: L.leanHistoryCharBudget,
+          olderUserMaxChars: L.leanOlderUserMaxChars,
+          olderAssistantMaxChars: L.leanOlderAssistantMaxChars,
+        }
+      : { offset },
+  );
   const upstream: ChatMessage[] = bounded.map((m) => ({
     role: m.role as "user" | "assistant",
     content: m.content,
@@ -321,28 +371,46 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     stream?: boolean;
     /** 只存成通知、不觸發主持人回合；下一回合以「Cursor 的通知」段落帶入 */
     noReply?: boolean;
+    /** 精簡會議室：Cursor 只有 align（對齊有問題）／report（最終報告）才觸發主持人 */
+    turnType?: string;
   };
   const content = (body.content || "").trim();
   if (!content) return Response.json({ error: "content required" }, { status: 400 });
-  if (content.length > L.messageMaxChars) {
+  const lean = readRoomMode(session.meta) === "lean";
+  const maxChars = lean ? L.leanMessageMaxChars : L.messageMaxChars;
+  if (content.length > maxChars) {
     return Response.json(
       {
-        error: `訊息 ${content.length} 字，超過上限 ${L.messageMaxChars} 字；長內容請改用報告上傳（/report）`,
+        error: `訊息 ${content.length} 字，超過上限 ${maxChars} 字；長內容請改用報告上傳（/report）`,
         limits: L,
       },
       { status: 413 },
     );
   }
 
-  if (body.noReply === true) {
+  const turnType = parseLeanTurnType(body.turnType);
+  const saveNote = async (gated?: string) => {
     await addSessionMessage({
       sessionId,
       userId: auth.user.id,
       role: "user",
       content,
-      structured: { source: fromWeb ? "web" : "cursor", kind: "note" },
+      structured: { source: fromWeb ? "web" : "cursor", kind: "note", ...(gated ? { gated } : {}) },
     });
-    return Response.json({ ok: true, noted: true, session: await getStrategySession(auth.user.id, sessionId) });
+    return Response.json({
+      ok: true,
+      noted: true,
+      ...(gated ? { gated } : {}),
+      session: await getStrategySession(auth.user.id, sessionId),
+    });
+  };
+
+  if (body.noReply === true) return saveNote();
+
+  if (lean && !fromWeb) {
+    if (!turnType) return saveNote("not_turn_type");
+    const recent = await listSessionMessages(auth.user.id, sessionId, 60);
+    if (countCursorTurnsSinceWeb(recent) >= L.leanCursorTurnsPerTask) return saveNote("turn_budget");
   }
 
   if (!fromWeb && body.stream !== true) {
@@ -379,6 +447,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       content,
       template,
       members,
+      lean,
+      turnType,
     });
   }
 
@@ -391,6 +461,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     content,
     template,
     members,
+    lean,
+    turnType,
   });
 }
 
@@ -403,8 +475,10 @@ async function handleJsonMode(opts: {
   content: string;
   template: StrategyTemplate;
   members: SessionMember[];
+  lean: boolean;
+  turnType: LeanTurnType | null;
 }) {
-  const { req, authUserId, fromWeb, session, sessionId, content, template, members } = opts;
+  const { req, authUserId, fromWeb, session, sessionId, content, template, members, lean, turnType } = opts;
   const lead = members.find((m) => m.role === "lead") ?? members[0]!;
   const model = findModel(lead.modelId) || findModel("gemini-4-neon-high");
   if (!model) return Response.json({ error: `Unknown model: ${lead.modelId}` }, { status: 400 });
@@ -414,12 +488,12 @@ async function handleJsonMode(opts: {
     userId: authUserId,
     role: "user",
     content,
-    structured: { source: fromWeb ? "web" : "cursor" },
+    structured: { source: fromWeb ? "web" : "cursor", ...(turnType ? { turnType } : {}) },
   });
 
-  const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb);
+  const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb, lean);
   const lastHostTurnAt = readLedger(session.meta).lastHostTurn?.at ?? 0;
-  const upstream = await buildUpstream(authUserId, sessionId, contextBlock, content, true, lastHostTurnAt);
+  const upstream = await buildUpstream(authUserId, sessionId, contextBlock, content, true, lastHostTurnAt, lean);
 
   const convId = await createConversation(authUserId, `strategy-session ${session.name}`, model.id, {
     hidden: true,
@@ -435,7 +509,7 @@ async function handleJsonMode(opts: {
       authUserId,
       req.signal,
       undefined,
-      jsonOnlySystem(template),
+      jsonOnlySystem(template, lean),
       undefined,
       { researchQuery: fromWeb ? content : "" },
     )) {
@@ -761,18 +835,21 @@ async function handleStreamMode(opts: {
   content: string;
   template: StrategyTemplate;
   members: SessionMember[];
+  lean: boolean;
+  turnType: LeanTurnType | null;
 }) {
-  const { req, authUserId, fromWeb, session, sessionId, content, template, members } = opts;
+  const { req, authUserId, fromWeb, session, sessionId, content, template, members, lean, turnType } = opts;
   const leadMember = members.find((m) => m.role === "lead") ?? members[0]!;
-  const advisors = members.filter((m) => m.role !== "lead");
+  // 精簡會議室不跑顧問模型，每回合只呼叫主持人一次
+  const advisors = lean ? [] : members.filter((m) => m.role !== "lead");
   const leadModel = findModel(leadMember.modelId) || findModel("gemini-4-neon-high");
   if (!leadModel) {
     return Response.json({ error: `Unknown model: ${leadMember.modelId}` }, { status: 400 });
   }
 
-  const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb);
+  const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb, lean);
   const lastHostTurnAt = readLedger(session.meta).lastHostTurn?.at ?? 0;
-  const upstreamBase = await buildUpstream(authUserId, sessionId, contextBlock, content, false, lastHostTurnAt);
+  const upstreamBase = await buildUpstream(authUserId, sessionId, contextBlock, content, false, lastHostTurnAt, lean);
   const researchOpts = { researchQuery: fromWeb ? content : "" };
   const turnId = `turn_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
   // 串流開始即 idempotent 落庫 user，避免 abort 提前 return 丟訊
@@ -781,7 +858,7 @@ async function handleStreamMode(opts: {
     userId: authUserId,
     role: "user",
     content,
-    structured: { source: fromWeb ? "web" : "cursor", turnId },
+    structured: { source: fromWeb ? "web" : "cursor", turnId, ...(turnType ? { turnType } : {}) },
     turnId,
     idempotent: true,
   });
@@ -985,7 +1062,7 @@ async function handleStreamMode(opts: {
             authUserId,
             req.signal,
             undefined,
-            streamLeadSystem(template),
+            streamLeadSystem(template, lean),
             undefined,
             researchOpts,
           )) {

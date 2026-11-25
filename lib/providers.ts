@@ -988,6 +988,15 @@ async function* chatgptSubscriptionStream(
     research,
   );
 
+  // 同帳號＋同 instructions 路由到同一快取分片；不帶時 cached_tokens 幾乎恆為 0
+  const cacheKey = createHash("sha256")
+    .update(`${creds.accountId ?? c.source.id}\n${upstreamModel}\n${stable}`)
+    .digest("hex")
+    .slice(0, 40);
+  // Codex CLI 同時以 session_id／conversation_id 標頭做黏著路由；只帶 body 的 key 實測仍為 0
+  headers["session_id"] = cacheKey;
+  headers["conversation_id"] = cacheKey;
+
   const body: Record<string, unknown> = {
     model: upstreamModel,
     instructions: stable,
@@ -995,11 +1004,7 @@ async function* chatgptSubscriptionStream(
     stream: true,
     store: false, // 強制無痕：絕不寫入供給者的 ChatGPT 歷史對話列表
     reasoning: { effort: reasoningEffortFor(model.effort), summary: "auto" },
-    // 同帳號＋同 instructions 路由到同一快取分片；不帶時 cached_tokens 幾乎恆為 0
-    prompt_cache_key: createHash("sha256")
-      .update(`${creds.accountId ?? c.source.id}\n${upstreamModel}\n${stable}`)
-      .digest("hex")
-      .slice(0, 40),
+    prompt_cache_key: cacheKey,
   };
 
   let res: Response;
@@ -1123,6 +1128,9 @@ async function* chatgptSubscriptionStream(
         usage.inputTokens = u.input_tokens ?? 0;
         usage.cachedInputTokens = u.input_tokens_details?.cached_tokens ?? u.cached_tokens ?? 0;
         usage.outputTokens = (u.output_tokens ?? 0) + (u.reasoning_tokens ?? 0);
+        if (!usage.cachedInputTokens && usage.inputTokens > 4000) {
+          console.info("[chatgpt-usage] cached=0", JSON.stringify({ model: upstreamModel, cacheKey, usage: u }));
+        }
       }
     } else if (json.type === "codex.rate_limits" && json.rate_limits?.primary) {
       const toWin = (

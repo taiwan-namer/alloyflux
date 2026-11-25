@@ -536,6 +536,20 @@ function renderItems(ledger: StrategyLedger): string {
   return out.join("\n");
 }
 
+/** 精簡會議室用：一行專案錨點（目前項目＋工作包），讓換模型或歷史變短時不會忘記做到哪 */
+export function renderLedgerAnchor(ledger: StrategyLedger): string {
+  const item = ledger.items.find((i) => i.id === ledger.currentItemId);
+  const pkg = ledger.currentPackage;
+  const parts: string[] = [];
+  if (item) parts.push(`目前項目：${item.id}「${clip(item.title, 60)}」（${STATUS_LABEL[item.status]}）`);
+  if (pkg) {
+    parts.push(`工作包：${clip(pkg.goal, 120)}`);
+    if (pkg.acceptance.length) parts.push(`驗收：${clip(pkg.acceptance.join("；"), 160)}`);
+    if (pkg.status === "escalated") parts.push("⚠ 已退回 2 次：本回合必須決定縮小範圍、換做法或暫停（escalationDecision）");
+  }
+  return parts.length ? `# 專案錨點\n${parts.join("｜")}` : "";
+}
+
 /** 每回合固定放在脈絡最前面 */
 export function renderLedgerForHost(ledger: StrategyLedger): string {
   if (!isLedgerActive(ledger) && !ledger.currentPackage && !ledger.lastHostTurn) return "";

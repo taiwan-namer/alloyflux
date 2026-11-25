@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  countCursorTurnsSinceWeb,
+  parseLeanTurnType,
+  readRoomMode,
   buildReportInjection,
   reportSeriesKey,
   selectStrategyHistory,
@@ -221,5 +224,37 @@ describe("buildReportInjection", () => {
     assert.match(out.bodies, /2 段已合併/);
     assert.match(out.index, /srep_old/);
     assert.doesNotMatch(out.index, /srep_new1/);
+  });
+});
+
+describe("精簡會議室回合閘門", () => {
+  const u = (source: string, kind?: string) => ({ role: "user", structured: { source, ...(kind ? { kind } : {}) } });
+  const a = () => ({ role: "assistant", structured: {} });
+
+  it("從最後一則網頁訊息起算 Cursor 觸發的回合，通知不算", () => {
+    const msgs = [u("cursor"), a(), u("web"), a(), u("cursor"), a(), u("cursor", "note"), u("cursor"), a()];
+    assert.equal(countCursorTurnsSinceWeb(msgs), 2);
+  });
+
+  it("沒有網頁訊息時全部都算", () => {
+    assert.equal(countCursorTurnsSinceWeb([u("cursor"), a(), u("cursor"), a()]), 2);
+  });
+
+  it("只接受 align／report", () => {
+    assert.equal(parseLeanTurnType("align"), "align");
+    assert.equal(parseLeanTurnType("report"), "report");
+    assert.equal(parseLeanTurnType("progress"), null);
+    assert.equal(readRoomMode({ mode: "lean" }), "lean");
+    assert.equal(readRoomMode({}), "classic");
+  });
+
+  it("精簡模式的舊訊息壓縮上限可以放寬", () => {
+    const msgs = Array.from({ length: 6 }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: "y".repeat(5000),
+      structured: null,
+    }));
+    const out = selectStrategyHistory(msgs, { maxChars: 1_000_000, olderUserMaxChars: 4000 });
+    assert.ok(out[0]!.content.length > 3000 && out[0]!.content.length < 5000);
   });
 });
