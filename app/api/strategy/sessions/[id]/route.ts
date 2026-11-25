@@ -36,7 +36,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   const rawLimit = url.searchParams.get("limit");
   const pageMode = before != null || rawLimit != null;
 
-  let messages: Awaited<ReturnType<typeof collectSessionMessages>>["messages"] = [];
+  let messages: Awaited<ReturnType<typeof listSessionMessagesPage>>["messages"] = [];
   let messagesMeta: {
     hasMore: boolean;
     nextCursor: string | null;
