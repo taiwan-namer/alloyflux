@@ -120,6 +120,25 @@ describe("對齊視窗（prompt cache）", () => {
     assert.equal(prefixes.size, 1);
   });
 
+  it("同一視窗期間，下一輪送出的內容以上一輪（除最後一則 assistant 外）為逐字前綴", () => {
+    const real = (turns: number): ChatMessage[] => {
+      const out: ChatMessage[] = [];
+      for (let i = 0; i < turns; i++) {
+        out.push({ role: "user", content: `問題 ${i} ${"細節".repeat(200)}` });
+        out.push({ role: "assistant", content: `回答 ${i} ${"分析".repeat(900 + (i % 3) * 400)}` });
+      }
+      out.push({ role: "user", content: `問題 ${turns}` });
+      return out;
+    };
+    for (const turns of [12, 13, 14]) {
+      const prev = slideMessagesForUpstream(real(turns));
+      const next = slideMessagesForUpstream(real(turns + 1));
+      // 上一輪最後兩則（最後 assistant + 當輪 user）之前必須逐字相同
+      const stable = prev.length - 2;
+      assert.deepEqual(next.slice(0, stable), prev.slice(0, stable), `turns=${turns}`);
+    }
+  });
+
   it("重複套用（route → gateway）結果不變", () => {
     const once = slideMessagesForUpstream(conversation(23));
     assert.deepEqual(slideMessagesForUpstream(once), once);

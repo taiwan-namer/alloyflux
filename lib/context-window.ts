@@ -37,10 +37,6 @@ const LAST_ASSISTANT_HTML_TAIL = 1600;
 export const OLDER_ASSISTANT_MAX_CHARS = 1800;
 const OLDER_ASSISTANT_HEAD = 1200;
 const OLDER_ASSISTANT_TAIL = 600;
-/** 一般歷史 assistant 合計硬鎖 */
-export const MAX_HISTORY_ASSISTANT_CHARS = 8000;
-/** 上一則含 HTML 時合計硬鎖（連動放寬） */
-export const MAX_HISTORY_ASSISTANT_CHARS_WITH_HTML = 10000;
 
 const FOLDED_MARK = "...[歷史長文已折疊]";
 const MIDDLE_MARK = "\n...[中略]...\n";
@@ -79,7 +75,7 @@ export function scrubRetractMetaTone(content: string): string {
   return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-/** 超出合計額度的舊 assistant：固定只留開頭（重複套用結果不變） */
+/** 視窗前段的舊 assistant：固定只留開頭（重複套用結果不變） */
 export const FOLDED_ASSISTANT_KEEP_CHARS = 200;
 
 function foldToFixed(content: string): string {
@@ -119,11 +115,17 @@ export function compressOlderAssistant(content: string): string {
   return compressHeadTail(text, OLDER_ASSISTANT_MAX_CHARS, OLDER_ASSISTANT_HEAD, OLDER_ASSISTANT_TAIL);
 }
 
+/** 視窗開頭這麼多則（= 前 4 輪）內的舊 assistant 一律折成固定短句 */
+export const FOLD_HEAD_MESSAGES = WINDOW_STEP_MESSAGES;
+
 /**
  * 對滑動視窗內的歷史 assistant 做字元級瘦身（不改 DB；user 全文保留）。
- * - 最後一則 assistant：≤1000（頭 650 + 尾 350）；含 ```html 時 ≤2400（頭 1600 + 尾 800）
- * - 更早的 assistant：≤300
- * - 合計硬鎖：一般 2200；上一則含 HTML 時 3600
+ * - 最後一則 assistant：頭尾保留（見 compressLastAssistant）
+ * - 視窗前 FOLD_HEAD_MESSAGES 則內的舊 assistant：固定只留開頭 200 字
+ * - 其餘舊 assistant：頭尾保留 ≤1800
+ *
+ * 每則結果只依「自身內容」與「在視窗中的位置」決定，不看後面又來了幾則：
+ * 視窗起點每 4 輪才前移，期間已送出的訊息逐字不變，上游 prompt cache 才能命中。
  */
 export function slimAssistantHistory(messages: ChatMessage[]): ChatMessage[] {
   let lastAssistantIdx = -1;
@@ -134,54 +136,17 @@ export function slimAssistantHistory(messages: ChatMessage[]): ChatMessage[] {
     }
   }
 
-  const out = messages.map((m, i) => {
+  return messages.map((m, i) => {
     if (m.role !== "assistant") return m;
     const scrubbed = scrubRetractMetaTone(m.content);
     const content =
-      i === lastAssistantIdx ? compressLastAssistant(scrubbed) : compressOlderAssistant(scrubbed);
+      i === lastAssistantIdx
+        ? compressLastAssistant(scrubbed)
+        : i < FOLD_HEAD_MESSAGES
+          ? foldToFixed(scrubbed)
+          : compressOlderAssistant(scrubbed);
     return content === m.content ? m : { ...m, content };
   });
-
-  const lastHasHtml =
-    lastAssistantIdx >= 0 && hasHtmlFence(out[lastAssistantIdx]?.content ?? "");
-  const totalCap = lastHasHtml ? MAX_HISTORY_ASSISTANT_CHARS_WITH_HTML : MAX_HISTORY_ASSISTANT_CHARS;
-
-  let total = 0;
-  for (const m of out) {
-    if (m.role === "assistant") total += m.content.length;
-  }
-  if (total <= totalCap) return out;
-
-  // 從最新往回分配額度；額度用完後，更早的一律折成固定長度。
-  // 每則只依自身內容與「是否在額度內」決定結果，不會隨總長逐輪微調 → 視窗開頭跨輪一致，才吃得到 prompt cache
-  const result = out.map((m) => ({ ...m }));
-  // 預留固定額度給上一則（不用它的實際長度，否則分界會隨上一則長短來回跳）
-  let budget = MAX_HISTORY_ASSISTANT_CHARS - LAST_ASSISTANT_MAX_CHARS;
-  let foldRest = false;
-  for (let i = result.length - 1; i >= 0; i--) {
-    if (result[i].role !== "assistant" || i === lastAssistantIdx) continue;
-    const len = result[i].content.length;
-    if (!foldRest && len <= budget) {
-      budget -= len;
-      continue;
-    }
-    foldRest = true;
-    const next = foldToFixed(result[i].content);
-    total -= len - next.length;
-    result[i] = { ...result[i], content: next };
-  }
-  if (total > totalCap && lastAssistantIdx >= 0) {
-    const m = result[lastAssistantIdx];
-    const room = total - totalCap;
-    const keep = Math.max(200, m.content.length - room);
-    result[lastAssistantIdx] = {
-      ...m,
-      content: alreadyFolded(m.content)
-        ? m.content.slice(0, keep)
-        : compressLastAssistant(m.content.slice(0, keep)),
-    };
-  }
-  return result;
 }
 
 /**
