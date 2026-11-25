@@ -67,6 +67,8 @@ interface Conversation {
 /** 進入對話先顯示最近幾則，往上滑再載入更舊（降低長串 Markdown 卡頓） */
 const INITIAL_MESSAGE_WINDOW = 5;
 const OLDER_MESSAGE_PAGE = 10;
+/** 會議室點開只先拿最近幾則；其餘往上滑再補 */
+const STRATEGY_OPEN_MESSAGE_LIMIT = 5;
 /** 會議室記憶體快取：再點／切房秒開；懸停預取共用同一 in-flight */
 const STRATEGY_CACHE_TTL_MS = 90_000;
 const STRATEGY_CACHE_MAX = 12;
@@ -2338,7 +2340,7 @@ export default function ChatPage() {
     };
     const promise = (async () => {
       const res = await fetch(
-        `/api/strategy/sessions/${encodeURIComponent(id)}?limit=40&lite=1`,
+        `/api/strategy/sessions/${encodeURIComponent(id)}?limit=${STRATEGY_OPEN_MESSAGE_LIMIT}&lite=1`,
         { cache: "no-store", priority, signal: controller.signal } as RequestInit,
       );
       const data = await res.json().catch(() => ({}));

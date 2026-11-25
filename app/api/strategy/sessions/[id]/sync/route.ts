@@ -54,10 +54,12 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   const session = await getStrategySession(auth.user.id, id);
   if (!session) return Response.json({ error: "Not found" }, { status: 404 });
 
-  // 輕量：最新一頁＋平行查；前端 merge 保留已載入的更早訊息
+  // 只回最新一小段，避免開房後 sync 又把整頁歷史灌回來；更早的訊息留給往上滑
+  const rawPage = Number(url.searchParams.get("limit") || "8");
+  const pageLimit = Number.isFinite(rawPage) ? Math.min(Math.max(Math.floor(rawPage), 1), 30) : 8;
   const [page, runs, reportRows, dispatch] = await Promise.all([
     listSessionMessagesPage(auth.user.id, id, {
-      limit: STRATEGY_LIMITS.messagesPageSize,
+      limit: pageLimit,
       skipTotal: true,
     }),
     listRunsForSessionBrief(auth.user.id, id, 10),

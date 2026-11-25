@@ -216,6 +216,9 @@ function modelOptionTitle(opt: StrategyModelOption): string {
   return parts.join("｜");
 }
 
+/** 往上滑一次補幾則；開房本身只先顯示最近幾則 */
+const STRATEGY_OLDER_PAGE = 10;
+
 export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const {
     detail,
@@ -272,6 +275,9 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
   const roomScrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  /** 補上更早訊息後維持原本視線，避免捲動被拉回頂端 */
+  const olderScrollAdjustRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  const loadingOlderRef = useRef(false);
   const syncAbortRef = useRef<AbortController | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -555,7 +561,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       const count = lastMessageCountRef.current || 0;
       try {
         const res = await fetch(
-          `/api/strategy/sessions/${encodeURIComponent(sid)}/sync?since=${encodeURIComponent(String(since))}&count=${encodeURIComponent(String(count))}`,
+          `/api/strategy/sessions/${encodeURIComponent(sid)}/sync?since=${encodeURIComponent(String(since))}&count=${encodeURIComponent(String(count))}&limit=8`,
           { cache: "no-store", signal: ac.signal },
         );
         if (!res.ok || cancelled || ac.signal.aborted) return;
@@ -606,7 +612,16 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     // 使用者明顯上捲時立刻關閉貼底，避免 sync／reveal 把捲動拉回底部
     stickToBottomRef.current = dist < 80;
+    if (el.scrollTop < 72) void loadOlderMessages();
   }
+
+  useLayoutEffect(() => {
+    const adj = olderScrollAdjustRef.current;
+    const el = roomScrollRef.current;
+    if (!adj || !el) return;
+    olderScrollAdjustRef.current = null;
+    el.scrollTop = adj.prevTop + (el.scrollHeight - adj.prevHeight);
+  }, [detail.messages]);
 
   /** #9：輕量 reconciliation——force sync＋背景刷側欄；不重開整房 */
   async function reconcileOnce(runId: number, sid: string) {
@@ -634,12 +649,24 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   }
 
   async function loadOlderMessages() {
-    if (!onOlderMessages || loadingOlder || !detail.hasMore || !detail.nextCursor) return;
+    if (
+      !onOlderMessages ||
+      loadingOlderRef.current ||
+      streamingRef.current ||
+      !detail.hasMore ||
+      !detail.nextCursor
+    ) {
+      return;
+    }
+    loadingOlderRef.current = true;
     setLoadingOlder(true);
+    const el = roomScrollRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    const prevTop = el?.scrollTop ?? 0;
     try {
       const sid = sessionId;
       const res = await fetch(
-        `/api/strategy/sessions/${encodeURIComponent(sid)}?limit=100&before=${encodeURIComponent(detail.nextCursor)}`,
+        `/api/strategy/sessions/${encodeURIComponent(sid)}?limit=${STRATEGY_OLDER_PAGE}&lite=1&before=${encodeURIComponent(detail.nextCursor)}`,
         { cache: "no-store" },
       );
       if (!res.ok) return;
@@ -650,6 +677,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         messageTotal?: number;
       };
       if (!Array.isArray(data.messages) || !data.messages.length) return;
+      olderScrollAdjustRef.current = { prevHeight, prevTop };
       onOlderMessages({
         messages: data.messages,
         hasMore: Boolean(data.hasMore),
@@ -657,6 +685,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         messageTotal: typeof data.messageTotal === "number" ? data.messageTotal : detail.messageTotal ?? 0,
       });
     } finally {
+      loadingOlderRef.current = false;
       setLoadingOlder(false);
     }
   }
@@ -1358,16 +1387,9 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
             <div className="strategy-room-msg-spacer" aria-hidden />
             {detail.hasMore && detail.nextCursor ? (
               <div className="row" style={{ justifyContent: "center", padding: "8px 0" }}>
-                <button
-                  type="button"
-                  className="ghost"
-                  disabled={loadingOlder || streaming || !onOlderMessages}
-                  onClick={() => void loadOlderMessages()}
-                >
-                  {loadingOlder
-                    ? "載入中…"
-                    : `載入更早的訊息${typeof detail.messageTotal === "number" ? `（已顯示 ${detail.messages.length}/${detail.messageTotal}）` : ""}`}
-                </button>
+                <span className="muted" style={{ fontSize: 13 }}>
+                  {loadingOlder ? "載入更早的訊息…" : "上滑載入更早的訊息"}
+                </span>
               </div>
             ) : null}
             {detail.messages.length === 0 && !pendingUser && streamBubbles.length === 0 ? (
