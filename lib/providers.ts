@@ -31,6 +31,7 @@ import {
   type ResearchVerdict,
 } from "./research-v2";
 import { appendStyleOverride } from "./persona-style";
+import { loadCodexTurnState, saveCodexTurnState } from "./codex-turn-state";
 export interface ChatImage {
   mimeType: string;
   data: string; // 純 base64，不含 data: prefix
@@ -1042,6 +1043,8 @@ async function* chatgptSubscriptionStream(
   );
   headers["session-id"] = cacheKey;
   headers["conversation-id"] = cacheKey;
+  const priorTurnState = await loadCodexTurnState(cacheKey);
+  if (priorTurnState) headers["x-codex-turn-state"] = priorTurnState;
 
   const body: Record<string, unknown> = {
     model: upstreamModel,
@@ -1059,6 +1062,7 @@ async function* chatgptSubscriptionStream(
     model: upstreamModel,
     affinity: cacheAffinityId ? "given" : "fallback",
     sessionId: cacheKey.slice(0, 24),
+    turnState: priorTurnState ? "sent" : "none",
     instr: diagHash(body.instructions),
     instrChars: String(body.instructions ?? "").length,
     items: diagInput.length,
@@ -1086,6 +1090,9 @@ async function* chatgptSubscriptionStream(
       throw err;
     }
   }
+
+  const nextTurnState = res.headers.get("x-codex-turn-state");
+  if (nextTurnState) void saveCodexTurnState(cacheKey, nextTurnState);
 
   // 從回傳 Header 即時讀取最新訂閱進度條 %（含 reset-at／window-minutes）
   const headerWindow = (
