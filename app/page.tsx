@@ -1280,10 +1280,7 @@ export default function ChatPage() {
     setTrashedConversations(await res.json());
   }, []);
   const refreshStrategySessions = useCallback(async () => {
-    if (!authUser) {
-      setStrategyWorkspaces([]);
-      return;
-    }
+    // 用 cookie 直接拉，不必等 /api/auth/me 回來才開工（側欄會議室晚 10s 主因）
     const res = await fetch("/api/strategy/workspaces", { cache: "no-store" });
     if (!res.ok) {
       setStrategyWorkspaces([]);
@@ -1291,7 +1288,7 @@ export default function ChatPage() {
     }
     const data = (await res.json()) as { workspaces?: StrategyWorkspaceBrief[] };
     setStrategyWorkspaces(Array.isArray(data.workspaces) ? data.workspaces : []);
-  }, [authUser]);
+  }, []);
 
   useEffect(() => {
     try {
@@ -1396,21 +1393,24 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
-    // 平行開工：不要等 auth 才畫側欄／拉對話列表（#8）
+    // 平行開工：對話＋會議室列表與 auth 同時打（cookie 已在）
     void refreshMe();
     void refreshModels();
     void refreshConversations();
-  }, [refreshMe, refreshModels, refreshConversations]);
+    void refreshStrategySessions();
+    void refreshStrategyTemplates();
+  }, [refreshMe, refreshModels, refreshConversations, refreshStrategySessions, refreshStrategyTemplates]);
 
   useEffect(() => {
+    // 等 me 結束再決定：避免 mount 時 authUser=null 把平行拉到的會議室清掉
+    if (authLoading) return;
     if (!authUser) {
       setStrategyWorkspaces([]);
       return;
     }
-    void refreshStrategyTemplates();
-    void refreshStrategySessions();
     void refreshWallet();
-  }, [authUser, refreshStrategyTemplates, refreshStrategySessions, refreshWallet]);
+    void refreshStrategySessions();
+  }, [authLoading, authUser, refreshWallet, refreshStrategySessions]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;

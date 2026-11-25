@@ -367,10 +367,12 @@ export type StrategyDossier = {
 };
 
 let tablesReady: Promise<void> | null = null;
+/** 生產庫多半已建表；probe 成功即可服務側欄，DDL 背景補齊 */
+let schemaMigrated = false;
 
 function ensureTables(): Promise<void> {
   if (!tablesReady) {
-    tablesReady = createTables().catch((e) => {
+    tablesReady = prepareTables().catch((e) => {
       tablesReady = null;
       throw e;
     });
@@ -378,9 +380,32 @@ function ensureTables(): Promise<void> {
   return tablesReady;
 }
 
+async function prepareTables(): Promise<void> {
+  // 熱路徑：一查就知道表在，側欄不必等 40+ 句 DDL
+  try {
+    await db().prepare(`SELECT 1 AS ok FROM strategy_workspaces LIMIT 1`).get();
+    if (!schemaMigrated) {
+      schemaMigrated = true;
+      void createTables().catch((e) => {
+        schemaMigrated = false;
+        console.warn("[strategy] background schema migrate failed", e);
+      });
+    }
+    return;
+  } catch {
+    // 表不存在或連線失敗 → 同步建表
+  }
+  await createTables();
+  schemaMigrated = true;
+}
+
+async function execAll(stmts: string[]): Promise<void> {
+  await Promise.all(stmts.map((sql) => db().exec(sql)));
+}
+
 async function createTables(): Promise<void> {
-  // postgres.js unsafe 對多語句不穩，逐句執行
-  const stmts = [
+  // 分階段平行：先建表 → 再 ALTER／INDEX（IF NOT EXISTS，可重入）
+  await execAll([
     `CREATE TABLE IF NOT EXISTS strategy_loop_runs (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -393,8 +418,6 @@ async function createTables(): Promise<void> {
       session_id TEXT NOT NULL DEFAULT '',
       created_at BIGINT NOT NULL
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_runs_user
-      ON strategy_loop_runs(user_id, created_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_loop_plans (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -408,8 +431,6 @@ async function createTables(): Promise<void> {
       created_at BIGINT NOT NULL,
       updated_at BIGINT NOT NULL
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_plans_user_status
-      ON strategy_loop_plans(user_id, status, created_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_loop_code_results (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -420,8 +441,6 @@ async function createTables(): Promise<void> {
       notes TEXT NOT NULL DEFAULT '',
       created_at BIGINT NOT NULL
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_code_results_plan
-      ON strategy_loop_code_results(plan_id, created_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_loop_retros (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -430,8 +449,6 @@ async function createTables(): Promise<void> {
       next_hypotheses_json TEXT NOT NULL DEFAULT '[]',
       created_at BIGINT NOT NULL
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_retros_user
-      ON strategy_loop_retros(user_id, created_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_sessions (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -445,8 +462,6 @@ async function createTables(): Promise<void> {
       created_at BIGINT NOT NULL,
       updated_at BIGINT NOT NULL
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_user
-      ON strategy_sessions(user_id, updated_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_session_messages (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -456,8 +471,6 @@ async function createTables(): Promise<void> {
       structured_json TEXT NOT NULL DEFAULT '{}',
       created_at BIGINT NOT NULL
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_session_messages_sess
-      ON strategy_session_messages(session_id, created_at ASC)`,
     `CREATE TABLE IF NOT EXISTS strategy_session_reports (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -469,11 +482,6 @@ async function createTables(): Promise<void> {
       chars INT NOT NULL DEFAULT 0,
       created_at BIGINT NOT NULL
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_session_reports_sess
-      ON strategy_session_reports(session_id, created_at DESC)`,
-    `ALTER TABLE strategy_loop_runs ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT ''`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_runs_session
-      ON strategy_loop_runs(session_id, created_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_workspaces (
       id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -484,26 +492,6 @@ async function createTables(): Promise<void> {
       updated_at BIGINT NOT NULL,
       deleted_at BIGINT
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_workspaces_user
-      ON strategy_workspaces(user_id, updated_at DESC)`,
-    // 舊會議室（Cursor 主導的 F、G）預設 auto_dispatch=1，行為與改版前一致
-    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT ''`,
-    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS topic TEXT NOT NULL DEFAULT ''`,
-    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''`,
-    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary_updated_at BIGINT NOT NULL DEFAULT 0`,
-    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS auto_dispatch INT NOT NULL DEFAULT 1`,
-    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS pause_state TEXT NOT NULL DEFAULT 'none'`,
-    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS models_json TEXT`,
-    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS template_id TEXT`,
-    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_model TEXT`,
-    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_role TEXT`,
-    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_label TEXT`,
-    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS turn_id TEXT`,
-    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS completion_status TEXT`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_session_messages_turn
-      ON strategy_session_messages(session_id, turn_id)`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_workspace
-      ON strategy_sessions(workspace_id, updated_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_dispatch_items (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -515,10 +503,6 @@ async function createTables(): Promise<void> {
       dispatched_at BIGINT,
       done_at BIGINT
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_session
-      ON strategy_dispatch_items(session_id, created_at DESC)`,
-    `CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_user_status
-      ON strategy_dispatch_items(user_id, status, created_at ASC)`,
     `CREATE TABLE IF NOT EXISTS strategy_templates (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL DEFAULT '',
@@ -534,40 +518,95 @@ async function createTables(): Promise<void> {
       created_at BIGINT NOT NULL,
       updated_at BIGINT NOT NULL
     )`,
+  ]);
+
+  await execAll([
+    `ALTER TABLE strategy_loop_runs ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS workspace_id TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS topic TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS summary_updated_at BIGINT NOT NULL DEFAULT 0`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS auto_dispatch INT NOT NULL DEFAULT 1`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS pause_state TEXT NOT NULL DEFAULT 'none'`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS models_json TEXT`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS template_id TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_model TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_role TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_label TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS turn_id TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS completion_status TEXT`,
+  ]);
+
+  await execAll([
+    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_runs_user
+      ON strategy_loop_runs(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_plans_user_status
+      ON strategy_loop_plans(user_id, status, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_code_results_plan
+      ON strategy_loop_code_results(plan_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_retros_user
+      ON strategy_loop_retros(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_user
+      ON strategy_sessions(user_id, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_session_messages_sess
+      ON strategy_session_messages(session_id, created_at ASC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_session_reports_sess
+      ON strategy_session_reports(session_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_loop_runs_session
+      ON strategy_loop_runs(session_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_workspaces_user
+      ON strategy_workspaces(user_id, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_session_messages_turn
+      ON strategy_session_messages(session_id, turn_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_workspace
+      ON strategy_sessions(workspace_id, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_session
+      ON strategy_dispatch_items(session_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_user_status
+      ON strategy_dispatch_items(user_id, status, created_at ASC)`,
     `CREATE INDEX IF NOT EXISTS idx_strategy_templates_enabled
       ON strategy_templates(enabled, sort_order ASC, id ASC)`,
-  ];
-  for (const sql of stmts) {
-    await db().exec(sql);
-  }
+  ]);
+
   await seedBuiltinStrategyTemplates();
 }
 
 async function seedBuiltinStrategyTemplates(): Promise<void> {
-  const ts = nowMs();
-  for (const t of BUILTIN_STRATEGY_TEMPLATES) {
-    await db()
-      .prepare(
-        `INSERT INTO strategy_templates (
-          id, name, description, stages_json, quick_prompts_json, recommended_models_json,
-          system_prompt, stream_lead_preface, enabled, sort_order, is_builtin, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
-        ON CONFLICT (id) DO NOTHING`,
-      )
-      .run(
-        t.id,
-        t.name,
-        t.description,
-        JSON.stringify(t.stages),
-        JSON.stringify(t.quickPrompts),
-        JSON.stringify(t.recommendedModels),
-        t.systemPrompt,
-        t.streamLeadPreface,
-        t.sortOrder ?? 100,
-        ts,
-        ts,
-      );
+  // 多數實例已有內建範本：先探針，避免每次冷啟連插 N 筆
+  try {
+    const hit = await db()
+      .prepare(`SELECT 1 AS ok FROM strategy_templates WHERE is_builtin = 1 LIMIT 1`)
+      .get();
+    if (hit) return;
+  } catch {
+    /* 表剛建好也可能尚無列 → 繼續 seed */
   }
+  const ts = nowMs();
+  await Promise.all(
+    BUILTIN_STRATEGY_TEMPLATES.map((t) =>
+      db()
+        .prepare(
+          `INSERT INTO strategy_templates (
+            id, name, description, stages_json, quick_prompts_json, recommended_models_json,
+            system_prompt, stream_lead_preface, enabled, sort_order, is_builtin, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)
+          ON CONFLICT (id) DO NOTHING`,
+        )
+        .run(
+          t.id,
+          t.name,
+          t.description,
+          JSON.stringify(t.stages),
+          JSON.stringify(t.quickPrompts),
+          JSON.stringify(t.recommendedModels),
+          t.systemPrompt,
+          t.streamLeadPreface,
+          t.sortOrder ?? 100,
+          ts,
+          ts,
+        ),
+    ),
+  );
 }
 
 function nowMs(): number {
@@ -1272,19 +1311,28 @@ export async function listStrategyWorkspaces(userId: string, opts: { trash?: boo
   return rows.map(mapWorkspace);
 }
 
-/** 側欄用：不撈完整 memory／summary 大欄 */
-export async function listStrategyWorkspacesBrief(userId: string, opts: { trash?: boolean } = {}) {
-  await ensureTables();
-  if (!opts.trash) await ensureDefaultWorkspace(userId);
+async function fetchWorkspacesBrief(userId: string, trash: boolean) {
   const rows = (await db()
     .prepare(
       `SELECT id, name, template_id, memory_json, created_at, updated_at, deleted_at
        FROM strategy_workspaces
-       WHERE user_id = ? AND deleted_at IS ${opts.trash ? "NOT NULL" : "NULL"}
+       WHERE user_id = ? AND deleted_at IS ${trash ? "NOT NULL" : "NULL"}
        ORDER BY updated_at DESC LIMIT 50`,
     )
     .all(userId)) as Record<string, unknown>[];
   return rows.map(mapWorkspace);
+}
+
+/** 側欄用：不撈完整 memory／summary 大欄；已有主體時不擋 ensureDefault */
+export async function listStrategyWorkspacesBrief(userId: string, opts: { trash?: boolean } = {}) {
+  await ensureTables();
+  const trash = Boolean(opts.trash);
+  let rows = await fetchWorkspacesBrief(userId, trash);
+  if (!trash && rows.length === 0) {
+    await ensureDefaultWorkspace(userId);
+    rows = await fetchWorkspacesBrief(userId, trash);
+  }
+  return rows;
 }
 
 const SESSION_BRIEF_COLS = `id, user_id, name, profile_id, strategy_version, status, model, models_json, template_id,
