@@ -31,6 +31,17 @@ import {
   type StreamingMemberBubble,
   type ViewMode,
 } from "@/components/strategy-types";
+import SafeLightMarkdown from "@/components/SafeLightMarkdown";
+import { createAdaptiveDripDriver } from "@/lib/adaptive-drip";
+import {
+  applyServerTemplateId,
+  beginTemplateSave,
+  displayTemplateId,
+  markTemplateSaveOk,
+  shouldPatchTemplateSelection,
+  shouldRollbackTemplate,
+  type SopTemplateGate,
+} from "@/lib/sop-template-sync";
 
 export type StrategyRoomViewProps = {
   detail: StrategySessionDetail;
@@ -150,7 +161,13 @@ const MessageItem = memo(
         title={active ? "點擊顯示全文" : undefined}
       >
         <div className="strategy-msg-role">{messageRoleLabel(m)}</div>
-        <pre className="strategy-msg-body">{text}</pre>
+        {m.role === "assistant" ? (
+          <div className="strategy-msg-body strategy-md-body">
+            <SafeLightMarkdown content={text} streaming={active} />
+          </div>
+        ) : (
+          <pre className="strategy-msg-body">{text}</pre>
+        )}
       </div>
     );
   },
@@ -235,7 +252,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [streaming, setStreaming] = useState(false);
+  /** generating：串流接收中；committing：收尾同步中（可打字、禁重送） */
+  const [generating, setGenerating] = useState(false);
+  const [committing, setCommitting] = useState(false);
+  const streaming = generating || committing;
   const [pendingUser, setPendingUser] = useState<string | null>(null);
   const [streamBubbles, setStreamBubbles] = useState<StreamingMemberBubble[]>([]);
   const [notices, setNotices] = useState<string[]>([]);
@@ -243,6 +263,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const [memberDraft, setMemberDraft] = useState<StrategyMemberConfig[]>([]);
   const [templateDraft, setTemplateDraft] = useState("");
   const [metaSaving, setMetaSaving] = useState(false);
+  const templateGateRef = useRef<SopTemplateGate | null>(null);
   const [toast, setToast] = useState<{ key: number; text: string } | null>(null);
   const [revealIds, setRevealIds] = useState<ReadonlySet<string>>(() => new Set());
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -257,9 +278,9 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const streamContentRef = useRef("");
   const streamCommittingRef = useRef(false);
   const abortReasonRef = useRef<"user" | "switch" | null>(null);
-  /** 串流文字緩衝（rAF 才 flush 進 streamBubbles） */
+  /** 已接收串流緩衝（權威內容；動畫不得改寫） */
   const bubblesRef = useRef<StreamingMemberBubble[]>([]);
-  const flushRafRef = useRef(0);
+  const dripDriverRef = useRef(createAdaptiveDripDriver());
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const seenSessionIdRef = useRef<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -279,12 +300,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const dispatchedCount = detail.dispatch.filter((d) => d.status === "dispatched").length;
   const sessionId = detail.session.id;
 
-  const activeTemplateId =
-    templateDraft ||
-    detail.session.templateId ||
-    templates.find((t) => t.id === "automax")?.id ||
-    templates[0]?.id ||
-    "automax";
+  const fallbackTemplateId =
+    templates.find((t) => t.id === "automax")?.id || templates[0]?.id || "automax";
+  const serverTemplateRaw = detail.session.templateId ?? null;
+  const activeTemplateId = displayTemplateId(templateDraft, serverTemplateRaw, fallbackTemplateId);
   const activeTemplate = templates.find((t) => t.id === activeTemplateId) ?? templates[0];
 
   streamingRef.current = streaming;
@@ -292,20 +311,63 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   onStreamingChangeRef.current = onStreamingChange;
   onStreamCommittedRef.current = onStreamCommitted;
 
-  const cancelFlush = useCallback(() => {
-    if (flushRafRef.current) {
-      cancelAnimationFrame(flushRafRef.current);
-      flushRafRef.current = 0;
-    }
+  const publishDrip = useCallback((snap: ReturnType<typeof dripDriverRef.current.snapshot>) => {
+    const mapped: StreamingMemberBubble[] = snap.map((b) => ({
+      key: b.key,
+      role: b.role,
+      modelId: b.modelId,
+      label: b.label,
+      content: b.displayed,
+      done: b.done,
+    }));
+    flushSync(() => {
+      setStreamBubbles(mapped);
+    });
+    const el = roomScrollRef.current;
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
   }, []);
 
-  /** 失效目前串流：++runId、取消 rAF、cancel reader、abort controller、清空緩衝 */
+  const syncDripFromReceived = useCallback(() => {
+    const driver = dripDriverRef.current;
+    for (const b of bubblesRef.current) {
+      driver.upsert({
+        key: b.key,
+        role: b.role,
+        modelId: b.modelId,
+        label: b.label,
+        received: b.content,
+        done: b.done,
+      });
+    }
+    driver.schedule(publishDrip);
+  }, [publishDrip]);
+
+  const flushDripNow = useCallback(() => {
+    const driver = dripDriverRef.current;
+    for (const b of bubblesRef.current) {
+      driver.upsert({
+        key: b.key,
+        role: b.role,
+        modelId: b.modelId,
+        label: b.label,
+        received: b.content,
+        done: b.done,
+      });
+    }
+    publishDrip(driver.flushDisplay());
+  }, [publishDrip]);
+
+  const clearDripAndBubbles = useCallback(() => {
+    dripDriverRef.current.stopAndClear();
+    bubblesRef.current = [];
+  }, []);
+
+  /** 失效目前串流：++runId、停止拆吐、cancel reader、abort controller、清空緩衝 */
   const invalidateStream = useCallback(
     (reason: "user" | "switch") => {
       streamRunIdRef.current += 1;
       abortReasonRef.current = reason;
-      cancelFlush();
-      bubblesRef.current = [];
+      clearDripAndBubbles();
       const reader = streamReaderRef.current;
       streamReaderRef.current = null;
       if (reader) {
@@ -320,24 +382,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       ctrl?.abort();
       streamCommittingRef.current = false;
     },
-    [cancelFlush],
+    [clearDripAndBubbles],
   );
-
-  /** rAF flush：緩衝 → streamBubbles；僅此處做貼底捲動 */
-  const flushBubbles = useCallback(() => {
-    flushRafRef.current = 0;
-    const snapshot = bubblesRef.current.map((b) => ({ ...b }));
-    flushSync(() => {
-      setStreamBubbles(snapshot);
-    });
-    const el = roomScrollRef.current;
-    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
-  }, []);
-
-  const scheduleFlush = useCallback(() => {
-    if (flushRafRef.current) return;
-    flushRafRef.current = requestAnimationFrame(flushBubbles);
-  }, [flushBubbles]);
 
   const scrollIfSticky = useCallback(() => {
     const el = roomScrollRef.current;
@@ -361,13 +407,15 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const prev = sessionIdRef.current;
     if (prev !== detail.session.id) {
       invalidateStream("switch");
-      setStreaming(false);
+      setGenerating(false);
+      setCommitting(false);
       setPendingUser(null);
       setStreamBubbles([]);
       setNotices([]);
       setDegradedHint(false);
       setSettingsOpen(false);
       setToast(null);
+      templateGateRef.current = null;
     }
     sessionIdRef.current = detail.session.id;
     // 切房重置；同房僅單調遞增，避免 session.updatedAt 覆寫掉較大的 sync watermark
@@ -427,8 +475,19 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   }, [detail.session.id, modelsKey, detail.session.model]);
 
   useEffect(() => {
-    setTemplateDraft(detail.session.templateId || "");
-  }, [detail.session.id, detail.session.templateId]);
+    const sid = detail.session.id;
+    const serverRaw = detail.session.templateId ?? null;
+    const decision = applyServerTemplateId({
+      sessionId: sid,
+      serverRaw,
+      saving: metaSaving,
+      gate: templateGateRef.current,
+      nowMs: Date.now(),
+    });
+    if (decision.action === "ignore") return;
+    if (decision.clearGate) templateGateRef.current = null;
+    setTemplateDraft(decision.nextLocal);
+  }, [detail.session.id, detail.session.templateId, metaSaving]);
 
   // 離散事件貼底（送出、新訊息、notice）；串流文字chunk 僅在 rAF flush 內貼底
   useEffect(() => {
@@ -545,30 +604,33 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   }
 
   function stopGeneration() {
-    // 已收到 done 並進入 commit 階段：生成其實已完成，不再中斷
-    if (!streamingRef.current || streamCommittingRef.current) return;
+    // committing：生成已完成，不提供無效停止鈕／no-op
+    if (!generating || streamCommittingRef.current || committing) return;
     const content = streamContentRef.current;
     const sid = sessionIdRef.current;
     const runId = streamRunIdRef.current;
-    // 立即失效本輪：任何殘留的非同步路徑都會因 runId 不符而靜默結束（不會出現「生成失敗或已中斷」）
+    // 立即失效本輪：清拆吐佇列，殘留非同步因 runId 不符靜默結束
     invalidateStream("user");
     setStreamBubbles([]);
     setPendingUser(null);
     setNotices([]);
     setDegradedHint(false);
-    setStreaming(false);
+    setGenerating(false);
     onError(null);
     if (content) onDraftChange(content);
     requestAnimationFrame(() => textareaRef.current?.focus());
     void onRefreshWallet();
-    // 4A：停止後 reconciliation（一次）；invalidate 後用舊 runId 閘門防雙拉
-    void reconcileOnce(runId, sid);
+    // 4A：停止後最多一次 reconciliation；可打字≠可在 reconciliation 完成前重送
+    setCommitting(true);
+    void reconcileOnce(runId, sid).finally(() => {
+      if (sid === sessionIdRef.current) setCommitting(false);
+    });
   }
 
   async function sendStream(text: string) {
     const sid = sessionId;
     const content = text.trim();
-    if (!content || streaming || detail.session.status === "closed") return;
+    if (!content || generating || committing || detail.session.status === "closed") return;
 
     const runId = ++streamRunIdRef.current;
     const isCurrent = () => runId === streamRunIdRef.current && sid === sessionIdRef.current;
@@ -577,8 +639,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     streamCommittingRef.current = false;
     reconcileRunRef.current = null;
     abortReasonRef.current = null;
-    cancelFlush();
-    bubblesRef.current = [];
+    clearDripAndBubbles();
     stickToBottomRef.current = true;
 
     onError(null);
@@ -587,7 +648,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     setPendingUser(content);
     setStreamBubbles([]);
     onDraftChange("");
-    setStreaming(true);
+    setCommitting(false);
+    setGenerating(true);
 
     const controller = new AbortController();
     streamAbortRef.current = controller;
@@ -614,6 +676,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         onDraftChange(content);
         setPendingUser(null);
         setStreamBubbles([]);
+        setGenerating(false);
         return;
       }
       if (!res.body) throw new Error("無串流回應");
@@ -657,52 +720,62 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
       if (completion?.aborted || completion?.completionStatus === "failed") {
         // 非使用者／切房造成：伺服器端失敗；先清暫存再 reconciliation（4A 資料去重）
-        cancelFlush();
-        bubblesRef.current = [];
+        clearDripAndBubbles();
         setPendingUser(null);
         setStreamBubbles([]);
         onError("生成失敗或已中斷");
         onDraftChange(content);
+        setGenerating(false);
         streamCommittingRef.current = true;
+        setCommitting(true);
         try {
           await reconcileOnce(runId, sid);
         } finally {
           streamCommittingRef.current = false;
+          if (sid === sessionIdRef.current) setCommitting(false);
         }
         return;
       }
 
       if (sawDone && (completion?.completionStatus === "ok" || completion?.completionStatus === "degraded")) {
         if (completion.completionStatus === "degraded") setDegradedHint(true);
-        // 重拉 DB 前先清暫存，避免 DB＋pending 同框 4 則
-        cancelFlush();
-        bubblesRef.current = [];
+        // done：顯示對齊已接收全文後立刻進 committing，不等待拆吐播完
+        flushDripNow();
+        clearDripAndBubbles();
         setPendingUser(null);
         setStreamBubbles([]);
+        setGenerating(false);
         streamCommittingRef.current = true;
-        await reconcileOnce(runId, sid);
-        if (!isCurrent()) return;
-        void onRefreshWallet();
+        setCommitting(true);
+        try {
+          await reconcileOnce(runId, sid);
+          if (!isCurrent()) return;
+          void onRefreshWallet();
+        } finally {
+          streamCommittingRef.current = false;
+          if (sid === sessionIdRef.current) setCommitting(false);
+        }
         return;
       }
 
       // 無 done：當失敗處理
-      cancelFlush();
-      bubblesRef.current = [];
+      clearDripAndBubbles();
       setPendingUser(null);
       setStreamBubbles([]);
       onError("連線中斷，回覆未完成");
       onDraftChange(content);
+      setGenerating(false);
       streamCommittingRef.current = true;
+      setCommitting(true);
       try {
         await reconcileOnce(runId, sid);
       } finally {
         streamCommittingRef.current = false;
+        if (sid === sessionIdRef.current) setCommitting(false);
       }
     } catch (e) {
       if (!isCurrent()) return;
-      cancelFlush();
-      bubblesRef.current = [];
+      clearDripAndBubbles();
       setPendingUser(null);
       setStreamBubbles([]);
       if ((e as Error)?.name === "AbortError") {
@@ -713,11 +786,14 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         onError(e instanceof Error ? e.message : String(e));
       }
       onDraftChange(content);
+      setGenerating(false);
       streamCommittingRef.current = true;
+      setCommitting(true);
       try {
         await reconcileOnce(runId, sid);
       } finally {
         streamCommittingRef.current = false;
+        if (sid === sessionIdRef.current) setCommitting(false);
       }
     } finally {
       if (runId === streamRunIdRef.current) {
@@ -725,7 +801,9 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         streamReaderRef.current = null;
         streamCommittingRef.current = false;
         abortReasonRef.current = null;
-        if (sid === sessionIdRef.current) setStreaming(false);
+        if (sid === sessionIdRef.current) {
+          setGenerating(false);
+        }
       }
     }
   }
@@ -752,7 +830,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         content: "",
         done: false,
       });
-      scheduleFlush();
+      syncDripFromReceived();
       return;
     }
     if (ev.type === "text" && ev.text) {
@@ -769,27 +847,24 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       } else {
         buf[buf.length - 1]!.content += ev.text;
       }
-      scheduleFlush();
+      syncDripFromReceived();
       return;
     }
     if (ev.type === "member_done") {
       const buf = bubblesRef.current;
       if (buf.length) buf[buf.length - 1]!.done = true;
-      scheduleFlush();
+      syncDripFromReceived();
       return;
     }
     if (ev.type === "done") {
-      // 收尾：把緩衝立即 flush 一次，讓畫面停在最終文字
-      if (flushRafRef.current) {
-        cancelFlush();
-        flushBubbles();
-      }
+      // 收尾：顯示立刻對齊已接收全文（不卡住 committing）
+      flushDripNow();
     }
   }
 
   function submit(e?: FormEvent) {
     e?.preventDefault();
-    if (!draft.trim() || streaming || detail.session.status === "closed") return;
+    if (!draft.trim() || generating || committing || detail.session.status === "closed") return;
     void sendStream(draft);
   }
 
@@ -896,11 +971,24 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     }, 2600);
   }
 
-  /** SOP 範本：選擇即儲存（PATCH templateId），失敗則還原並顯示錯誤 */
+  /** SOP 範本：選擇即儲存；null 顯示預設仍可 PATCH；防晚到舊 sync；失敗僅 rollback 同世代 */
   async function changeTemplate(nextId: string) {
     const sid = sessionId;
     const prevDraft = templateDraft;
-    if (nextId === activeTemplateId) return;
+    const serverBefore = serverTemplateRaw;
+    if (
+      !shouldPatchTemplateSelection(nextId, serverBefore, templateDraft) &&
+      nextId === activeTemplateId
+    ) {
+      return;
+    }
+    const gate = beginTemplateSave({
+      sessionId: sid,
+      nextId,
+      serverBefore,
+      prevGen: templateGateRef.current?.gen ?? 0,
+    });
+    templateGateRef.current = gate;
     setTemplateDraft(nextId);
     setMetaSaving(true);
     onError(null);
@@ -912,10 +1000,22 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     } finally {
       if (sid === sessionIdRef.current) setMetaSaving(false);
     }
-    if (sid !== sessionIdRef.current) return;
+    if (sid !== sessionIdRef.current) {
+      templateGateRef.current = null;
+      return;
+    }
     if (ok) {
+      templateGateRef.current = markTemplateSaveOk(gate, Date.now());
       showToast("已套用範本");
-    } else {
+    } else if (
+      shouldRollbackTemplate({
+        gate: templateGateRef.current,
+        sessionId: sid,
+        expectedGen: gate.gen,
+        currentLocal: nextId,
+      })
+    ) {
+      templateGateRef.current = null;
       setTemplateDraft(prevDraft);
       onError("套用範本失敗");
     }
@@ -1171,7 +1271,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                   <span className={`strategy-role-badge is-${b.role}`}>{b.label}</span>
                   {b.modelId ? <span className="muted"> · {b.modelId}</span> : null}
                 </div>
-                <pre className="strategy-msg-body">{b.content || "…"}</pre>
+                <div className="strategy-msg-body strategy-md-body">
+                  <SafeLightMarkdown content={b.content || ""} streaming={!b.done} />
+                  {!b.done ? <span className="stream-caret" aria-hidden /> : null}
+                </div>
               </div>
             ))}
 
@@ -1207,22 +1310,28 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               value={draft}
               maxLength={8000}
               rows={3}
-              disabled={streaming || detail.session.status === "closed"}
+              disabled={generating || detail.session.status === "closed"}
               placeholder={
                 detail.session.status === "closed"
                   ? "會議室已關閉"
-                  : "在會議室發言（Enter 送出，Shift+Enter 換行）"
+                  : committing
+                    ? "同步中，可先打字；完成前無法再次送出"
+                    : "在會議室發言（Enter 送出，Shift+Enter 換行）"
               }
               onChange={(e) => onDraftChange(e.target.value)}
               onKeyDown={onKeyDown}
             />
             <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
               <span className="muted" style={{ fontSize: 12 }}>
-                每次發言會依 token 扣點
+                {committing ? "同步中…" : "每次發言會依 token 扣點"}
               </span>
-              {streaming ? (
+              {generating ? (
                 <button type="button" className="strategy-stop-btn" onClick={stopGeneration}>
                   停止生成
+                </button>
+              ) : committing ? (
+                <button type="button" disabled>
+                  同步中
                 </button>
               ) : (
                 <button type="submit" disabled={!draft.trim() || detail.session.status === "closed"}>

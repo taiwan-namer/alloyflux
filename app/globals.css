@@ -835,6 +835,30 @@ a {
   color: var(--text);
 }
 
+/* 4B：會議室助手訊息套品牌字體＋精簡 Markdown（與一般聊天 --assistant-font 對齊） */
+.strategy-msg-assistant .strategy-md-body {
+  font-family: var(--assistant-font);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.strategy-msg-assistant .strategy-md-body .md {
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.strategy-msg-assistant .strategy-md-body .md pre,
+.strategy-msg-assistant .strategy-md-body .md-code pre {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.strategy-msg-assistant .strategy-md-body .stream-caret {
+  display: inline-block;
+  margin-left: 1px;
+  vertical-align: text-bottom;
+}
+
 .strategy-msg.is-pending,
 .strategy-msg.is-streaming {
   opacity: 0.92;
