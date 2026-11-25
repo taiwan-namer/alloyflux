@@ -1103,6 +1103,19 @@ async function handleStreamMode(opts: {
 
         const tail = new StrategyJsonTailBuffer(STRATEGY_STATE_DELIMITER);
         let doneEv: DoneBill | null = null;
+        let inputReleased = false;
+        // 可見文字一結束就解鎖。分隔線後的 JSON 不顯示，但不能繼續擋住輸入框。
+        const releaseInput = () => {
+          if (inputReleased) return;
+          inputReleased = true;
+          send({
+            type: "member_done",
+            role: "lead",
+            modelId: leadModel.id,
+            label: leadMember.label,
+          });
+          send({ type: "input_ready" });
+        };
 
         try {
           for await (const ev of routeChat(
@@ -1126,6 +1139,7 @@ async function handleStreamMode(opts: {
                 leadVisiblePartial = tail.getVisibleText();
                 send({ type: "text", text: visible, modelId: leadModel.id, role: "lead" });
               }
+              if (tail.getMode() === "after_delim") releaseInput();
             }
             if (ev.type === "done") {
               doneEv = {
@@ -1177,15 +1191,8 @@ async function handleStreamMode(opts: {
           leadAnswer = visibleText;
         }
 
-        // #9：可見文字結束立刻解鎖輸入；settle／finalize（落庫、派送）再背景做
-        // 否則前端要等數秒 done 才解除 generating，體感像當機
-        send({
-          type: "member_done",
-          role: "lead",
-          modelId: leadModel.id,
-          label: leadMember.label,
-        });
-        send({ type: "input_ready" });
+        // 沒有分隔線的回覆：串流結束、落庫前就解鎖。有分隔線的在看到分隔線時已解鎖。
+        releaseInput();
 
         if (doneEv && (visibleText || jsonRaw)) {
           await settle(leadModel, visibleText || jsonRaw, doneEv);
