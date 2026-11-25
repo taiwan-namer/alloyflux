@@ -59,6 +59,8 @@ interface Conversation {
   id: string;
   title: string;
   model: string;
+  /** 列表排序用；發言後應遞增並排到最上 */
+  updatedAt?: number;
 }
 
 /** 進入對話先顯示最近幾則，往上滑再載入更舊（降低長串 Markdown 卡頓） */
@@ -1291,7 +1293,46 @@ export default function ChatPage() {
       setConversations([]);
       return;
     }
-    setConversations(await res.json());
+    const raw = (await res.json()) as Conversation[];
+    const list = Array.isArray(raw) ? raw : [];
+    // 保險：依 updatedAt 新→舊（與後端 ORDER BY 一致）
+    list.sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
+    setConversations(list);
+  }, []);
+
+  /** 使用者剛問話：立刻把該對話拉到側欄最上（不必等 AI 跑完才 refresh） */
+  const bumpConversationToTop = useCallback((id: string, patch?: Partial<Conversation>) => {
+    if (!id) return;
+    const now = Date.now();
+    setConversations((list) => {
+      const idx = list.findIndex((c) => c.id === id);
+      if (idx < 0) {
+        return [
+          {
+            id,
+            title: patch?.title?.trim() || "新對話",
+            model: patch?.model || "",
+            updatedAt: now,
+            ...patch,
+          },
+          ...list,
+        ];
+      }
+      const cur = list[idx]!;
+      const next: Conversation = {
+        ...cur,
+        ...patch,
+        id,
+        title: patch?.title?.trim() || cur.title,
+        updatedAt: now,
+      };
+      if (idx === 0) {
+        const copy = list.slice();
+        copy[0] = next;
+        return copy;
+      }
+      return [next, ...list.slice(0, idx), ...list.slice(idx + 1)];
+    });
   }, []);
   const refreshTrashed = useCallback(async () => {
     const res = await fetch("/api/conversations?trash=1");
@@ -2587,6 +2628,8 @@ export default function ChatPage() {
     setBusy(true);
     stickToBottomRef.current = true;
     setShowJumpLatest(false);
+    // 最後一次問話 → 側欄立刻置頂（既有對話）
+    if (activeId) bumpConversationToTop(activeId, { model: modelId });
     const displayContent =
       imgs.length > 0 ? `[已上傳 ${imgs.length} 張圖片]\n${content || "（見附圖）"}` : content;
     const userMsgId = crypto.randomUUID();
@@ -2661,7 +2704,15 @@ export default function ChatPage() {
           buffer = buffer.slice(nl + 1);
           if (!line.trim()) continue;
           const ev = JSON.parse(line);
-          if (ev.type === "conversation") setActiveId(ev.conversationId);
+          if (ev.type === "conversation") {
+            setActiveId(ev.conversationId);
+            // 新開對話：一有 id 就插入側欄最上
+            const titleGuess =
+              typeof ev.title === "string" && ev.title.trim()
+                ? ev.title.trim().slice(0, 80)
+                : displayContent.replace(/\s+/g, " ").trim().slice(0, 30) || "新對話";
+            bumpConversationToTop(ev.conversationId, { title: titleGuess, model: modelId });
+          }
           if (ev.type === "auto_route")
             patch((m) => ({ ...m, model: ev.modelId, autoRouted: true, autoLane: ev.lane }));
           if (ev.type === "source") patch((m) => ({ ...m, sourceLabel: ev.label, sourceKind: ev.kind }));
