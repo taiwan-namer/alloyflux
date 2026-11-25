@@ -30,9 +30,20 @@ function legacyWindow(messages: ChatMessage[]): ChatMessage[] {
 }
 
 describe("resolvePromptCacheKey / Antigravity sessionId", () => {
-  it("優先使用對話／會議室親和鍵", () => {
-    assert.equal(resolvePromptCacheKey("conv-abc", "fallback"), "conv-abc");
-    assert.equal(resolvePromptCacheKey("  sess_x  ", "fallback"), "sess_x");
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  it("UUID 親和鍵原樣使用", () => {
+    const id = "b6276ecf-788f-4a3d-a304-ee1229b89eeb";
+    assert.equal(resolvePromptCacheKey(id, "fallback"), id);
+  });
+
+  it("非 UUID／含中文的親和鍵轉成穩定的 ASCII UUID（可放進 HTTP 標頭）", () => {
+    const a = resolvePromptCacheKey("sess_d378", "x");
+    assert.equal(a, resolvePromptCacheKey("  sess_d378  ", "y"));
+    assert.match(a, UUID);
+    const zh = resolvePromptCacheKey("user:gpt:你是快取測試助理", "x");
+    assert.match(zh, UUID);
+    assert.ok([...zh].every((ch) => ch.charCodeAt(0) < 128));
   });
 
   it("無親和鍵時以 fallback 穩定雜湊", () => {
@@ -41,7 +52,7 @@ describe("resolvePromptCacheKey / Antigravity sessionId", () => {
     const c = resolvePromptCacheKey(undefined, "seed-2");
     assert.equal(a, b);
     assert.notEqual(a, c);
-    assert.match(a, /^[a-f0-9]{40}$/);
+    assert.match(a, UUID);
   });
 
   it("Antigravity sessionId 同鍵穩定、為負數字串", () => {

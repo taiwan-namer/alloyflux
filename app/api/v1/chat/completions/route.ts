@@ -275,6 +275,7 @@ export async function POST(req: Request) {
       prompt_tokens: doneEv.usage.inputTokens,
       completion_tokens: doneEv.usage.outputTokens,
       total_tokens: doneEv.usage.inputTokens + doneEv.usage.outputTokens,
+      prompt_tokens_details: { cached_tokens: doneEv.usage.cachedInputTokens },
     },
   });
 }

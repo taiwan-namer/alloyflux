@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import type { AdapterEvent, AdapterUsage, ChatMessage, GroundingSource, ProviderAdapter } from "./types";
@@ -220,7 +221,11 @@ async function* chatgptStream(
   styleOverrideContext?: string,
   cacheAffinityId?: string,
 ): AsyncGenerator<AdapterEvent> {
-  const cacheKey = (cacheAffinityId || `${creds.accountId || "acct"}:${modelId}`).trim().slice(0, 128);
+  // 進 HTTP 標頭：必須純 ASCII，統一成 UUID 形狀
+  const h = createHash("sha256")
+    .update((cacheAffinityId || `${creds.accountId || "acct"}:${modelId}`).trim())
+    .digest("hex");
+  const cacheKey = `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
   const headers: Record<string, string> = {
     Authorization: `Bearer ${creds.accessToken}`,
     "Content-Type": "application/json",

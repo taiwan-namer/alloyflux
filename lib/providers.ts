@@ -134,10 +134,14 @@ export type StreamEvent =
  * ChatGPT Codex 看 session-id 標頭；xAI 看 prompt_cache_key／x-grok-conv-id；
  * Gemini Antigravity 看 request.sessionId；Claude 則靠 cache_control＋穩定前綴。
  */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** 會進 HTTP 標頭：必須純 ASCII；統一成 Codex CLI 慣用的 UUID 形狀 */
 export function resolvePromptCacheKey(affinityId: string | undefined, fallbackSeed: string): string {
   const a = affinityId?.trim();
-  if (a) return a.slice(0, 128);
-  return createHash("sha256").update(fallbackSeed).digest("hex").slice(0, 40);
+  if (a && UUID_RE.test(a)) return a.toLowerCase();
+  const h = createHash("sha256").update(a ? `aff:${a}` : `seed:${fallbackSeed}`).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(17, 20)}-${h.slice(20, 32)}`;
 }
 
 /** Antigravity 既有格式：負數字串；改由親和鍵穩定派生，避免每輪亂數打散快取 */
