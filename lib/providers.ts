@@ -31,7 +31,7 @@ import {
   type ResearchVerdict,
 } from "./research-v2";
 import { appendStyleOverride } from "./persona-style";
-import { loadCodexTurnState, saveCodexTurnState } from "./codex-turn-state";
+import { loadCodexTurnState, saveCodexTurnState } from "./prompt-cache-sticky";
 export interface ChatImage {
   mimeType: string;
   data: string; // 純 base64，不含 data: prefix
@@ -1043,7 +1043,8 @@ async function* chatgptSubscriptionStream(
   );
   headers["session-id"] = cacheKey;
   headers["conversation-id"] = cacheKey;
-  const priorTurnState = await loadCodexTurnState(cacheKey);
+  // turn-state 依「對話 affinity + 本供給來源」分鍵：票根不能跨 ChatGPT 帳號重用
+  const priorTurnState = await loadCodexTurnState(cacheKey, c.source.id);
   if (priorTurnState) headers["x-codex-turn-state"] = priorTurnState;
 
   const body: Record<string, unknown> = {
@@ -1092,7 +1093,7 @@ async function* chatgptSubscriptionStream(
   }
 
   const nextTurnState = res.headers.get("x-codex-turn-state");
-  if (nextTurnState) void saveCodexTurnState(cacheKey, nextTurnState);
+  if (nextTurnState) void saveCodexTurnState(cacheKey, c.source.id, nextTurnState);
 
   // 從回傳 Header 即時讀取最新訂閱進度條 %（含 reset-at／window-minutes）
   const headerWindow = (

@@ -9,6 +9,7 @@ import {
   splitSystemPromptForCache,
   systemPromptFor,
 } from "./providers";
+import { preferSourceFirst, stickyKeyFor } from "./prompt-cache-sticky";
 
 const model = MODELS.find((m) => m.id === "gpt-6-astra") ?? MODELS[0]!;
 
@@ -154,3 +155,21 @@ describe("對齊視窗（prompt cache）", () => {
     }
   });
 });
+
+describe("prompt-cache sticky（使用者側）", () => {
+  it("stickyKey 優先用對話 affinity，否則用 user+model", () => {
+    assert.equal(stickyKeyFor("u1", "gpt-6-astra", "conv-1"), "aff:conv-1");
+    assert.equal(stickyKeyFor("u1", "gpt-6-astra"), "user:u1:gpt-6-astra");
+  });
+
+  it("preferSourceFirst 把偏好來源提前且其餘相對順序不變", () => {
+    const pool = [{ source: { id: "a" } }, { source: { id: "b" } }, { source: { id: "c" } }];
+    assert.deepEqual(
+      preferSourceFirst(pool, "c").map((x) => x.source.id),
+      ["c", "a", "b"],
+    );
+    assert.deepEqual(preferSourceFirst(pool, "missing"), pool);
+    assert.deepEqual(preferSourceFirst(pool, "a"), pool);
+  });
+});
+

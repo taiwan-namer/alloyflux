@@ -24,6 +24,13 @@ import {
   type ResearchVerdict,
 } from "./research-v2";
 import { planResearch } from "./research-v2/planner";
+import {
+  loadLastSourceForAffinity,
+  loadPreferredSource,
+  preferSourceFirst,
+  savePreferredSource,
+  stickyKeyFor,
+} from "./prompt-cache-sticky";
 
 export type RouteChatOptions = {
   /**
@@ -32,8 +39,8 @@ export type RouteChatOptions = {
    */
   researchQuery?: string;
   /**
-   * 跨供應商 prompt cache 黏著鍵（聊天 conversationId／會議室 sessionId）。
-   * 連續輪次必須相同，否則 ChatGPT／xAI／Gemini 訂閱路徑幾乎無法命中快取。
+   * 平台使用者側的快取黏著鍵（聊天 conversationId／會議室 sessionId）。
+   * 跟供給者 ChatGPT 帳號無關；連續輪次必須相同才能命中快取。
    */
   cacheAffinityId?: string;
 };
@@ -332,10 +339,17 @@ async function* routeLocalCandidates(
   if (allCandidates.length === 0) {
     throw new NoSourceError(await explainEmptySupply(model));
   }
-  const candidates = allCandidates.filter((c) => !sourceCatalogLacksModel(c.source.id, model));
-  if (candidates.length === 0) {
+  const eligible = allCandidates.filter((c) => !sourceCatalogLacksModel(c.source.id, model));
+  if (eligible.length === 0) {
     throw new ModelNotInCatalogError(`目前綁定的帳號都沒有開放「${model.label}」，請改選其他模型。`);
   }
+  // 以平台使用者／對話為黏著鍵：同一對話優先沿用上次成功的供給來源（額度內才黏）
+  const stickyKey = stickyKeyFor(userId, model.id, cacheAffinityId);
+  let preferredSourceId = await loadPreferredSource(stickyKey);
+  if (!preferredSourceId && cacheAffinityId) {
+    preferredSourceId = await loadLastSourceForAffinity(cacheAffinityId);
+  }
+  const candidates = preferSourceFirst(eligible, preferredSourceId);
 
   const safetyId = safetyIdFor(userId);
   let lastError = "";
@@ -376,6 +390,7 @@ async function* routeLocalCandidates(
         }
       }
       markSuccess(c.source.id);
+      void savePreferredSource(stickyKey, c.source.id);
       const u = usage ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
       const bill = chargePointsFromUsd(officialCostUsd(model, u), model.tier, model.effort);
       yield attachResearchToDone(
