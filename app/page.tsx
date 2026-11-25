@@ -70,6 +70,49 @@ const OLDER_MESSAGE_PAGE = 10;
 /** 會議室記憶體快取：再點／切房秒開；懸停預取共用同一 in-flight */
 const STRATEGY_CACHE_TTL_MS = 90_000;
 const STRATEGY_CACHE_MAX = 12;
+/** 聊天對話：記憶體＋sessionStorage，點開盡量不等網路 */
+const CONV_CACHE_TTL_MS = 10 * 60_000;
+const CONV_CACHE_MAX = 20;
+const CONV_SS_KEY = "af-conv-open-v1";
+
+type ConvOpenCache = {
+  messages: Message[];
+  hasMore: boolean;
+  model?: string;
+  at: number;
+};
+
+function readConvSession(id: string): ConvOpenCache | null {
+  try {
+    const raw = sessionStorage.getItem(CONV_SS_KEY);
+    if (!raw) return null;
+    const all = JSON.parse(raw) as Record<string, ConvOpenCache>;
+    const hit = all[id];
+    if (!hit || Date.now() - hit.at > CONV_CACHE_TTL_MS) return null;
+    if (!Array.isArray(hit.messages)) return null;
+    return hit;
+  } catch {
+    return null;
+  }
+}
+
+function writeConvSession(id: string, entry: ConvOpenCache) {
+  try {
+    const raw = sessionStorage.getItem(CONV_SS_KEY);
+    const all = raw ? (JSON.parse(raw) as Record<string, ConvOpenCache>) : {};
+    all[id] = entry;
+    const ids = Object.keys(all);
+    if (ids.length > CONV_CACHE_MAX) {
+      ids
+        .sort((a, b) => (all[a]?.at ?? 0) - (all[b]?.at ?? 0))
+        .slice(0, ids.length - CONV_CACHE_MAX)
+        .forEach((k) => delete all[k]);
+    }
+    sessionStorage.setItem(CONV_SS_KEY, JSON.stringify(all));
+  } catch {
+    /* quota */
+  }
+}
 
 type StrategyCacheEntry = { detail: StrategySessionDetail; at: number };
 
@@ -1216,6 +1259,9 @@ export default function ChatPage() {
   const openConvAbortRef = useRef<AbortController | null>(null);
   const openConvReqRef = useRef(0);
   const activeIdRef = useRef<string | null>(null);
+  const convCacheRef = useRef<Map<string, ConvOpenCache>>(new Map());
+  const convInflightRef = useRef<Map<string, Promise<ConvOpenCache | null>>>(new Map());
+  const [chatOpening, setChatOpening] = useState(false);
   const openStrategyAbortRef = useRef<AbortController | null>(null);
   const openStrategyReqRef = useRef(0);
   const strategyCacheRef = useRef<Map<string, StrategyCacheEntry>>(new Map());
@@ -1476,6 +1522,20 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
+    const id = activeId;
+    // 串流中不每字寫入，避免洗爆 sessionStorage；結束後寫一次
+    if (!id || chatOpening || busy || messages.length === 0) return;
+    putConvCache(id, { messages, hasMore: hasOlderMessages, at: Date.now() });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, messages, hasOlderMessages, chatOpening, busy]);
+
+  useEffect(() => {
+    for (const c of conversations.slice(0, 6)) prefetchConversation(c.id);
+    // 列表一到就預取最近幾則，點下去多半已在本機
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversations]);
+
+  useEffect(() => {
     // 平行開工：對話＋會議室列表與 auth 同時打（cookie 已在）
     void refreshMe();
     void refreshModels();
@@ -1670,53 +1730,114 @@ export default function ChatPage() {
     };
   }, []);
 
+  function getConvCache(id: string): ConvOpenCache | null {
+    const mem = convCacheRef.current.get(id);
+    if (mem && Date.now() - mem.at <= CONV_CACHE_TTL_MS) return mem;
+    if (mem) convCacheRef.current.delete(id);
+    const ss = readConvSession(id);
+    if (!ss) return null;
+    convCacheRef.current.set(id, ss);
+    return ss;
+  }
+
+  function putConvCache(id: string, entry: ConvOpenCache) {
+    const map = convCacheRef.current;
+    map.set(id, entry);
+    if (map.size > CONV_CACHE_MAX) {
+      let oldestId: string | null = null;
+      let oldestAt = Infinity;
+      for (const [k, v] of map) {
+        if (v.at < oldestAt) {
+          oldestAt = v.at;
+          oldestId = k;
+        }
+      }
+      if (oldestId) map.delete(oldestId);
+    }
+    writeConvSession(id, entry);
+  }
+
+  function ensureConvFetch(id: string): Promise<ConvOpenCache | null> {
+    const inflight = convInflightRef.current.get(id);
+    if (inflight) return inflight;
+    const p = (async () => {
+      const res = await fetch(`/api/conversations/${id}?limit=${INITIAL_MESSAGE_WINDOW}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const entry: ConvOpenCache = {
+        messages: markAutoRouted((data.messages as Message[]) ?? []),
+        hasMore: Boolean(data.hasMore),
+        model: typeof data.conversation?.model === "string" ? data.conversation.model : undefined,
+        at: Date.now(),
+      };
+      putConvCache(id, entry);
+      return entry;
+    })()
+      .catch(() => null)
+      .finally(() => {
+        convInflightRef.current.delete(id);
+      });
+    convInflightRef.current.set(id, p);
+    return p;
+  }
+
+  function prefetchConversation(id: string) {
+    if (!id || getConvCache(id) || convInflightRef.current.has(id)) return;
+    void ensureConvFetch(id);
+  }
+
+  function applyConvEntry(id: string, entry: ConvOpenCache) {
+    if (activeIdRef.current !== id) return;
+    if (entry.model) applyModelSelection(entry.model);
+    setMessages(entry.messages);
+    setHasOlderMessages(entry.hasMore);
+    setComposerHint(null);
+    setChatOpening(false);
+    requestAnimationFrame(() => scrollToBottom("auto"));
+  }
+
   async function openConversation(id: string) {
     const reqId = ++openConvReqRef.current;
-    openConvAbortRef.current?.abort();
-    const ac = new AbortController();
-    openConvAbortRef.current = ac;
-
     activeIdRef.current = id;
     setActiveId(id);
     setViewMode((m) => (m === "split" && canSplit ? "split" : "chat"));
     setSidebarOpen(false);
     stickToBottomRef.current = true;
     setShowJumpLatest(false);
-    setHasOlderMessages(false);
     setLoadingOlder(false);
-    // 立刻清掉上一則，避免連點時先閃舊對話再跳到新的
-    setMessages([]);
     setComposerHint(null);
 
+    const cached = getConvCache(id);
+    if (cached) {
+      applyConvEntry(id, cached);
+      // 剛預取／剛看過：不再打一輪，避免點開又等網路
+      if (Date.now() - cached.at < 20_000) return;
+    } else {
+      setHasOlderMessages(false);
+      setMessages([]);
+      setChatOpening(true);
+    }
+
     try {
-      const res = await fetch(`/api/conversations/${id}?limit=${INITIAL_MESSAGE_WINDOW}`, {
-        signal: ac.signal,
-      });
-      if (reqId !== openConvReqRef.current) return;
-      if (!res.ok) {
-        // 常見於：電腦斷線時伺服器刪掉未完成的新對話 → 列表殘留／點進去 404
-        if (activeIdRef.current === id) activeIdRef.current = null;
-        setActiveId(null);
-        setMessages([]);
-        setHasOlderMessages(false);
-        setComposerHint(
-          res.status === 404
-            ? "找不到這則對話（可能在電腦斷線時尚未存檔就被清除）。請重新整理列表，或用原裝置重開。"
-            : "載入對話失敗，請稍後再試。",
-        );
-        void refreshConversations();
+      const entry = await ensureConvFetch(id);
+      if (reqId !== openConvReqRef.current || activeIdRef.current !== id) return;
+      if (!entry) {
+        if (!cached) {
+          if (activeIdRef.current === id) activeIdRef.current = null;
+          setActiveId(null);
+          setMessages([]);
+          setHasOlderMessages(false);
+          setComposerHint("載入對話失敗，請稍後再試。");
+          void refreshConversations();
+        }
+        setChatOpening(false);
         return;
       }
-      const data = await res.json();
-      if (reqId !== openConvReqRef.current || activeIdRef.current !== id) return;
-      if (data.conversation?.model) applyModelSelection(data.conversation.model);
-      setMessages(markAutoRouted(data.messages as Message[]));
-      setHasOlderMessages(Boolean(data.hasMore));
-      setComposerHint(null);
-      requestAnimationFrame(() => scrollToBottom("auto"));
+      applyConvEntry(id, entry);
     } catch (e) {
-      if (ac.signal.aborted || reqId !== openConvReqRef.current) return;
-      setComposerHint(e instanceof Error ? e.message : "載入對話失敗，請稍後再試。");
+      if (reqId !== openConvReqRef.current) return;
+      setChatOpening(false);
+      if (!cached) setComposerHint(e instanceof Error ? e.message : "載入對話失敗，請稍後再試。");
     }
   }
 
@@ -1738,6 +1859,7 @@ export default function ChatPage() {
   /** 移入垃圾桶：跨對話記憶會排除此串，還原後訊息與記憶仍在 */
   async function trashConversation(id: string) {
     setConvMenuId(null);
+    convCacheRef.current.delete(id);
     await fetch(`/api/conversations/${id}`, { method: "DELETE" });
     if (id === activeId) newConversation();
     if (renamingId === id) {
@@ -2916,6 +3038,8 @@ export default function ChatPage() {
             <div
               key={c.id}
               className={`conv-item ${c.id === activeId ? "active" : ""}`}
+              onMouseEnter={() => prefetchConversation(c.id)}
+              onFocus={() => prefetchConversation(c.id)}
               onClick={() => {
                 if (renamingId === c.id) return;
                 openConversation(c.id);
@@ -3400,7 +3524,12 @@ export default function ChatPage() {
                 {loadingOlder ? "載入更早的對話…" : "上滑載入更早的對話"}
               </div>
             )}
-            {messages.length === 0 && (
+            {messages.length === 0 && chatOpening ? (
+              <div className="empty" aria-live="polite">
+                <p className="muted">載入對話…</p>
+              </div>
+            ) : null}
+            {messages.length === 0 && !chatOpening && (
               <div className="empty">
                 <h2 className={brand === "gemini" ? "brand-gradient-text" : undefined}>
                   四大頂級 AI 雲端工作台・多節點智慧路由

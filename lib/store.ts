@@ -29,12 +29,24 @@ export interface Conversation {
 }
 
 let conversationsSchemaReady = false;
+let conversationsSchemaPromise: Promise<void> | null = null;
 
 /** 計費／系統用對話標題前綴：不進側欄、不進跨對話記憶 */
 const HIDDEN_TITLE_PREFIXES = ["strategy-session ", "strategy-analyze "] as const;
 
 /** 確保 conversations.deleted_at／hidden 存在（舊庫升級；可重跑） */
-export async function ensureConversationsSchema(): Promise<void> {
+export function ensureConversationsSchema(): Promise<void> {
+  if (conversationsSchemaReady) return Promise.resolve();
+  if (!conversationsSchemaPromise) {
+    conversationsSchemaPromise = ensureConversationsSchemaInner().catch((e) => {
+      conversationsSchemaPromise = null;
+      throw e;
+    });
+  }
+  return conversationsSchemaPromise;
+}
+
+async function ensureConversationsSchemaInner(): Promise<void> {
   if (conversationsSchemaReady) return;
   try {
     await db().exec(`ALTER TABLE conversations ADD COLUMN IF NOT EXISTS deleted_at BIGINT`);
@@ -67,6 +79,13 @@ export async function ensureConversationsSchema(): Promise<void> {
         .run(`${prefix}%`);
     }
     conversationsSchemaReady = true;
+    // 開對話熱路徑：背景補索引，不擋這次回應
+    void db()
+      .exec(
+        `CREATE INDEX IF NOT EXISTS idx_messages_conv_recent
+         ON messages (conversation_id, created_at DESC, id DESC)`,
+      )
+      .catch(() => {});
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/does not exist|relation/i.test(msg)) {
