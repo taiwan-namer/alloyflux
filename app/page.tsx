@@ -1188,6 +1188,12 @@ export default function ChatPage() {
   const [mintedCode, setMintedCode] = useState<string | null>(null);
   const [mintMsg, setMintMsg] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** 連點對話／會議室時只讓最後一次請求寫入 UI，避免舊回應覆蓋 */
+  const openConvAbortRef = useRef<AbortController | null>(null);
+  const openConvReqRef = useRef(0);
+  const activeIdRef = useRef<string | null>(null);
+  const openStrategyAbortRef = useRef<AbortController | null>(null);
+  const openStrategyReqRef = useRef(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1221,6 +1227,7 @@ export default function ChatPage() {
 
   const loadOlderMessages = useCallback(async () => {
     if (!activeId || !hasOlderMessages || loadingOlder || busy) return;
+    const convId = activeId;
     const oldest = messages[0];
     if (!oldest?.createdAt || !oldest.id) return;
     const el = messagesRef.current;
@@ -1233,18 +1240,20 @@ export default function ChatPage() {
         beforeCreatedAt: String(oldest.createdAt),
         beforeId: oldest.id,
       });
-      const res = await fetch(`/api/conversations/${activeId}?${qs}`);
-      if (!res.ok) return;
+      const res = await fetch(`/api/conversations/${convId}?${qs}`);
+      if (!res.ok || activeIdRef.current !== convId) return;
       const data = await res.json();
+      if (activeIdRef.current !== convId) return;
       const older = markAutoRouted((data.messages as Message[]) ?? []);
       setHasOlderMessages(Boolean(data.hasMore));
       if (!older.length) return;
       setMessages((prev) => {
+        if (!prev.some((m) => m.id === oldest.id)) return prev;
         const seen = new Set(prev.map((m) => m.id));
-        const merged = [...older.filter((m) => !seen.has(m.id)), ...prev];
-        return merged;
+        return [...older.filter((m) => !seen.has(m.id)), ...prev];
       });
       requestAnimationFrame(() => {
+        if (activeIdRef.current !== convId) return;
         const box = messagesRef.current;
         if (!box) return;
         box.scrollTop = prevTop + (box.scrollHeight - prevHeight);
@@ -1387,20 +1396,21 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
+    // 平行開工：不要等 auth 才畫側欄／拉對話列表（#8）
     void refreshMe();
     void refreshModels();
-  }, [refreshMe, refreshModels]);
-
-  useEffect(() => {
-    if (authUser) void refreshStrategyTemplates();
-  }, [authUser, refreshStrategyTemplates]);
-
-  useEffect(() => {
-    if (authLoading) return;
     void refreshConversations();
-    if (authUser) void refreshWallet();
+  }, [refreshMe, refreshModels, refreshConversations]);
+
+  useEffect(() => {
+    if (!authUser) {
+      setStrategyWorkspaces([]);
+      return;
+    }
+    void refreshStrategyTemplates();
     void refreshStrategySessions();
-  }, [authLoading, authUser, refreshConversations, refreshWallet, refreshStrategySessions]);
+    void refreshWallet();
+  }, [authUser, refreshStrategyTemplates, refreshStrategySessions, refreshWallet]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
@@ -1575,6 +1585,12 @@ export default function ChatPage() {
   }, []);
 
   async function openConversation(id: string) {
+    const reqId = ++openConvReqRef.current;
+    openConvAbortRef.current?.abort();
+    const ac = new AbortController();
+    openConvAbortRef.current = ac;
+
+    activeIdRef.current = id;
     setActiveId(id);
     setViewMode((m) => (m === "split" && canSplit ? "split" : "chat"));
     setSidebarOpen(false);
@@ -1582,30 +1598,47 @@ export default function ChatPage() {
     setShowJumpLatest(false);
     setHasOlderMessages(false);
     setLoadingOlder(false);
-    const res = await fetch(`/api/conversations/${id}?limit=${INITIAL_MESSAGE_WINDOW}`);
-    if (!res.ok) {
-      // 常見於：電腦斷線時伺服器刪掉未完成的新對話 → 列表殘留／點進去 404
-      setActiveId(null);
-      setMessages([]);
-      setHasOlderMessages(false);
-      setComposerHint(
-        res.status === 404
-          ? "找不到這則對話（可能在電腦斷線時尚未存檔就被清除）。請重新整理列表，或用原裝置重開。"
-          : "載入對話失敗，請稍後再試。",
-      );
-      void refreshConversations();
-      return;
-    }
-    const data = await res.json();
-    if (data.conversation?.model) applyModelSelection(data.conversation.model);
-    setMessages(markAutoRouted(data.messages as Message[]));
-    setHasOlderMessages(Boolean(data.hasMore));
+    // 立刻清掉上一則，避免連點時先閃舊對話再跳到新的
+    setMessages([]);
     setComposerHint(null);
-    requestAnimationFrame(() => scrollToBottom("auto"));
+
+    try {
+      const res = await fetch(`/api/conversations/${id}?limit=${INITIAL_MESSAGE_WINDOW}`, {
+        signal: ac.signal,
+      });
+      if (reqId !== openConvReqRef.current) return;
+      if (!res.ok) {
+        // 常見於：電腦斷線時伺服器刪掉未完成的新對話 → 列表殘留／點進去 404
+        if (activeIdRef.current === id) activeIdRef.current = null;
+        setActiveId(null);
+        setMessages([]);
+        setHasOlderMessages(false);
+        setComposerHint(
+          res.status === 404
+            ? "找不到這則對話（可能在電腦斷線時尚未存檔就被清除）。請重新整理列表，或用原裝置重開。"
+            : "載入對話失敗，請稍後再試。",
+        );
+        void refreshConversations();
+        return;
+      }
+      const data = await res.json();
+      if (reqId !== openConvReqRef.current || activeIdRef.current !== id) return;
+      if (data.conversation?.model) applyModelSelection(data.conversation.model);
+      setMessages(markAutoRouted(data.messages as Message[]));
+      setHasOlderMessages(Boolean(data.hasMore));
+      setComposerHint(null);
+      requestAnimationFrame(() => scrollToBottom("auto"));
+    } catch (e) {
+      if (ac.signal.aborted || reqId !== openConvReqRef.current) return;
+      setComposerHint(e instanceof Error ? e.message : "載入對話失敗，請稍後再試。");
+    }
   }
 
   function newConversation() {
     if (busy) return;
+    openConvAbortRef.current?.abort();
+    openConvReqRef.current += 1;
+    activeIdRef.current = null;
     setActiveId(null);
     setMessages([]);
     setHasOlderMessages(false);
@@ -1688,6 +1721,11 @@ export default function ChatPage() {
   }
 
   async function openStrategySession(id: string) {
+    const reqId = ++openStrategyReqRef.current;
+    openStrategyAbortRef.current?.abort();
+    const ac = new AbortController();
+    openStrategyAbortRef.current = ac;
+
     setStrategyBusy(true);
     setStrategyError(null);
     setViewMode((m) => (m === "split" && canSplit ? "split" : "strategy"));
@@ -1697,14 +1735,32 @@ export default function ChatPage() {
       setStrategyDraft("");
       setDispatchSelected(new Set());
       setWsMemoryDirty(false);
+      // 切房立刻清空舊訊息，避免連點時先閃第 2 間再跳第 3 間
+      setStrategyDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              session: { ...prev.session, id },
+              messages: [],
+              hasMore: false,
+              nextCursor: null,
+              messageTotal: 0,
+              dispatch: [],
+              runs: [],
+              reports: [],
+            }
+          : prev,
+      );
     }
     try {
-      // #8：開房首屏只要最新一頁（limit=100），更早訊息用「載入更早」
+      // #8：開房首屏只要最新 40 則；更早用「載入更早」；lite=1 跳過報告內文
       const res = await fetch(
-        `/api/strategy/sessions/${encodeURIComponent(id)}?limit=100`,
-        { cache: "no-store" },
+        `/api/strategy/sessions/${encodeURIComponent(id)}?limit=40&lite=1`,
+        { cache: "no-store", signal: ac.signal },
       );
+      if (reqId !== openStrategyReqRef.current) return;
       const data = await res.json().catch(() => ({}));
+      if (reqId !== openStrategyReqRef.current) return;
       if (!res.ok) {
         setStrategyDetail(null);
         setStrategyError(typeof data.error === "string" ? data.error : "無法載入會議室");
@@ -1726,10 +1782,11 @@ export default function ChatPage() {
       const ws = strategyWorkspaces.find((w) => w.id === detail.session.workspaceId);
       if (switching || !wsMemoryDirty) setWsMemoryDraft(ws?.memory.notes ?? "");
     } catch (e) {
+      if (ac.signal.aborted || reqId !== openStrategyReqRef.current) return;
       setStrategyDetail(null);
       setStrategyError(e instanceof Error ? e.message : "無法載入會議室");
     } finally {
-      setStrategyBusy(false);
+      if (reqId === openStrategyReqRef.current) setStrategyBusy(false);
     }
   }
 
@@ -2639,14 +2696,6 @@ export default function ChatPage() {
   const apiBase =
     typeof window !== "undefined" ? `${window.location.origin}/api/v1` : "https://你的網域/api/v1";
 
-  if (authLoading) {
-    return (
-      <div className="page" style={{ placeItems: "center", display: "grid", minHeight: "100vh" }}>
-        <p className="muted">載入中…</p>
-      </div>
-    );
-  }
-
   return (
     <div className={`app view-${viewMode}${sidebarOpen ? " sidebar-open" : ""}`} data-brand={brand}>
       {sidebarOpen && (
@@ -2743,7 +2792,7 @@ export default function ChatPage() {
           ))}
           {conversations.length === 0 && (
             <div className="muted" style={{ padding: "8px 12px", fontSize: 13 }}>
-              還沒有對話
+              {authLoading ? "載入中…" : "還沒有對話"}
             </div>
           )}
 

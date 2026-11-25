@@ -3,7 +3,7 @@ import { authenticateStrategyActor, authenticateStrategyReader } from "@/lib/pla
 import {
   applySessionPauseAction,
   getStrategySession,
-  listRunsForSession,
+  listRunsForSessionBrief,
   listSessionDispatch,
   listSessionMessagesPage,
   listSessionReports,
@@ -35,30 +35,33 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   const before = url.searchParams.get("before");
   const rawLimit = url.searchParams.get("limit");
   const pageMode = before != null || rawLimit != null;
+  const lite = url.searchParams.get("lite") === "1";
 
-  let messages: Awaited<ReturnType<typeof listSessionMessagesPage>>["messages"] = [];
-  let messagesMeta: {
-    hasMore: boolean;
-    nextCursor: string | null;
-    total: number;
-  } = { hasMore: false, nextCursor: null, total: 0 };
+  const limit =
+    rawLimit == null || !Number.isFinite(Number(rawLimit))
+      ? STRATEGY_LIMITS.messagesPageSize
+      : Number(rawLimit);
 
-  if (withMessages) {
-    // #8／#9：開房一律首屏分頁（預設 messagesPageSize），勿一次硬撈到 hardCap
-    const limit =
-      rawLimit == null || !Number.isFinite(Number(rawLimit))
-        ? STRATEGY_LIMITS.messagesPageSize
-        : Number(rawLimit);
-    const page = await listSessionMessagesPage(auth.user.id, id, {
-      limit,
-      before: pageMode ? before : null,
-    });
-    messages = page.messages;
-    messagesMeta = { hasMore: page.hasMore, nextCursor: page.nextCursor, total: page.total };
-  }
+  // #8：訊息／runs／reports／dispatch 平行查；lite 跳過 COUNT 與報告內文、runs 大 JSON
+  const [page, runs, reportRows, dispatch] = await Promise.all([
+    withMessages
+      ? listSessionMessagesPage(auth.user.id, id, {
+          limit,
+          before: pageMode ? before : null,
+          skipTotal: lite,
+        })
+      : Promise.resolve({
+          messages: [] as Awaited<ReturnType<typeof listSessionMessagesPage>>["messages"],
+          hasMore: false,
+          nextCursor: null as string | null,
+          total: 0,
+        }),
+    listRunsForSessionBrief(auth.user.id, id, lite ? 5 : 10),
+    listSessionReports(auth.user.id, id, lite ? 20 : 30, { includeContent: false }),
+    listSessionDispatch(auth.user.id, id, lite ? 30 : 50),
+  ]);
 
-  const runs = await listRunsForSession(auth.user.id, id, 10);
-  const reports = (await listSessionReports(auth.user.id, id, 30)).map((r) => ({
+  const reports = reportRows.map((r) => ({
     id: r.id,
     requestId: r.requestId,
     kind: r.kind,
@@ -66,7 +69,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     chars: r.chars,
     createdAt: r.createdAt,
   }));
-  const dispatch = await listSessionDispatch(auth.user.id, id, 50);
   const ledger = readLedger(session.meta);
   return Response.json({
     session,
@@ -74,10 +76,10 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     ledger,
     ledgerText: renderLedgerForHuman(ledger),
     mode: readRoomMode(session.meta),
-    messages,
-    hasMore: messagesMeta.hasMore,
-    nextCursor: messagesMeta.nextCursor,
-    messageTotal: messagesMeta.total,
+    messages: page.messages,
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor,
+    messageTotal: page.total,
     runs,
     reports,
     dispatch,

@@ -3,7 +3,7 @@ import { authenticateStrategyReader } from "@/lib/platform-api-auth";
 import {
   getSessionSyncMeta,
   getStrategySession,
-  listRunsForSession,
+  listRunsForSessionBrief,
   listSessionDispatch,
   listSessionMessagesPage,
   listSessionReports,
@@ -54,12 +54,17 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   const session = await getStrategySession(auth.user.id, id);
   if (!session) return Response.json({ error: "Not found" }, { status: 404 });
 
-  // 輕量：只回最新一頁，前端 merge 保留已載入的更早訊息
-  const page = await listSessionMessagesPage(auth.user.id, id, {
-    limit: STRATEGY_LIMITS.messagesPageSize,
-  });
-  const runs = await listRunsForSession(auth.user.id, id, 10);
-  const reports = (await listSessionReports(auth.user.id, id, 30)).map((r) => ({
+  // 輕量：最新一頁＋平行查；前端 merge 保留已載入的更早訊息
+  const [page, runs, reportRows, dispatch] = await Promise.all([
+    listSessionMessagesPage(auth.user.id, id, {
+      limit: STRATEGY_LIMITS.messagesPageSize,
+      skipTotal: true,
+    }),
+    listRunsForSessionBrief(auth.user.id, id, 10),
+    listSessionReports(auth.user.id, id, 30, { includeContent: false }),
+    listSessionDispatch(auth.user.id, id, 50),
+  ]);
+  const reports = reportRows.map((r) => ({
     id: r.id,
     requestId: r.requestId,
     kind: r.kind,
@@ -67,7 +72,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     chars: r.chars,
     createdAt: r.createdAt,
   }));
-  const dispatch = await listSessionDispatch(auth.user.id, id, 50);
 
   return Response.json({
     changed: true,

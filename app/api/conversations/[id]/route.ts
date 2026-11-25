@@ -24,9 +24,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   try {
     const actorId = await resolveActorId(req);
     const { id } = await ctx.params;
-    const conversation = await getConversation(actorId, id);
-    if (!conversation) return Response.json({ error: "找不到對話" }, { status: 404 });
-
     const url = new URL(req.url);
     const limitRaw = Number(url.searchParams.get("limit") ?? "5");
     const beforeCreatedAtRaw = url.searchParams.get("beforeCreatedAt");
@@ -36,14 +33,21 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         ? Number(beforeCreatedAtRaw)
         : undefined;
 
-    const page = await listMessagesPage(id, {
+    const pageOpts = {
       limit: Number.isFinite(limitRaw) ? limitRaw : 5,
       beforeCreatedAt:
         typeof beforeCreatedAt === "number" && Number.isFinite(beforeCreatedAt)
           ? beforeCreatedAt
           : undefined,
       beforeId,
-    });
+    };
+
+    // 對話 meta 與訊息頁平行（#8）
+    const [conversation, page] = await Promise.all([
+      getConversation(actorId, id),
+      listMessagesPage(id, pageOpts),
+    ]);
+    if (!conversation) return Response.json({ error: "找不到對話" }, { status: 404 });
 
     return Response.json({
       conversation,

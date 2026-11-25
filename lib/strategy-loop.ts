@@ -1033,11 +1033,20 @@ export async function addSessionReport(input: {
   return { id, chars };
 }
 
-export async function listSessionReports(userId: string, sessionId: string, limit = 30) {
+export async function listSessionReports(
+  userId: string,
+  sessionId: string,
+  limit = 30,
+  opts?: { includeContent?: boolean },
+) {
   await ensureTables();
+  const includeContent = opts?.includeContent !== false;
+  const cols = includeContent
+    ? `id, request_id, kind, title, content, chars, created_at`
+    : `id, request_id, kind, title, chars, created_at`;
   const rows = (await db()
     .prepare(
-      `SELECT * FROM strategy_session_reports
+      `SELECT ${cols} FROM strategy_session_reports
        WHERE session_id = ? AND user_id = ?
        ORDER BY created_at DESC LIMIT ?`,
     )
@@ -1047,7 +1056,7 @@ export async function listSessionReports(userId: string, sessionId: string, limi
     requestId: String(row.request_id ?? ""),
     kind: String(row.kind ?? ""),
     title: String(row.title ?? ""),
-    content: String(row.content ?? ""),
+    content: includeContent ? String(row.content ?? "") : "",
     chars: Number(row.chars ?? 0),
     createdAt: Number(row.created_at),
   }));
@@ -1223,7 +1232,8 @@ export async function ensureDefaultWorkspace(userId: string): Promise<StrategyWo
   await ensureTables();
   const existing = (await db()
     .prepare(
-      `SELECT * FROM strategy_workspaces WHERE user_id = ? AND deleted_at IS NULL
+      `SELECT id, user_id, name, template_id, memory_json, created_at, updated_at, deleted_at
+       FROM strategy_workspaces WHERE user_id = ? AND deleted_at IS NULL
        ORDER BY created_at ASC LIMIT 1`,
     )
     .get(userId)) as Record<string, unknown> | undefined;
@@ -1234,9 +1244,19 @@ export async function ensureDefaultWorkspace(userId: string): Promise<StrategyWo
     const { id } = await createStrategyWorkspace({ userId, name: "automax 交易策略" });
     ws = (await getStrategyWorkspace(userId, id))!;
   }
-  await db()
-    .prepare(`UPDATE strategy_sessions SET workspace_id = ? WHERE user_id = ? AND workspace_id = ''`)
-    .run(ws.id, userId);
+  // 只在真有孤兒房時才 UPDATE，避免每次側欄列表掃全表
+  const orphan = await db()
+    .prepare(
+      `SELECT 1 AS ok FROM strategy_sessions
+       WHERE user_id = ? AND (workspace_id IS NULL OR workspace_id = '')
+       LIMIT 1`,
+    )
+    .get(userId);
+  if (orphan) {
+    await db()
+      .prepare(`UPDATE strategy_sessions SET workspace_id = ? WHERE user_id = ? AND (workspace_id IS NULL OR workspace_id = '')`)
+      .run(ws.id, userId);
+  }
   return ws;
 }
 
@@ -1267,21 +1287,48 @@ export async function listStrategyWorkspacesBrief(userId: string, opts: { trash?
   return rows.map(mapWorkspace);
 }
 
+const SESSION_BRIEF_COLS = `id, user_id, name, profile_id, strategy_version, status, model, models_json, template_id,
+              workspace_id, topic, auto_dispatch, pause_state, created_at, updated_at,
+              '' AS summary, 0 AS summary_updated_at,
+              '[]' AS pending_instructions_json, '{}' AS meta_json`;
+
 /** 側欄房間清單：不含 summary／meta／pending 大欄 */
 export async function listWorkspaceSessionsBrief(userId: string, workspaceId: string) {
   await ensureTables();
   const rows = (await db()
     .prepare(
-      `SELECT id, user_id, name, profile_id, strategy_version, status, model, models_json, template_id,
-              workspace_id, topic, auto_dispatch, pause_state, created_at, updated_at,
-              '' AS summary, 0 AS summary_updated_at,
-              '[]' AS pending_instructions_json, '{}' AS meta_json
+      `SELECT ${SESSION_BRIEF_COLS}
        FROM strategy_sessions
        WHERE user_id = ? AND workspace_id = ?
        ORDER BY updated_at DESC LIMIT 50`,
     )
     .all(userId, workspaceId)) as Record<string, unknown>[];
   return rows.map(mapSession);
+}
+
+/** 側欄一次撈多主體房間，避免 1+N */
+export async function listWorkspaceSessionsBriefMany(userId: string, workspaceIds: string[]) {
+  await ensureTables();
+  const ids = [...new Set(workspaceIds.map((id) => id.trim()).filter(Boolean))];
+  const byWs = new Map<string, ReturnType<typeof mapSession>[]>();
+  for (const id of ids) byWs.set(id, []);
+  if (!ids.length) return byWs;
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = (await db()
+    .prepare(
+      `SELECT ${SESSION_BRIEF_COLS}
+       FROM strategy_sessions
+       WHERE user_id = ? AND workspace_id IN (${placeholders})
+       ORDER BY updated_at DESC`,
+    )
+    .all(userId, ...ids)) as Record<string, unknown>[];
+  for (const row of rows) {
+    const wsId = String(row.workspace_id ?? "");
+    const list = byWs.get(wsId);
+    if (!list || list.length >= 50) continue;
+    list.push(mapSession(row));
+  }
+  return byWs;
 }
 
 export async function updateStrategyWorkspace(
@@ -1878,6 +1925,8 @@ export async function listSessionMessagesPage(
     limit?: number;
     /** 載入比此游標更舊的訊息（createdAt:id） */
     before?: string | null;
+    /** 開房 lite：跳過 COUNT(*)，total 以本頁估算 */
+    skipTotal?: boolean;
   },
 ): Promise<{
   messages: StrategySessionMessageRow[];
@@ -1890,15 +1939,17 @@ export async function listSessionMessagesPage(
     Math.max(opts?.limit ?? STRATEGY_LIMITS.messagesPageSize, 1),
     STRATEGY_LIMITS.messagesPageMax,
   );
-  const total = await countSessionMessages(userId, sessionId);
   const before = decodeMessageCursor(opts?.before ?? null);
 
   // 先 DESC 取 limit+1，再翻成 ASC；多出的一則用來判斷 hasMore（更舊方向）
+  // 欄位不含超大 structured 以外必要者；開房仍需 content
+  const msgCols = `id, session_id, user_id, role, content, structured_json, created_at,
+                   speaker_model, speaker_role, speaker_label, turn_id, completion_status`;
   const rawDesc = (
     before
       ? ((await db()
           .prepare(
-            `SELECT * FROM strategy_session_messages
+            `SELECT ${msgCols} FROM strategy_session_messages
              WHERE session_id = ? AND user_id = ?
                AND (created_at < ? OR (created_at = ? AND id < ?))
              ORDER BY created_at DESC, id DESC
@@ -1910,7 +1961,7 @@ export async function listSessionMessagesPage(
         >[])
       : ((await db()
           .prepare(
-            `SELECT * FROM strategy_session_messages
+            `SELECT ${msgCols} FROM strategy_session_messages
              WHERE session_id = ? AND user_id = ?
              ORDER BY created_at DESC, id DESC
              LIMIT ?`,
@@ -1927,6 +1978,9 @@ export async function listSessionMessagesPage(
   const oldest = messages[0];
   const nextCursor =
     hasMore && oldest ? encodeMessageCursor(oldest.createdAt, oldest.id) : null;
+  const total = opts?.skipTotal
+    ? messages.length + (hasMore ? 1 : 0)
+    : await countSessionMessages(userId, sessionId);
   return { messages, hasMore, nextCursor, total };
 }
 
@@ -1989,6 +2043,21 @@ export async function listRunsForSession(userId: string, sessionId: string, limi
   const rows = (await db()
     .prepare(
       `SELECT * FROM strategy_loop_runs
+       WHERE user_id = ? AND session_id = ?
+       ORDER BY created_at DESC LIMIT ?`,
+    )
+    .all(userId, sessionId, Math.min(Math.max(limit, 1), 50))) as Record<string, unknown>[];
+  return rows.map(mapRun);
+}
+
+/** 開房 UI 只需 id／profile／時間，不撈 summary／metrics 大 JSON */
+export async function listRunsForSessionBrief(userId: string, sessionId: string, limit = 10) {
+  await ensureTables();
+  const rows = (await db()
+    .prepare(
+      `SELECT id, user_id, profile_id, strategy_version, git_commit, session_id, created_at,
+              '{}' AS summary_json, '' AS review_excerpt, '{}' AS metrics_json
+       FROM strategy_loop_runs
        WHERE user_id = ? AND session_id = ?
        ORDER BY created_at DESC LIMIT ?`,
     )

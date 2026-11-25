@@ -49,8 +49,16 @@ export async function ensureConversationsSchema(): Promise<void> {
        ON conversations(user_id, deleted_at DESC)
        WHERE deleted_at IS NOT NULL`,
     );
-    // 舊的會議室計費殼對話：標題前綴對齊後標 hidden，側欄立即消失
+    // 舊會議室計費殼：只在還有未隱藏列時才 UPDATE（避免冷啟動每次全表掃）
     for (const prefix of HIDDEN_TITLE_PREFIXES) {
+      const hit = await db()
+        .prepare(
+          `SELECT 1 AS ok FROM conversations
+           WHERE hidden = 0 AND title LIKE ?
+           LIMIT 1`,
+        )
+        .get(`${prefix}%`);
+      if (!hit) continue;
       await db()
         .prepare(
           `UPDATE conversations SET hidden = 1
@@ -89,7 +97,8 @@ export async function listConversations(userId: string): Promise<Conversation[]>
       `SELECT id, title, model, updated_at AS "updatedAt"
        FROM conversations
        WHERE user_id = ? AND deleted_at IS NULL AND hidden = 0
-       ORDER BY updated_at DESC`,
+       ORDER BY updated_at DESC
+       LIMIT 100`,
     )
     .all(userId)) as unknown as Conversation[];
 }
