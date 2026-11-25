@@ -257,6 +257,38 @@ export async function requireSupplier(req: Request): Promise<User> {
   return u;
 }
 
+/**
+ * 模組 OAuth 綁定用：已登入則升為 supplier；未登入則用模組回傳的 email
+ * 自動建立供給者帳號並發 session cookie（免先點上方網站 Google 登入）。
+ */
+export async function resolveSupplierForOAuthBind(
+  req: Request,
+  identity?: { email?: string | null; name?: string | null },
+): Promise<{ user: User; sessionCookie?: string }> {
+  const existing = await getSessionUser(req);
+  if (existing) {
+    if (!existing.isSupplier) {
+      await db().prepare("UPDATE users SET role = 'supplier' WHERE id = ?").run(existing.id);
+      const refreshed = (await findUserById(existing.id))!;
+      return { user: refreshed };
+    }
+    return { user: existing };
+  }
+  const email = identity?.email?.trim().toLowerCase();
+  if (!email) {
+    throw Object.assign(
+      new Error("模組授權未回傳 email，無法自動建立登入。請改用網站 Google 登入後再串接。"),
+      { status: 401 },
+    );
+  }
+  const user = await upsertGoogleUser({
+    email,
+    name: identity?.name?.trim() || undefined,
+    role: "supplier",
+  });
+  return { user, sessionCookie: sessionCookieHeader(issueSessionToken(user.id)) };
+}
+
 export function publicUser(u: User) {
   return {
     id: u.id,

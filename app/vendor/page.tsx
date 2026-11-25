@@ -185,6 +185,10 @@ export default function VendorPage() {
                 ? "✓ Grok 模組 OAuth 授權完成！正在導向 /sources 設定分配用量…"
                 : "✓ ChatGPT 模組 OAuth 授權完成！正在導向 /sources 設定分配用量…",
           });
+          if (data.sessionBootstrapped) {
+            window.location.assign("/sources?oauth=ok");
+            return;
+          }
           goToSourcesAfterBind((href) => router.push(href));
         } else if (data.error) {
           setOauthMsg({ ok: false, text: data.error });
@@ -412,6 +416,10 @@ export default function VendorPage() {
         text: `✓ Google 算力節點綁定完成${pctNote}！正在進入 /sources…`,
       });
       lastSubmittedCodeRef.current = null;
+      if (data.sessionBootstrapped) {
+        window.location.assign("/sources?oauth=ok");
+        return;
+      }
       goToSourcesAfterBind((href) => router.push(href));
     } finally {
       submittingCodeRef.current = false;

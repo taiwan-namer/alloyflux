@@ -291,6 +291,11 @@ export default function SourcesPage() {
                 ? "✓ Grok 模組串接成功！已自動讀取剩餘容量並納入分配試算"
                 : "✓ ChatGPT 模組串接成功！已自動讀取剩餘容量並納入分配試算",
           });
+          // 訪客首次串接會發 session cookie → 整頁重整進入已登入 /sources
+          if (data.sessionBootstrapped) {
+            window.location.assign("/sources?oauth=ok");
+            return;
+          }
           void refresh();
         } else if (data.error) {
           // 成功後併發輪詢常會噴「找不到驗證狀態」——不可蓋掉已成功的綠字
@@ -493,6 +498,11 @@ export default function SourcesPage() {
       setActiveOAuthState(null);
       setSubLabel("");
       lastSubmittedCodeRef.current = null;
+      // 訪客首次串接會發 session cookie → 整頁重整進入已登入 /sources
+      if (data.sessionBootstrapped) {
+        window.location.assign("/sources?oauth=ok");
+        return;
+      }
       // 本機無 DB 時列表讀不到雲端資料，導向線上 /sources
       goToSourcesAfterBind(() => {
         void refresh();

@@ -27,7 +27,12 @@ import {
   syncSourceQuotaDetailed,
   type SyncQuotaResult,
 } from "@/lib/sources";
-import { jsonError, requireSupplier, type User } from "@/lib/auth";
+import {
+  jsonError,
+  requireSupplier,
+  resolveSupplierForOAuthBind,
+  type User,
+} from "@/lib/auth";
 
 function syncQuotaResponse(results: SyncQuotaResult[]) {
   const failed = results.filter((r) => !r.ok);
@@ -47,6 +52,12 @@ function syncQuotaResponse(results: SyncQuotaResult[]) {
   });
 }
 
+function jsonWithOptionalSession(data: Record<string, unknown>, sessionCookie?: string): Response {
+  const res = Response.json(data);
+  if (sessionCookie) res.headers.append("Set-Cookie", sessionCookie);
+  return res;
+}
+
 export const dynamic = "force-dynamic";
 
 const globalForServers = globalThis as unknown as {
@@ -56,6 +67,13 @@ const globalForServers = globalThis as unknown as {
 };
 
 const CALLBACK_VERSION = 3;
+
+const START_ACTIONS = new Set([
+  "start_gemini",
+  "start_chatgpt_browser",
+  "start_chatgpt_device",
+  "start_grok_device",
+]);
 
 async function saveOAuthSource(
   req: Request | undefined,
@@ -128,7 +146,7 @@ async function completeCodeAndSave(
       shareLimitPct: input.shareLimitPct ?? shareLimitPct,
       ownerUserId: input.ownerUserId,
     });
-    return { ok: true, ...added };
+    return { ok: true, ...added, email: creds.email };
   } catch (e) {
     // Google code 已用掉；寫庫失敗時不可叫使用者重貼同碼
     const detail = e instanceof Error ? e.message : String(e);
@@ -211,7 +229,6 @@ export async function GET() {
 
 export async function POST(req: Request) {
   try {
-    const user: User = await requireSupplier(req);
     const body = (await req.json()) as {
       action:
         | "start_gemini"
@@ -239,87 +256,151 @@ export async function POST(req: Request) {
       sourceId?: string;
     };
 
-    switch (body.action) {
-      case "start_gemini": {
-        const host = (() => {
-          try {
-            return new URL(req.url).hostname;
-          } catch {
-            return "";
+    // 啟動授權：訪客可直接點模組，不必先登網站 OAuth
+    if (START_ACTIONS.has(body.action)) {
+      switch (body.action) {
+        case "start_gemini": {
+          const host = (() => {
+            try {
+              return new URL(req.url).hostname;
+            } catch {
+              return "";
+            }
+          })();
+          const isLocalDev = !process.env.VERCEL && (host === "localhost" || host === "127.0.0.1");
+          if (isLocalDev) {
+            ensureLocalCallbackListener(51121, "/oauth-callback");
           }
-        })();
-        const isLocalDev = !process.env.VERCEL && (host === "localhost" || host === "127.0.0.1");
-        if (isLocalDev) {
-          ensureLocalCallbackListener(51121, "/oauth-callback");
+          const res = startGeminiOAuth({
+            label: body.label,
+            shareLimitPct: body.shareLimitPct,
+            preferLocalLoopback: isLocalDev,
+          });
+          return Response.json({
+            ...res,
+            persistMode: shouldProxyOAuthPersist(req) ? "cloud" : "local",
+          });
         }
-        const res = startGeminiOAuth({
-          label: body.label,
-          shareLimitPct: body.shareLimitPct,
-          preferLocalLoopback: isLocalDev,
-        });
-        return Response.json({
-          ...res,
-          persistMode: shouldProxyOAuthPersist(req) ? "cloud" : "local",
-        });
+        case "start_chatgpt_browser": {
+          ensureLocalCallbackListener(1455, "/auth/callback");
+          const res = startChatGptOAuth({ label: body.label, shareLimitPct: body.shareLimitPct });
+          return Response.json(res);
+        }
+        case "start_chatgpt_device": {
+          const res = await startChatGptDeviceFlow({ label: body.label, shareLimitPct: body.shareLimitPct });
+          return Response.json(res);
+        }
+        case "start_grok_device": {
+          const res = await startGrokDeviceFlow({ label: body.label, shareLimitPct: body.shareLimitPct });
+          return Response.json(res);
+        }
+        default:
+          return Response.json({ error: "未知的 action" }, { status: 400 });
       }
-      case "start_chatgpt_browser": {
-        ensureLocalCallbackListener(1455, "/auth/callback");
-        const res = startChatGptOAuth({ label: body.label, shareLimitPct: body.shareLimitPct });
-        return Response.json(res);
-      }
-      case "start_chatgpt_device": {
-        const res = await startChatGptDeviceFlow({ label: body.label, shareLimitPct: body.shareLimitPct });
-        return Response.json(res);
-      }
+    }
+
+    switch (body.action) {
       case "poll_chatgpt_device": {
         if (!body.state) return Response.json({ error: "缺少 state" }, { status: 400 });
         const r = await pollChatGptDeviceFlow(body.state);
         if (r.status === "pending") return Response.json({ status: "pending" });
+        const { user, sessionCookie } = await resolveSupplierForOAuthBind(req, { email: r.creds.email });
         const added = await saveOAuthSource(req, {
           creds: r.creds,
           label: r.label,
           shareLimitPct: r.shareLimitPct,
           ownerUserId: user.id,
         });
-        return Response.json({ status: "completed", ...added });
-      }
-      case "start_grok_device": {
-        const res = await startGrokDeviceFlow({ label: body.label, shareLimitPct: body.shareLimitPct });
-        return Response.json(res);
+        return jsonWithOptionalSession(
+          { status: "completed", ...added, sessionBootstrapped: Boolean(sessionCookie) },
+          sessionCookie,
+        );
       }
       case "poll_grok_device": {
         if (!body.state) return Response.json({ error: "缺少 state" }, { status: 400 });
         const r = await pollGrokDeviceFlow(body.state);
         if (r.status === "pending" || r.status === "slow_down") return Response.json({ status: "pending" });
+        const { user, sessionCookie } = await resolveSupplierForOAuthBind(req, { email: r.creds.email });
         const added = await saveOAuthSource(req, {
           creds: r.creds,
           label: r.label,
           shareLimitPct: r.shareLimitPct,
           ownerUserId: user.id,
         });
-        return Response.json({ status: "completed", ...added });
+        return jsonWithOptionalSession(
+          { status: "completed", ...added, sessionBootstrapped: Boolean(sessionCookie) },
+          sessionCookie,
+        );
       }
       case "complete_code": {
         if (!body.codeOrUrl) return Response.json({ error: "請貼上授權回呼網址或 code" }, { status: 400 });
-        const added = await completeCodeAndSave(req, {
+        // 先換 token 取得 email，再決定／建立供給者 session
+        const exchanged = await completeOAuthByCode({
           codeOrUrl: body.codeOrUrl,
           state: body.state,
-          label: body.label,
-          shareLimitPct: body.shareLimitPct,
-          ownerUserId: user.id,
         });
-        return Response.json({ ok: true, ...added });
+        const { user, sessionCookie } = await resolveSupplierForOAuthBind(req, {
+          email: exchanged.creds.email,
+        });
+        try {
+          if (shouldProxyOAuthPersist(req)) {
+            const added = await persistOAuthViaCloud(
+              {
+                action: "import_raw_token",
+                provider: exchanged.creds.provider,
+                accessToken: exchanged.creds.accessToken,
+                refreshToken: exchanged.creds.refreshToken,
+                accountId: exchanged.creds.accountId,
+                projectId: exchanged.creds.projectId,
+                email: exchanged.creds.email,
+                planType: exchanged.creds.planType,
+                expiresAt: exchanged.creds.expiresAt,
+                label: body.label || exchanged.label,
+                shareLimitPct: body.shareLimitPct ?? exchanged.shareLimitPct,
+              },
+              req,
+            );
+            return jsonWithOptionalSession(
+              { ok: true, ...added, sessionBootstrapped: Boolean(sessionCookie) },
+              sessionCookie,
+            );
+          }
+          const added = await addOAuthSubscriptionSource({
+            creds: exchanged.creds,
+            label: body.label || exchanged.label,
+            shareLimitPct: body.shareLimitPct ?? exchanged.shareLimitPct,
+            ownerUserId: user.id,
+          });
+          return jsonWithOptionalSession(
+            { ok: true, ...added, sessionBootstrapped: Boolean(sessionCookie) },
+            sessionCookie,
+          );
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e);
+          console.error("[oauth] token ok but persist failed", {
+            email: exchanged.creds.email,
+            provider: exchanged.creds.provider,
+            detail,
+          });
+          throw new Error(
+            `Google 授權已成功，但寫入節點失敗（${detail}）。授權碼已用過，請重新點 Gemini 開一輪新授權後再貼一次。`,
+          );
+        }
       }
       case "import_local_cli": {
         if (!body.provider) return Response.json({ error: "請指定 provider" }, { status: 400 });
         const creds = await importLocalCliCredential(body.provider);
+        const { user, sessionCookie } = await resolveSupplierForOAuthBind(req, { email: creds.email });
         const added = await saveOAuthSource(req, {
           creds,
           label: body.label,
           shareLimitPct: body.shareLimitPct,
           ownerUserId: user.id,
         });
-        return Response.json({ ok: true, ...added });
+        return jsonWithOptionalSession(
+          { ok: true, ...added, sessionBootstrapped: Boolean(sessionCookie) },
+          sessionCookie,
+        );
       }
       case "import_raw_token": {
         if (!body.provider || !body.accessToken?.trim()) {
@@ -350,15 +431,20 @@ export async function POST(req: Request) {
             body.planType?.trim() ||
             (body.provider === "gemini" ? "Google AI Pro" : body.provider === "xai" ? "SuperGrok" : "PRO"),
         };
+        const { user, sessionCookie } = await resolveSupplierForOAuthBind(req, { email: creds.email });
         const added = await addOAuthSubscriptionSource({
           creds,
           label: body.label,
           shareLimitPct: body.shareLimitPct,
           ownerUserId: user.id,
         });
-        return Response.json({ ok: true, ...added });
+        return jsonWithOptionalSession(
+          { ok: true, ...added, sessionBootstrapped: Boolean(sessionCookie) },
+          sessionCookie,
+        );
       }
       case "sync_quota": {
+        const user: User = await requireSupplier(req);
         if (body.sourceId && !user.isAdmin) {
           await assertSourceOwnedBy(body.sourceId, user);
         }
