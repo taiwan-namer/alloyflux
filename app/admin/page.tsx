@@ -734,8 +734,11 @@ export default function AdminPage() {
         body: JSON.stringify({ enabled: !s.enabled }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) setMsg(data.error || "更新失敗");
-      else setMsg(`${s.label} 已${s.enabled ? "停用" : "啟用"}`);
+      if (!res.ok) {
+        setMsg(data.error || (res.status === 403 ? "無權啟停此貨源（需供給者登入）" : "更新失敗"));
+      } else {
+        setMsg(`${s.label} 已${s.enabled ? "停用" : "啟用"}`);
+      }
       await refreshOverview();
     } catch {
       setMsg("更新失敗：網路錯誤");

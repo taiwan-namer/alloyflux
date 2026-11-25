@@ -301,6 +301,16 @@ export async function assertSourceOwnedBy(
   }
 }
 
+/** 讀取貨源 kind（啟停權限分流用） */
+export async function getSourceKind(sourceId: string): Promise<"supplier" | "platform" | null> {
+  await ensureSourcesOwnerColumn();
+  const row = (await db()
+    .prepare("SELECT kind FROM sources WHERE id = ? AND removed_at IS NULL")
+    .get(sourceId)) as { kind?: string } | undefined;
+  if (!row) return null;
+  return row.kind === "platform" ? "platform" : row.kind === "supplier" ? "supplier" : null;
+}
+
 export async function addSource(input: {
   label: string;
   kind: SourceKind;
