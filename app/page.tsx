@@ -72,7 +72,12 @@ const STRATEGY_CACHE_TTL_MS = 90_000;
 const STRATEGY_CACHE_MAX = 12;
 /** 聊天對話：記憶體＋sessionStorage，點開盡量不等網路 */
 const CONV_CACHE_TTL_MS = 10 * 60_000;
-const CONV_CACHE_MAX = 20;
+/** 上面立刻預取的則數；其餘在首頁背景慢慢補 */
+const CONV_PREFETCH_NOW = 6;
+/** 慢慢補到列表的一半，短列表至少再蓋過下一屏，避免一次灌太多 */
+const CONV_PREFETCH_FLOOR = 16;
+const CONV_PREFETCH_CAP = 40;
+const CONV_CACHE_MAX = 48;
 const CONV_SS_KEY = "af-conv-open-v1";
 
 type ConvOpenCache = {
@@ -96,17 +101,40 @@ function readConvSession(id: string): ConvOpenCache | null {
   }
 }
 
-function writeConvSession(id: string, entry: ConvOpenCache) {
+function convCachePriority(
+  id: string,
+  at: number,
+  keep: ReadonlySet<string>,
+  order: ReadonlyMap<string, number>,
+) {
+  const idx = order.get(id);
+  const place = idx == null ? 0 : 10_000 - idx;
+  const band = keep.has(id) ? 1_000_000_000 : 0;
+  return band + place * 1_000_000 + at;
+}
+
+function writeConvSession(
+  id: string,
+  entry: ConvOpenCache,
+  keep: ReadonlySet<string>,
+  order: ReadonlyMap<string, number>,
+) {
   try {
     const raw = sessionStorage.getItem(CONV_SS_KEY);
     const all = raw ? (JSON.parse(raw) as Record<string, ConvOpenCache>) : {};
     all[id] = entry;
     const ids = Object.keys(all);
     if (ids.length > CONV_CACHE_MAX) {
-      ids
-        .sort((a, b) => (all[a]?.at ?? 0) - (all[b]?.at ?? 0))
-        .slice(0, ids.length - CONV_CACHE_MAX)
-        .forEach((k) => delete all[k]);
+      ids.sort(
+        (a, b) =>
+          convCachePriority(a, all[a]?.at ?? 0, keep, order) -
+          convCachePriority(b, all[b]?.at ?? 0, keep, order),
+      );
+      for (const k of ids) {
+        if (Object.keys(all).length <= CONV_CACHE_MAX) break;
+        if (k === id) continue;
+        delete all[k];
+      }
     }
     sessionStorage.setItem(CONV_SS_KEY, JSON.stringify(all));
   } catch {
@@ -1261,6 +1289,12 @@ export default function ChatPage() {
   const activeIdRef = useRef<string | null>(null);
   const convCacheRef = useRef<Map<string, ConvOpenCache>>(new Map());
   const convInflightRef = useRef<Map<string, Promise<ConvOpenCache | null>>>(new Map());
+  /** 側欄由上到下的順序，快取滿了先丟最下面、沒在預取範圍裡的 */
+  const convOrderRef = useRef<Map<string, number>>(new Map());
+  const convKeepRef = useRef<Set<string>>(new Set());
+  const busyRef = useRef(false);
+  const chatOpeningRef = useRef(false);
+  const strategyBusyRef = useRef(false);
   const [chatOpening, setChatOpening] = useState(false);
   const openStrategyAbortRef = useRef<AbortController | null>(null);
   const openStrategyReqRef = useRef(0);
@@ -1530,8 +1564,56 @@ export default function ChatPage() {
   }, [activeId, messages, hasOlderMessages, chatOpening, busy]);
 
   useEffect(() => {
-    for (const c of conversations.slice(0, 6)) prefetchConversation(c.id);
-    // 列表一到就預取最近幾則，點下去多半已在本機
+    busyRef.current = busy;
+  }, [busy]);
+
+  useEffect(() => {
+    chatOpeningRef.current = chatOpening;
+  }, [chatOpening]);
+
+  useEffect(() => {
+    strategyBusyRef.current = strategyBusy;
+  }, [strategyBusy]);
+
+  useEffect(() => {
+    const ids = conversations.map((c) => c.id);
+    const order = new Map<string, number>();
+    ids.forEach((id, i) => order.set(id, i));
+    convOrderRef.current = order;
+    const half = Math.ceil(ids.length / 2);
+    const target = Math.min(ids.length, CONV_PREFETCH_CAP, Math.max(half, Math.min(ids.length, CONV_PREFETCH_FLOOR)));
+    const keep = new Set(ids.slice(0, target));
+    convKeepRef.current = keep;
+    for (const id of ids.slice(0, CONV_PREFETCH_NOW)) prefetchConversation(id);
+
+    const rest = ids.slice(CONV_PREFETCH_NOW, target);
+    if (rest.length === 0) return;
+    let cancelled = false;
+    let timer = 0;
+    let i = 0;
+    const step = () => {
+      if (cancelled) return;
+      if (document.hidden || busyRef.current || chatOpeningRef.current || strategyBusyRef.current) {
+        timer = window.setTimeout(step, 1200);
+        return;
+      }
+      const id = rest[i];
+      i += 1;
+      if (id) prefetchConversation(id);
+      if (i >= rest.length) return;
+      const pending = id ? convInflightRef.current.get(id) : undefined;
+      const next = () => {
+        if (!cancelled) timer = window.setTimeout(step, pending ? 500 : 60);
+      };
+      if (pending) void pending.finally(next);
+      else next();
+    };
+    // 先讓最上面幾則搶頻寬，其餘在首頁背景一則一則補
+    timer = window.setTimeout(step, 1500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversations]);
 
@@ -1742,19 +1824,22 @@ export default function ChatPage() {
 
   function putConvCache(id: string, entry: ConvOpenCache) {
     const map = convCacheRef.current;
+    const keep = convKeepRef.current;
+    const order = convOrderRef.current;
     map.set(id, entry);
     if (map.size > CONV_CACHE_MAX) {
-      let oldestId: string | null = null;
-      let oldestAt = Infinity;
-      for (const [k, v] of map) {
-        if (v.at < oldestAt) {
-          oldestAt = v.at;
-          oldestId = k;
-        }
+      const ranked = [...map.keys()].sort(
+        (a, b) =>
+          convCachePriority(a, map.get(a)?.at ?? 0, keep, order) -
+          convCachePriority(b, map.get(b)?.at ?? 0, keep, order),
+      );
+      for (const k of ranked) {
+        if (map.size <= CONV_CACHE_MAX) break;
+        if (k === id || k === activeIdRef.current) continue;
+        map.delete(k);
       }
-      if (oldestId) map.delete(oldestId);
     }
-    writeConvSession(id, entry);
+    writeConvSession(id, entry, keep, order);
   }
 
   function ensureConvFetch(id: string): Promise<ConvOpenCache | null> {
