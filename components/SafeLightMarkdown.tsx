@@ -132,21 +132,12 @@ function splitStableText(body: string, streaming: boolean): { stable: string; ta
   if (!streaming) return { stable: body, tail: "" };
   const lastNl = body.lastIndexOf("\n");
   if (lastNl < 0) return { stable: "", tail: body };
-  let stable = body.slice(0, lastNl + 1);
-  let tail = body.slice(lastNl + 1);
-  const core = stable.length ? stable.slice(0, -1).split("\n") : [];
-  if (!core.length) return { stable: "", tail };
-  let from = core.length;
-  while (from > 0 && core[from - 1].includes("|")) from -= 1;
-  if (from < core.length) {
-    const tableChunk = core.slice(from);
-    if (!tableChunk.some(isTableSeparator)) {
-      stable = core.slice(0, from).join("\n");
-      if (stable) stable += "\n";
-      tail = `${tableChunk.join("\n")}\n${tail}`;
-    }
-  }
-  return { stable, tail };
+  // 只暫扣最後一行（可能還在打字）。不要把整段未完成表格／數字列藏起來，
+  // 否則數字一多會像被截斷，串流結束又突然變成完整內容。
+  return {
+    stable: body.slice(0, lastNl + 1),
+    tail: body.slice(lastNl + 1),
+  };
 }
 
 function renderTextBlock(body: string, keyBase: number, streaming: boolean) {

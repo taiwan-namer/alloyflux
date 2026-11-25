@@ -476,22 +476,18 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const fresh = detail.messages.filter((m) => !seen.has(m.id));
     if (!fresh.length) return;
     for (const m of fresh) seen.add(m.id);
-    // 本機串流或 done→歷史交接中：直接顯示、不 reveal；交接完成後同幀清暫存氣泡（避免閃空白）
-    if (streamingRef.current || handoffPendingRef.current) {
-      if (handoffPendingRef.current) {
-        const userText = streamContentRef.current.trim();
-        const freshHasTurn = fresh.some(
-          (m) =>
-            m.role === "assistant" ||
-            (m.role === "user" && (!userText || m.content.trim() === userText)),
-        );
-        if (freshHasTurn) {
-          handoffPendingRef.current = false;
-          setPendingUser(null);
-          setStreamBubbles([]);
-          clearDripAndBubbles();
-        }
+
+    const liveBubbles = bubblesRef.current.length > 0;
+    const freshHasAssistant = fresh.some((m) => m.role === "assistant");
+    // 本輪串流氣泡還在時，等歷史裡的 AI 回覆到了再只留那一份，避免兩個對話窗
+    if (streamingRef.current || handoffPendingRef.current || liveBubbles) {
+      if (freshHasAssistant) {
+        handoffPendingRef.current = false;
+        setPendingUser(null);
+        setStreamBubbles([]);
+        clearDripAndBubbles();
       }
+      // 自己這一輪不走 reveal：否則會先截斷再突然完整，還可能跟串流氣泡疊在一起
       return;
     }
     setRevealIds((cur) => {
@@ -647,11 +643,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       .catch(() => {})
       .finally(() => {
         if (refreshWallet && sid === sessionIdRef.current) void onRefreshWallet();
-        // sync 若未帶進新訊息，最多 8 秒解除 handoff 旗標（氣泡仍保留以免空白）
+        // sync 若未帶進新訊息：旗標與氣泡一起留著，等歷史到再清；不要只清旗標，否則會變成兩個對話窗
         window.setTimeout(() => {
-          if (sid === sessionIdRef.current && handoffPendingRef.current) {
-            handoffPendingRef.current = false;
-          }
+          if (sid !== sessionIdRef.current || !handoffPendingRef.current) return;
+          void syncPullRef.current(true);
         }, 8000);
       });
   }
