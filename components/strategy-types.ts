@@ -104,11 +104,13 @@ export interface StrategySessionMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
-  structured?: { source?: string; kind?: string };
+  structured?: { source?: string; kind?: string; turnId?: string; completionStatus?: string };
   createdAt: number;
   speakerModel?: string | null;
   speakerRole?: string | null;
   speakerLabel?: string | null;
+  turnId?: string | null;
+  completionStatus?: "ok" | "degraded" | "partial" | "aborted" | "failed" | null;
 }
 
 export interface StrategyDispatchItem {
@@ -135,6 +137,10 @@ export interface StrategySessionDetail {
     fPlan: Record<string, unknown> | null;
   };
   messages: StrategySessionMessage[];
+  /** 4A：尚有更舊訊息（超過 hardCap／單頁） */
+  hasMore?: boolean;
+  nextCursor?: string | null;
+  messageTotal?: number;
   reports: { id: string; title: string; chars: number; createdAt: number }[];
   runs: { id: string; profileId?: string; createdAt?: number }[];
 }
@@ -145,12 +151,17 @@ export type StrategySyncResponse =
       updatedAt: number;
       sessionUpdatedAt?: number;
       workspaceUpdatedAt?: number;
+      messageCount?: number;
     }
   | {
       changed: true;
       updatedAt: number;
       sessionUpdatedAt?: number;
       workspaceUpdatedAt?: number;
+      messageCount?: number;
+      hasMore?: boolean;
+      nextCursor?: string | null;
+      messageTotal?: number;
       workspaceMemoryNotes?: string;
       session: StrategySessionDetail["session"];
       dossier: StrategySessionDetail["dossier"];

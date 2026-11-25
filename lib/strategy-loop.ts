@@ -53,6 +53,7 @@ function normalizePauseState(raw: unknown): PauseState {
 /**
  * 會議室每回合送上游的字數預算。歷史會被 slideMessagesForUpstream 再裁（8 輪、舊 assistant ≤1800 字），
  * 所以長期記憶放 dossier，大數據由 Cursor 本機彙總成報告再上傳。
+ * 4A：模型上下文改 bounded history（預設 12＋字元 budget）；API 歷史改分頁／游標，不再以 40 為永久完整歷史。
  */
 export const STRATEGY_LIMITS = {
   messageMaxChars: 8000,
@@ -61,13 +62,110 @@ export const STRATEGY_LIMITS = {
   reportsInjectMaxChars: 24000,
   reportInjectEachMaxChars: 8000,
   runsInjectMaxChars: 6000,
-  historyMessages: 6,
+  /** 送入模型的訊息則數上限（bounded；再受 historyCharBudget 裁切） */
+  historyMessages: 12,
+  /** 無精確 token 計算器時的保守字元預算（約略對應數 k tokens） */
+  historyCharBudget: 24000,
+  /** 為 bounded 裁切多撈一些再裁 */
+  historyFetchLimit: 40,
+  /** 單頁歷史預設／最大 */
+  messagesPageSize: 100,
+  messagesPageMax: 200,
+  /** 單次開房／sync 合併硬頂（超過則 hasMore） */
+  messagesHardCap: 2000,
   summaryMaxChars: 800,
   roomQueryMaxChars: 2000,
   roomQueriesPerTurn: 3,
   workspaceMemoryMaxChars: 4000,
   workspaceBriefMaxChars: 6000,
 } as const;
+
+export type StrategyMessageCompletionStatus =
+  | "ok"
+  | "degraded"
+  | "partial"
+  | "aborted"
+  | "failed";
+
+export type StrategySessionMessageRow = {
+  id: string;
+  sessionId: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  structured: Record<string, unknown>;
+  createdAt: number;
+  speakerModel: string | null;
+  speakerRole: string | null;
+  speakerLabel: string | null;
+  turnId: string | null;
+  completionStatus: StrategyMessageCompletionStatus | null;
+};
+
+/** 編碼／解碼歷史游標：`${createdAt}:${id}`（較舊方向） */
+export function encodeMessageCursor(createdAt: number, id: string): string {
+  return `${createdAt}:${id}`;
+}
+
+export function decodeMessageCursor(raw: string | null | undefined): { createdAt: number; id: string } | null {
+  if (!raw || !raw.trim()) return null;
+  const idx = raw.indexOf(":");
+  if (idx <= 0) return null;
+  const createdAt = Number(raw.slice(0, idx));
+  const id = raw.slice(idx + 1).trim();
+  if (!Number.isFinite(createdAt) || !id) return null;
+  return { createdAt, id };
+}
+
+/** partial 是否應寫入 lead assistant 列（空字串禁止，避免前端空氣泡） */
+export function shouldPersistPartialAssistant(visibleText: string): boolean {
+  return Boolean(visibleText?.trim());
+}
+
+/** idempotent 命中時是否允許以較完整狀態覆寫（done-after-abort／retry） */
+export function shouldUpgradeTurnCompletion(
+  prev: StrategyMessageCompletionStatus | null | undefined,
+  next: StrategyMessageCompletionStatus | null | undefined,
+): boolean {
+  return (
+    (prev === "aborted" || prev === "failed" || prev === "partial" || prev == null) &&
+    (next === "ok" || next === "degraded" || next === "partial")
+  );
+}
+
+/**
+ * 從較新往較舊裁切，保留最新輪次；優先維持 user/assistant 成對；受 maxMessages＋maxChars 雙閘。
+ * 無精確 token 計算器 → 以字元數作保守 fallback。
+ */
+export function selectBoundedHistory<T extends { role: string; content: string }>(
+  messages: T[],
+  opts?: { maxMessages?: number; maxChars?: number },
+): T[] {
+  const maxMessages = Math.max(1, opts?.maxMessages ?? STRATEGY_LIMITS.historyMessages);
+  const maxChars = Math.max(500, opts?.maxChars ?? STRATEGY_LIMITS.historyCharBudget);
+  const usable = messages.filter((m) => m.role === "user" || m.role === "assistant");
+  if (!usable.length) return [];
+
+  let slice = usable.slice(-maxMessages);
+  while (slice.length && slice[0]!.role !== "user") slice = slice.slice(1);
+
+  const totalChars = () => slice.reduce((n, m) => n + (m.content?.length ?? 0), 0);
+  while (slice.length > 2 && totalChars() > maxChars) {
+    // 從最舊成對移除（user + 其後 assistant），否則只移一則
+    if (slice[0]?.role === "user" && slice[1]?.role === "assistant") {
+      slice = slice.slice(2);
+    } else {
+      slice = slice.slice(1);
+    }
+    while (slice.length && slice[0]!.role !== "user") slice = slice.slice(1);
+  }
+  if (totalChars() > maxChars && slice.length) {
+    // 仍超標：裁最舊一則 content 尾端保留頭（極保守，通常不會走到）
+    const first = slice[0]!;
+    const budget = Math.max(200, maxChars - totalChars() + first.content.length);
+    slice = [{ ...first, content: first.content.slice(0, budget) }, ...slice.slice(1)];
+  }
+  return slice;
+}
 
 export type StrategyDossier = {
   strategies: Record<string, string>;
@@ -208,6 +306,10 @@ async function createTables(): Promise<void> {
     `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_model TEXT`,
     `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_role TEXT`,
     `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_label TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS turn_id TEXT`,
+    `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS completion_status TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_session_messages_turn
+      ON strategy_session_messages(session_id, turn_id)`,
     `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_workspace
       ON strategy_sessions(workspace_id, updated_at DESC)`,
     `CREATE TABLE IF NOT EXISTS strategy_dispatch_items (
@@ -1352,6 +1454,17 @@ export async function markDispatchDone(
   return { ok: true, sessionId, pauseState: updated?.pauseState ?? "none" };
 }
 
+export async function countSessionMessages(userId: string, sessionId: string): Promise<number> {
+  await ensureTables();
+  const row = (await db()
+    .prepare(
+      `SELECT COUNT(*) AS c FROM strategy_session_messages
+       WHERE session_id = ? AND user_id = ?`,
+    )
+    .get(sessionId, userId)) as { c?: number | string } | undefined;
+  return Number(row?.c ?? 0);
+}
+
 export async function getSessionSyncMeta(
   userId: string,
   sessionId: string,
@@ -1361,6 +1474,7 @@ export async function getSessionSyncMeta(
   workspaceUpdatedAt: number;
   workspaceMemoryNotes: string;
   maxUpdatedAt: number;
+  messageCount: number;
 } | null> {
   await ensureTables();
   const sess = await getStrategySession(userId, sessionId);
@@ -1378,13 +1492,66 @@ export async function getSessionSyncMeta(
   }
 
   const sessionUpdatedAt = sess.updatedAt;
+  const messageCount = await countSessionMessages(userId, sessionId);
   return {
     sessionUpdatedAt,
     workspaceId,
     workspaceUpdatedAt,
     workspaceMemoryNotes,
     maxUpdatedAt: Math.max(sessionUpdatedAt, workspaceUpdatedAt),
+    messageCount,
   };
+}
+
+function mapSessionMessageRow(row: Record<string, unknown>): StrategySessionMessageRow {
+  const rawStatus = row.completion_status == null ? null : String(row.completion_status);
+  const completionStatus =
+    rawStatus === "ok" ||
+    rawStatus === "degraded" ||
+    rawStatus === "partial" ||
+    rawStatus === "aborted" ||
+    rawStatus === "failed"
+      ? rawStatus
+      : null;
+  return {
+    id: String(row.id),
+    sessionId: String(row.session_id),
+    role: String(row.role) as "user" | "assistant" | "system",
+    content: String(row.content ?? ""),
+    structured: safeJson(row.structured_json, {} as Record<string, unknown>),
+    createdAt: Number(row.created_at),
+    speakerModel: row.speaker_model == null ? null : String(row.speaker_model),
+    speakerRole: row.speaker_role == null ? null : String(row.speaker_role),
+    speakerLabel: row.speaker_label == null ? null : String(row.speaker_label),
+    turnId: row.turn_id == null || row.turn_id === "" ? null : String(row.turn_id),
+    completionStatus,
+  };
+}
+
+export async function findSessionMessageByTurn(
+  userId: string,
+  sessionId: string,
+  turnId: string,
+  role: "user" | "assistant" | "system",
+  speakerRole?: string | null,
+): Promise<StrategySessionMessageRow | null> {
+  await ensureTables();
+  const rows = (await db()
+    .prepare(
+      speakerRole
+        ? `SELECT * FROM strategy_session_messages
+           WHERE session_id = ? AND user_id = ? AND turn_id = ? AND role = ? AND speaker_role = ?
+           ORDER BY created_at ASC, id ASC LIMIT 1`
+        : `SELECT * FROM strategy_session_messages
+           WHERE session_id = ? AND user_id = ? AND turn_id = ? AND role = ?
+           ORDER BY created_at ASC, id ASC LIMIT 1`,
+    )
+    .all(
+      ...(speakerRole
+        ? [sessionId, userId, turnId, role, speakerRole]
+        : [sessionId, userId, turnId, role]),
+    )) as Record<string, unknown>[];
+  return rows[0] ? mapSessionMessageRow(rows[0]) : null;
 }
 
 export async function addSessionMessage(input: {
@@ -1397,15 +1564,60 @@ export async function addSessionMessage(input: {
   speakerModel?: string | null;
   speakerRole?: string | null;
   speakerLabel?: string | null;
-}): Promise<{ id: string }> {
+  turnId?: string | null;
+  completionStatus?: StrategyMessageCompletionStatus | null;
+  /** 同 turnId＋role（＋speakerRole）已存在則不重複寫入 */
+  idempotent?: boolean;
+}): Promise<{ id: string; deduped: boolean }> {
   await ensureTables();
+  const turnId = input.turnId?.trim() || null;
+  if (input.idempotent && turnId) {
+    const existing = await findSessionMessageByTurn(
+      input.userId,
+      input.sessionId,
+      turnId,
+      input.role,
+      input.role === "assistant" ? input.speakerRole ?? null : null,
+    );
+    if (existing) {
+      const prev = existing.completionStatus;
+      const next = input.completionStatus ?? null;
+      const canUpgrade = shouldUpgradeTurnCompletion(prev, next);
+      if (canUpgrade && (input.content !== existing.content || next !== prev)) {
+        await db()
+          .prepare(
+            `UPDATE strategy_session_messages
+             SET content = ?, structured_json = ?, completion_status = ?,
+                 speaker_model = COALESCE(?, speaker_model),
+                 speaker_role = COALESCE(?, speaker_role),
+                 speaker_label = COALESCE(?, speaker_label)
+             WHERE id = ? AND session_id = ? AND user_id = ?`,
+          )
+          .run(
+            input.content,
+            JSON.stringify(input.structured ?? existing.structured),
+            next,
+            input.speakerModel ?? null,
+            input.speakerRole ?? null,
+            input.speakerLabel ?? null,
+            existing.id,
+            input.sessionId,
+            input.userId,
+          );
+        await touchSessionUpdatedAt(input.userId, input.sessionId);
+        return { id: existing.id, deduped: true };
+      }
+      return { id: existing.id, deduped: true };
+    }
+  }
+
   const id = `smsg_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
   await db()
     .prepare(
       `INSERT INTO strategy_session_messages
         (id, session_id, user_id, role, content, structured_json, created_at,
-         speaker_model, speaker_role, speaker_label)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         speaker_model, speaker_role, speaker_label, turn_id, completion_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       id,
@@ -1418,35 +1630,134 @@ export async function addSessionMessage(input: {
       input.speakerModel ?? null,
       input.speakerRole ?? null,
       input.speakerLabel ?? null,
+      turnId,
+      input.completionStatus ?? null,
     );
   await touchSessionUpdatedAt(input.userId, input.sessionId);
-  return { id };
+  return { id, deduped: false };
 }
 
-export async function listSessionMessages(userId: string, sessionId: string, limit = 40) {
+/** 相容舊呼叫：取最新 N 則（升序）；上限 messagesPageMax */
+export async function listSessionMessages(
+  userId: string,
+  sessionId: string,
+  limit: number = STRATEGY_LIMITS.messagesPageSize,
+) {
+  const page = await listSessionMessagesPage(userId, sessionId, { limit });
+  return page.messages;
+}
+
+export async function listSessionMessagesPage(
+  userId: string,
+  sessionId: string,
+  opts?: {
+    limit?: number;
+    /** 載入比此游標更舊的訊息（createdAt:id） */
+    before?: string | null;
+  },
+): Promise<{
+  messages: StrategySessionMessageRow[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  total: number;
+}> {
   await ensureTables();
-  const rows = (await db()
-    .prepare(
-      `SELECT * FROM (
-         SELECT * FROM strategy_session_messages
-         WHERE session_id = ? AND user_id = ?
-         ORDER BY created_at DESC, id DESC
-         LIMIT ?
-       ) t
-       ORDER BY created_at ASC, id ASC`,
-    )
-    .all(sessionId, userId, Math.min(Math.max(limit, 1), 100))) as Record<string, unknown>[];
-  return rows.map((row) => ({
-    id: String(row.id),
-    sessionId: String(row.session_id),
-    role: String(row.role) as "user" | "assistant" | "system",
-    content: String(row.content ?? ""),
-    structured: safeJson(row.structured_json, {} as Record<string, unknown>),
-    createdAt: Number(row.created_at),
-    speakerModel: row.speaker_model == null ? null : String(row.speaker_model),
-    speakerRole: row.speaker_role == null ? null : String(row.speaker_role),
-    speakerLabel: row.speaker_label == null ? null : String(row.speaker_label),
-  }));
+  const limit = Math.min(
+    Math.max(opts?.limit ?? STRATEGY_LIMITS.messagesPageSize, 1),
+    STRATEGY_LIMITS.messagesPageMax,
+  );
+  const total = await countSessionMessages(userId, sessionId);
+  const before = decodeMessageCursor(opts?.before ?? null);
+
+  // 先 DESC 取 limit+1，再翻成 ASC；多出的一則用來判斷 hasMore（更舊方向）
+  const rawDesc = (
+    before
+      ? ((await db()
+          .prepare(
+            `SELECT * FROM strategy_session_messages
+             WHERE session_id = ? AND user_id = ?
+               AND (created_at < ? OR (created_at = ? AND id < ?))
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(sessionId, userId, before.createdAt, before.createdAt, before.id, limit + 1)) as Record<
+          string,
+          unknown
+        >[])
+      : ((await db()
+          .prepare(
+            `SELECT * FROM strategy_session_messages
+             WHERE session_id = ? AND user_id = ?
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?`,
+          )
+          .all(sessionId, userId, limit + 1)) as Record<string, unknown>[])
+  );
+
+  const hasMore = rawDesc.length > limit;
+  const pageDesc = hasMore ? rawDesc.slice(0, limit) : rawDesc;
+  const messages = pageDesc
+    .slice()
+    .reverse()
+    .map(mapSessionMessageRow);
+  const oldest = messages[0];
+  const nextCursor =
+    hasMore && oldest ? encodeMessageCursor(oldest.createdAt, oldest.id) : null;
+  return { messages, hasMore, nextCursor, total };
+}
+
+/** 開房／sync：自最新往舊合併直到 hardCap；超過則 hasMore=true（還有更舊） */
+export async function collectSessionMessages(
+  userId: string,
+  sessionId: string,
+  hardCap = STRATEGY_LIMITS.messagesHardCap,
+): Promise<{
+  messages: StrategySessionMessageRow[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  total: number;
+}> {
+  const total = await countSessionMessages(userId, sessionId);
+  const cap = Math.min(Math.max(hardCap, 1), STRATEGY_LIMITS.messagesHardCap);
+  const pageSize = STRATEGY_LIMITS.messagesPageMax;
+  let before: string | null = null;
+  const acc: StrategySessionMessageRow[] = [];
+  let guard = 0;
+  let lastHasMore = false;
+  let lastCursor: string | null = null;
+
+  while (acc.length < cap && guard < 60) {
+    guard += 1;
+    const need = Math.min(pageSize, cap - acc.length);
+    const page = await listSessionMessagesPage(userId, sessionId, { limit: need, before });
+    if (!page.messages.length) {
+      lastHasMore = false;
+      lastCursor = null;
+      break;
+    }
+    if (!before) acc.push(...page.messages);
+    else acc.unshift(...page.messages);
+    lastHasMore = page.hasMore;
+    lastCursor = page.nextCursor;
+    if (!page.hasMore || !page.nextCursor) break;
+    before = page.nextCursor;
+  }
+
+  if (acc.length > cap) {
+    const sliced = acc.slice(acc.length - cap);
+    return {
+      messages: sliced,
+      hasMore: true,
+      nextCursor: encodeMessageCursor(sliced[0]!.createdAt, sliced[0]!.id),
+      total,
+    };
+  }
+  return {
+    messages: acc,
+    hasMore: lastHasMore,
+    nextCursor: lastHasMore ? lastCursor : null,
+    total,
+  };
 }
 
 export async function listRunsForSession(userId: string, sessionId: string, limit = 10) {

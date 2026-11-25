@@ -2,10 +2,11 @@ import { cloudDbProxy } from "@/lib/cloud-api";
 import { authenticateStrategyActor, authenticateStrategyReader } from "@/lib/platform-api-auth";
 import {
   applySessionPauseAction,
+  collectSessionMessages,
   getStrategySession,
   listRunsForSession,
   listSessionDispatch,
-  listSessionMessages,
+  listSessionMessagesPage,
   listSessionReports,
   PAUSE_ACTIONS,
   readDossier,
@@ -30,7 +31,38 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   if (!session) return Response.json({ error: "Not found" }, { status: 404 });
   const url = new URL(req.url);
   const withMessages = url.searchParams.get("messages") !== "0";
-  const messages = withMessages ? await listSessionMessages(auth.user.id, id, 40) : [];
+  const before = url.searchParams.get("before");
+  const rawLimit = url.searchParams.get("limit");
+  const pageMode = before != null || rawLimit != null;
+
+  let messages: Awaited<ReturnType<typeof collectSessionMessages>>["messages"] = [];
+  let messagesMeta: {
+    hasMore: boolean;
+    nextCursor: string | null;
+    total: number;
+  } = { hasMore: false, nextCursor: null, total: 0 };
+
+  if (withMessages) {
+    if (pageMode) {
+      const limit = rawLimit == null ? STRATEGY_LIMITS.messagesPageSize : Number(rawLimit);
+      const page = await listSessionMessagesPage(auth.user.id, id, {
+        limit: Number.isFinite(limit) ? limit : STRATEGY_LIMITS.messagesPageSize,
+        before,
+      });
+      messages = page.messages;
+      messagesMeta = { hasMore: page.hasMore, nextCursor: page.nextCursor, total: page.total };
+    } else {
+      // 預設：合併讀取至 hardCap，避免舊 40 硬頂吃掉早期歷史
+      const collected = await collectSessionMessages(auth.user.id, id);
+      messages = collected.messages;
+      messagesMeta = {
+        hasMore: collected.hasMore,
+        nextCursor: collected.nextCursor,
+        total: collected.total,
+      };
+    }
+  }
+
   const runs = await listRunsForSession(auth.user.id, id, 10);
   const reports = (await listSessionReports(auth.user.id, id, 30)).map((r) => ({
     id: r.id,
@@ -45,6 +77,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     session,
     dossier: readDossier(session.meta),
     messages,
+    hasMore: messagesMeta.hasMore,
+    nextCursor: messagesMeta.nextCursor,
+    messageTotal: messagesMeta.total,
     runs,
     reports,
     dispatch,

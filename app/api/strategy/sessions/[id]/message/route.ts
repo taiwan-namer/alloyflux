@@ -36,13 +36,16 @@ import {
   queryRoomContent,
   readDossier,
   resolveSessionMembers,
+  selectBoundedHistory,
   STRATEGY_LIMITS,
   STRATEGY_SESSION_STATUSES,
   updateStrategySession,
   type SessionMember,
+  type StrategyMessageCompletionStatus,
   type StrategySession,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
+import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -172,8 +175,13 @@ async function buildUpstream(
   content: string,
   includeCurrentUserInHistory: boolean,
 ): Promise<ChatMessage[]> {
-  const history = await listSessionMessages(authUserId, sessionId, L.historyMessages);
-  const upstream: ChatMessage[] = history
+  // 多撈再 bounded：預設 12 則＋字元 budget；不把完整 DB 歷史無限制送入模型
+  const fetched = await listSessionMessages(authUserId, sessionId, L.historyFetchLimit);
+  const bounded = selectBoundedHistory(fetched, {
+    maxMessages: L.historyMessages,
+    maxChars: L.historyCharBudget,
+  });
+  const upstream: ChatMessage[] = bounded
     .filter((m) => m.role === "user" || m.role === "assistant")
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
   while (upstream.length && upstream[0]!.role !== "user") upstream.shift();
@@ -429,7 +437,10 @@ async function finalizeTurn(input: {
   skipMemoryAndDispatch?: boolean;
   /** stream 分隔線前可見正文；優先於 JSON reply 落庫 */
   visibleText?: string;
+  turnId?: string | null;
+  completionStatus?: StrategyMessageCompletionStatus;
 }) {
+  const completionStatus = input.completionStatus ?? "ok";
   const parsedPack = parseAssistantStructured(
     input.answer,
     input.session,
@@ -483,8 +494,10 @@ async function finalizeTurn(input: {
       userId: input.authUserId,
       role: "user",
       content: input.content,
-      structured: { source: input.fromWeb ? "web" : "cursor" },
+      structured: { source: input.fromWeb ? "web" : "cursor", turnId: input.turnId ?? undefined },
       createdAt: baseTs + idx,
+      turnId: input.turnId,
+      idempotent: Boolean(input.turnId),
     });
     idx += 1;
   }
@@ -494,11 +507,14 @@ async function finalizeTurn(input: {
       userId: input.authUserId,
       role: "assistant",
       content: a.text,
-      structured: { kind: "advisor" },
+      structured: { kind: "advisor", turnId: input.turnId ?? undefined },
       createdAt: baseTs + idx,
       speakerModel: a.member.modelId,
       speakerRole: a.member.role,
       speakerLabel: a.member.label,
+      turnId: input.turnId,
+      completionStatus,
+      idempotent: Boolean(input.turnId),
     });
     idx += 1;
   }
@@ -522,6 +538,8 @@ async function finalizeTurn(input: {
     pauseState: freshSession?.pauseState ?? "none",
     dispatchIds,
     nextDossier: input.skipMemoryAndDispatch ? input.dossier : nextDossier,
+    completionStatus,
+    turnId: input.turnId ?? undefined,
   };
 
   await addSessionMessage({
@@ -534,6 +552,9 @@ async function finalizeTurn(input: {
     speakerModel: input.leadModelId,
     speakerRole: "lead",
     speakerLabel: "主導",
+    turnId: input.turnId,
+    completionStatus,
+    idempotent: Boolean(input.turnId),
   });
 
   if (!input.skipMemoryAndDispatch) {
@@ -557,6 +578,80 @@ async function finalizeTurn(input: {
   return structured;
 }
 
+/** abort／錯誤：idempotent 保存 user＋已產生 partial，不假裝完成；無可見內容不寫空 assistant */
+async function finalizePartialTurn(input: {
+  authUserId: string;
+  sessionId: string;
+  content: string;
+  fromWeb: boolean;
+  turnId: string;
+  leadModelId: string;
+  leadLabel: string;
+  advisorTexts: { member: SessionMember; text: string }[];
+  visibleText: string;
+  status: Extract<StrategyMessageCompletionStatus, "aborted" | "failed" | "partial">;
+  baseTs?: number;
+}) {
+  const baseTs = input.baseTs ?? Date.now();
+  let idx = 0;
+  await addSessionMessage({
+    sessionId: input.sessionId,
+    userId: input.authUserId,
+    role: "user",
+    content: input.content,
+    structured: {
+      source: input.fromWeb ? "web" : "cursor",
+      turnId: input.turnId,
+      completionStatus: input.status,
+    },
+    createdAt: baseTs + idx,
+    turnId: input.turnId,
+    completionStatus: input.status,
+    idempotent: true,
+  });
+  idx += 1;
+  for (const a of input.advisorTexts) {
+    if (!a.text.trim()) continue;
+    await addSessionMessage({
+      sessionId: input.sessionId,
+      userId: input.authUserId,
+      role: "assistant",
+      content: a.text,
+      structured: { kind: "advisor", turnId: input.turnId, completionStatus: input.status },
+      createdAt: baseTs + idx,
+      speakerModel: a.member.modelId,
+      speakerRole: a.member.role,
+      speakerLabel: a.member.label,
+      turnId: input.turnId,
+      completionStatus: input.status,
+      idempotent: true,
+    });
+    idx += 1;
+  }
+  const partial = (input.visibleText || "").trim();
+  // 禁止寫空 assistant（前端會當正常氣泡）；狀態掛在 user.structured／completion_status
+  if (!partial) return;
+  await addSessionMessage({
+    sessionId: input.sessionId,
+    userId: input.authUserId,
+    role: "assistant",
+    content: partial,
+    structured: {
+      kind: "lead",
+      turnId: input.turnId,
+      completionStatus: input.status,
+      reply: partial,
+    },
+    createdAt: baseTs + idx,
+    speakerModel: input.leadModelId,
+    speakerRole: "lead",
+    speakerLabel: input.leadLabel,
+    turnId: input.turnId,
+    completionStatus: input.status,
+    idempotent: true,
+  });
+}
+
 async function handleStreamMode(opts: {
   req: Request;
   authUserId: string;
@@ -577,6 +672,17 @@ async function handleStreamMode(opts: {
 
   const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb);
   const upstreamBase = await buildUpstream(authUserId, sessionId, contextBlock, content, false);
+  const turnId = `turn_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  // 串流開始即 idempotent 落庫 user，避免 abort 提前 return 丟訊
+  await addSessionMessage({
+    sessionId,
+    userId: authUserId,
+    role: "user",
+    content,
+    structured: { source: fromWeb ? "web" : "cursor", turnId },
+    turnId,
+    idempotent: true,
+  });
 
   const startedAt = Date.now();
   const encoder = encodeNdjson;
@@ -594,8 +700,31 @@ async function handleStreamMode(opts: {
       let hiddenConvId: string | null = null;
       const advisorTexts: { member: SessionMember; text: string }[] = [];
       let leadAnswer = "";
+      let leadVisiblePartial = "";
       let aborted = false;
       let softTimeout = false;
+
+      const persistPartial = async (
+        status: Extract<StrategyMessageCompletionStatus, "aborted" | "failed" | "partial">,
+      ) => {
+        try {
+          await finalizePartialTurn({
+            authUserId,
+            sessionId,
+            content,
+            fromWeb,
+            turnId,
+            leadModelId: leadModel.id,
+            leadLabel: leadMember.label,
+            advisorTexts,
+            visibleText: leadVisiblePartial,
+            status,
+            baseTs: Date.now(),
+          });
+        } catch {
+          /* 落庫失敗不阻斷關閉串流 */
+        }
+      };
 
       const ensureHiddenConv = async (modelId: string) => {
         if (hiddenConvId) return hiddenConvId;
@@ -713,6 +842,7 @@ async function handleStreamMode(opts: {
         }
 
         if (aborted || req.signal.aborted) {
+          await persistPartial("aborted");
           send({ type: "error", message: "aborted", aborted: true });
           send({ type: "done", completionStatus: "failed", aborted: true });
           controller.close();
@@ -760,7 +890,10 @@ async function handleStreamMode(opts: {
             // thinking 靜默丟棄，不轉發前端
             if (ev.type === "text") {
               const visible = tail.push(ev.text);
-              if (visible) send({ type: "text", text: visible, modelId: leadModel.id, role: "lead" });
+              if (visible) {
+                leadVisiblePartial = tail.getVisibleText();
+                send({ type: "text", text: visible, modelId: leadModel.id, role: "lead" });
+              }
             }
             if (ev.type === "done") {
               doneEv = {
@@ -773,9 +906,11 @@ async function handleStreamMode(opts: {
             }
           }
         } catch (e) {
+          leadVisiblePartial = tail.getVisibleText();
           if (isAbortError(e) || req.signal.aborted) {
             aborted = true;
           } else {
+            await persistPartial("failed");
             send({ type: "error", message: e instanceof Error ? e.message : String(e) });
             send({ type: "done", completionStatus: "failed" });
             controller.close();
@@ -785,8 +920,10 @@ async function handleStreamMode(opts: {
 
         const flushed = tail.flushVisible();
         if (flushed) send({ type: "text", text: flushed, modelId: leadModel.id, role: "lead" });
+        leadVisiblePartial = tail.getVisibleText();
 
         if (aborted || req.signal.aborted) {
+          await persistPartial("aborted");
           send({ type: "error", message: "aborted", aborted: true });
           send({ type: "done", completionStatus: "failed", aborted: true });
           controller.close();
@@ -830,13 +967,15 @@ async function handleStreamMode(opts: {
           contextChars: contextBlock.length,
           answer: leadAnswer || visibleText,
           leadModelId: leadModel.id,
-          writeUser: true,
+          writeUser: false,
           content,
           fromWeb,
           advisorTexts,
           baseTs: Date.now(),
           skipMemoryAndDispatch: skipMemory,
           visibleText,
+          turnId,
+          completionStatus: softTimeout ? "degraded" : "ok",
         });
 
         // 若有可見文字但 JSON reply 不同，確保前端已看過的文字與存檔一致
@@ -859,9 +998,11 @@ async function handleStreamMode(opts: {
         });
       } catch (e) {
         if (isAbortError(e) || req.signal.aborted) {
+          await persistPartial("aborted");
           send({ type: "error", message: "aborted", aborted: true });
           send({ type: "done", completionStatus: "failed", aborted: true });
         } else {
+          await persistPartial("failed");
           send({ type: "error", message: e instanceof Error ? e.message : String(e) });
           send({ type: "done", completionStatus: "failed" });
         }

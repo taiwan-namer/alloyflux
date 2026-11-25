@@ -62,6 +62,13 @@ export type StrategyRoomViewProps = {
   onPauseAction: (action: PauseAction) => void;
   onMarkDispatchDone: (dispatchId: string) => void;
   onSyncPatch: (data: Extract<StrategySyncResponse, { changed: true }>) => void;
+  /** 4A：prepend 更舊歷史 */
+  onOlderMessages?: (payload: {
+    messages: StrategySessionMessage[];
+    hasMore: boolean;
+    nextCursor: string | null;
+    messageTotal: number;
+  }) => void;
   onPatchSessionMeta: (patch: {
     models?: StrategyMemberConfig[];
     templateId?: string;
@@ -221,6 +228,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     onPauseAction,
     onMarkDispatchDone,
     onSyncPatch,
+    onOlderMessages,
     onPatchSessionMeta,
     wsMemorySaving,
   } = props;
@@ -237,6 +245,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const [metaSaving, setMetaSaving] = useState(false);
   const [toast, setToast] = useState<{ key: number; text: string } | null>(null);
   const [revealIds, setRevealIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const reconcileRunRef = useRef<number | null>(null);
 
   const roomScrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -256,9 +266,11 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const toastSeqRef = useRef(0);
   const onStreamingChangeRef = useRef(onStreamingChange);
   const lastUpdatedAtRef = useRef(detail.session.updatedAt || 0);
+  const lastMessageCountRef = useRef(detail.messages.length || 0);
   const sessionIdRef = useRef(detail.session.id);
   const streamingRef = useRef(false);
   const onSyncPatchRef = useRef(onSyncPatch);
+  const onStreamCommittedRef = useRef(onStreamCommitted);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const pauseState = detail.session.pauseState ?? "none";
@@ -278,6 +290,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   streamingRef.current = streaming;
   onSyncPatchRef.current = onSyncPatch;
   onStreamingChangeRef.current = onStreamingChange;
+  onStreamCommittedRef.current = onStreamCommitted;
 
   const cancelFlush = useCallback(() => {
     if (flushRafRef.current) {
@@ -357,8 +370,21 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       setToast(null);
     }
     sessionIdRef.current = detail.session.id;
-    lastUpdatedAtRef.current = detail.session.updatedAt || 0;
-  }, [detail.session.id, detail.session.updatedAt, invalidateStream]);
+    // 切房重置；同房僅單調遞增，避免 session.updatedAt 覆寫掉較大的 sync watermark
+    if (prev !== detail.session.id) {
+      lastUpdatedAtRef.current = detail.session.updatedAt || 0;
+      lastMessageCountRef.current = detail.messages.length || 0;
+    } else {
+      lastUpdatedAtRef.current = Math.max(
+        lastUpdatedAtRef.current,
+        detail.session.updatedAt || 0,
+      );
+      lastMessageCountRef.current = Math.max(
+        lastMessageCountRef.current,
+        detail.messages.length || 0,
+      );
+    }
+  }, [detail.session.id, detail.session.updatedAt, detail.messages.length, invalidateStream]);
 
   // 首次載入／切房：現有訊息全部標記為已看過（不重播）；同房外部新訊息才逐步顯示
   useLayoutEffect(() => {
@@ -422,30 +448,40 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
     async function pull(force = false) {
       if (cancelled) return;
+      // 串流中預設跳過；force=true 用於結束／abort／commit 後的 reconciliation
       if (!force && (document.visibilityState === "hidden" || streamingRef.current)) return;
 
       syncAbortRef.current?.abort();
       const ac = new AbortController();
       syncAbortRef.current = ac;
       const since = lastUpdatedAtRef.current || 0;
+      const count = lastMessageCountRef.current || 0;
       try {
         const res = await fetch(
-          `/api/strategy/sessions/${encodeURIComponent(sid)}/sync?since=${encodeURIComponent(String(since))}`,
+          `/api/strategy/sessions/${encodeURIComponent(sid)}/sync?since=${encodeURIComponent(String(since))}&count=${encodeURIComponent(String(count))}`,
           { cache: "no-store", signal: ac.signal },
         );
         if (!res.ok || cancelled || ac.signal.aborted) return;
         const data = (await res.json()) as StrategySyncResponse;
         if (!data || typeof data !== "object") return;
         if (!data.changed) {
-          if (typeof data.updatedAt === "number" && data.updatedAt > lastUpdatedAtRef.current) {
-            lastUpdatedAtRef.current = data.updatedAt;
+          if (typeof data.updatedAt === "number") {
+            lastUpdatedAtRef.current = Math.max(lastUpdatedAtRef.current, data.updatedAt);
+          }
+          if (typeof data.messageCount === "number") {
+            lastMessageCountRef.current = Math.max(lastMessageCountRef.current, data.messageCount);
           }
           return;
         }
         if (sid !== sessionIdRef.current) return;
-        if (streamingRef.current) return;
-        if (data.updatedAt < lastUpdatedAtRef.current) return;
-        lastUpdatedAtRef.current = data.updatedAt;
+        // 非 force 且仍在吐字：丟棄，避免與本地 stream 重疊
+        if (!force && streamingRef.current) return;
+        lastUpdatedAtRef.current = Math.max(lastUpdatedAtRef.current, data.updatedAt || 0);
+        if (typeof data.messageCount === "number") {
+          lastMessageCountRef.current = Math.max(lastMessageCountRef.current, data.messageCount);
+        } else if (Array.isArray(data.messages)) {
+          lastMessageCountRef.current = Math.max(lastMessageCountRef.current, data.messages.length);
+        }
         onSyncPatchRef.current(data);
       } catch (e) {
         if ((e as Error)?.name === "AbortError") return;
@@ -474,10 +510,46 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     stickToBottomRef.current = dist < 80;
   }
 
+  async function reconcileOnce(runId: number, sid: string) {
+    if (reconcileRunRef.current === runId) return;
+    reconcileRunRef.current = runId;
+    await onStreamCommittedRef.current(sid);
+  }
+
+  async function loadOlderMessages() {
+    if (!onOlderMessages || loadingOlder || !detail.hasMore || !detail.nextCursor) return;
+    setLoadingOlder(true);
+    try {
+      const sid = sessionId;
+      const res = await fetch(
+        `/api/strategy/sessions/${encodeURIComponent(sid)}?limit=100&before=${encodeURIComponent(detail.nextCursor)}`,
+        { cache: "no-store" },
+      );
+      if (!res.ok) return;
+      const data = (await res.json()) as {
+        messages?: StrategySessionMessage[];
+        hasMore?: boolean;
+        nextCursor?: string | null;
+        messageTotal?: number;
+      };
+      if (!Array.isArray(data.messages) || !data.messages.length) return;
+      onOlderMessages({
+        messages: data.messages,
+        hasMore: Boolean(data.hasMore),
+        nextCursor: data.nextCursor ?? null,
+        messageTotal: typeof data.messageTotal === "number" ? data.messageTotal : detail.messageTotal ?? 0,
+      });
+    } finally {
+      setLoadingOlder(false);
+    }
+  }
+
   function stopGeneration() {
     // 已收到 done 並進入 commit 階段：生成其實已完成，不再中斷
     if (!streamingRef.current || streamCommittingRef.current) return;
     const content = streamContentRef.current;
+    const sid = sessionIdRef.current;
+    const runId = streamRunIdRef.current;
     // 立即失效本輪：任何殘留的非同步路徑都會因 runId 不符而靜默結束（不會出現「生成失敗或已中斷」）
     invalidateStream("user");
     setStreamBubbles([]);
@@ -489,6 +561,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     if (content) onDraftChange(content);
     requestAnimationFrame(() => textareaRef.current?.focus());
     void onRefreshWallet();
+    // 4A：停止後 reconciliation（一次）；invalidate 後用舊 runId 閘門防雙拉
+    void reconcileOnce(runId, sid);
   }
 
   async function sendStream(text: string) {
@@ -501,6 +575,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
     streamContentRef.current = content;
     streamCommittingRef.current = false;
+    reconcileRunRef.current = null;
     abortReasonRef.current = null;
     cancelFlush();
     bubblesRef.current = [];
@@ -581,25 +656,32 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       if (!isCurrent()) return;
 
       if (completion?.aborted || completion?.completionStatus === "failed") {
-        // 非使用者／切房造成（那些情況 runId 已失效，不會走到這裡）：伺服器端失敗
+        // 非使用者／切房造成：伺服器端失敗；先清暫存再 reconciliation（4A 資料去重）
         cancelFlush();
         bubblesRef.current = [];
-        onError("生成失敗或已中斷");
         setPendingUser(null);
         setStreamBubbles([]);
+        onError("生成失敗或已中斷");
         onDraftChange(content);
+        streamCommittingRef.current = true;
+        try {
+          await reconcileOnce(runId, sid);
+        } finally {
+          streamCommittingRef.current = false;
+        }
         return;
       }
 
       if (sawDone && (completion?.completionStatus === "ok" || completion?.completionStatus === "degraded")) {
         if (completion.completionStatus === "degraded") setDegradedHint(true);
-        streamCommittingRef.current = true;
-        await onStreamCommitted(sid);
-        if (!isCurrent()) return;
+        // 重拉 DB 前先清暫存，避免 DB＋pending 同框 4 則
         cancelFlush();
         bubblesRef.current = [];
         setPendingUser(null);
         setStreamBubbles([]);
+        streamCommittingRef.current = true;
+        await reconcileOnce(runId, sid);
+        if (!isCurrent()) return;
         void onRefreshWallet();
         return;
       }
@@ -607,22 +689,36 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       // 無 done：當失敗處理
       cancelFlush();
       bubblesRef.current = [];
-      onError("連線中斷，回覆未完成");
       setPendingUser(null);
       setStreamBubbles([]);
+      onError("連線中斷，回覆未完成");
       onDraftChange(content);
+      streamCommittingRef.current = true;
+      try {
+        await reconcileOnce(runId, sid);
+      } finally {
+        streamCommittingRef.current = false;
+      }
     } catch (e) {
       if (!isCurrent()) return;
       cancelFlush();
       bubblesRef.current = [];
+      setPendingUser(null);
+      setStreamBubbles([]);
       if ((e as Error)?.name === "AbortError") {
+        // 使用者停止：stopGeneration 已 reconcileOnce，這裡略過
+        if (abortReasonRef.current === "user") return;
         onError("連線中斷，回覆未完成");
       } else {
         onError(e instanceof Error ? e.message : String(e));
       }
-      setPendingUser(null);
-      setStreamBubbles([]);
       onDraftChange(content);
+      streamCommittingRef.current = true;
+      try {
+        await reconcileOnce(runId, sid);
+      } finally {
+        streamCommittingRef.current = false;
+      }
     } finally {
       if (runId === streamRunIdRef.current) {
         if (streamAbortRef.current === controller) streamAbortRef.current = null;
@@ -1040,6 +1136,20 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
           <div className="strategy-room-msg-list" ref={roomScrollRef} onScroll={onScroll}>
             {/* spacer：短對話貼底；min-height:0 可收縮，桌面可上捲到第一則 */}
             <div className="strategy-room-msg-spacer" aria-hidden />
+            {detail.hasMore && detail.nextCursor ? (
+              <div className="row" style={{ justifyContent: "center", padding: "8px 0" }}>
+                <button
+                  type="button"
+                  className="ghost"
+                  disabled={loadingOlder || streaming || !onOlderMessages}
+                  onClick={() => void loadOlderMessages()}
+                >
+                  {loadingOlder
+                    ? "載入中…"
+                    : `載入更早的訊息${typeof detail.messageTotal === "number" ? `（已顯示 ${detail.messages.length}/${detail.messageTotal}）` : ""}`}
+                </button>
+              </div>
+            ) : null}
             {detail.messages.length === 0 && !pendingUser && streamBubbles.length === 0 ? (
               <div className="muted" style={{ fontSize: 13, padding: "12px 0" }}>
                 尚無訊息

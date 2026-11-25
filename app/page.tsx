@@ -22,6 +22,7 @@ import {
   type StrategyMemberConfig,
   type StrategyModelOption,
   type StrategySessionDetail,
+  type StrategySessionMessage,
   type StrategySyncResponse,
   type StrategyTemplateInfo,
   type StrategyWorkspaceBrief,
@@ -1706,7 +1707,18 @@ export default function ChatPage() {
         return;
       }
       const detail = data as StrategySessionDetail;
-      setStrategyDetail({ ...detail, dispatch: Array.isArray(detail.dispatch) ? detail.dispatch : [] });
+      setStrategyDetail({
+        ...detail,
+        dispatch: Array.isArray(detail.dispatch) ? detail.dispatch : [],
+        hasMore: Boolean((data as StrategySessionDetail).hasMore),
+        nextCursor: (data as StrategySessionDetail).nextCursor ?? null,
+        messageTotal:
+          typeof (data as StrategySessionDetail).messageTotal === "number"
+            ? (data as StrategySessionDetail).messageTotal
+            : Array.isArray(detail.messages)
+              ? detail.messages.length
+              : 0,
+      });
       const ws = strategyWorkspaces.find((w) => w.id === detail.session.workspaceId);
       if (switching || !wsMemoryDirty) setWsMemoryDraft(ws?.memory.notes ?? "");
     } catch (e) {
@@ -1869,7 +1881,7 @@ export default function ChatPage() {
   }
 
   function handleSyncPatch(data: Extract<StrategySyncResponse, { changed: true }>) {
-    if (strategySending) return;
+    // 4A：串流中仍可接受 reconciliation（RoomView 以 force pull 觸發）；不再因 sending 永久吞掉
     if (!strategyDetail || strategyDetail.session.id !== data.session.id) return;
     const nextDispatch = Array.isArray(data.dispatch) ? data.dispatch : strategyDetail.dispatch;
     const pendingIds = new Set(nextDispatch.filter((d) => d.status === "pending").map((d) => d.id));
@@ -1882,10 +1894,38 @@ export default function ChatPage() {
       runs: Array.isArray(data.runs) ? data.runs : strategyDetail.runs,
       reports: Array.isArray(data.reports) ? data.reports : strategyDetail.reports,
       dispatch: nextDispatch,
+      hasMore: typeof data.hasMore === "boolean" ? data.hasMore : strategyDetail.hasMore,
+      nextCursor: data.nextCursor !== undefined ? data.nextCursor : strategyDetail.nextCursor,
+      messageTotal:
+        typeof data.messageTotal === "number"
+          ? data.messageTotal
+          : typeof data.messageCount === "number"
+            ? data.messageCount
+            : strategyDetail.messageTotal,
     });
     if (!wsMemoryDirty && typeof data.workspaceMemoryNotes === "string") {
       setWsMemoryDraft(data.workspaceMemoryNotes);
     }
+  }
+
+  function handleOlderMessages(payload: {
+    messages: StrategySessionMessage[];
+    hasMore: boolean;
+    nextCursor: string | null;
+    messageTotal: number;
+  }) {
+    setStrategyDetail((prev) => {
+      if (!prev) return prev;
+      const seen = new Set(prev.messages.map((m) => m.id));
+      const older = payload.messages.filter((m) => !seen.has(m.id));
+      return {
+        ...prev,
+        messages: [...older, ...prev.messages],
+        hasMore: payload.hasMore,
+        nextCursor: payload.nextCursor,
+        messageTotal: payload.messageTotal || prev.messageTotal,
+      };
+    });
   }
 
   async function saveWorkspaceMemory() {
@@ -3547,6 +3587,7 @@ export default function ChatPage() {
           onPauseAction={(action) => void handlePauseAction(action)}
           onMarkDispatchDone={(id) => void handleMarkDispatchDone(id)}
           onSyncPatch={handleSyncPatch}
+          onOlderMessages={handleOlderMessages}
           onPatchSessionMeta={patchStrategySessionMeta}
           wsMemorySaving={wsMemorySaving}
         />
