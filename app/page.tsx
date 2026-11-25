@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { extractOfficeAttachmentText, isOfficeAttachment } from "@/lib/office-attachments";
 import {
@@ -72,13 +72,13 @@ const STRATEGY_CACHE_TTL_MS = 90_000;
 const STRATEGY_CACHE_MAX = 12;
 /** 聊天對話：記憶體＋sessionStorage，點開盡量不等網路 */
 const CONV_CACHE_TTL_MS = 10 * 60_000;
-/** 上面立刻預取的則數；其餘在首頁背景慢慢補 */
-const CONV_PREFETCH_NOW = 6;
 /** 慢慢補到列表的一半，短列表至少再蓋過下一屏，避免一次灌太多 */
 const CONV_PREFETCH_FLOOR = 16;
 const CONV_PREFETCH_CAP = 40;
 const CONV_CACHE_MAX = 48;
 const CONV_SS_KEY = "af-conv-open-v1";
+/** 側欄標題自己一份，重整時先畫標題，不等訊息本體 */
+const CONV_LIST_SS_KEY = "af-conv-list-v1";
 
 type ConvOpenCache = {
   messages: Message[];
@@ -87,17 +87,69 @@ type ConvOpenCache = {
   at: number;
 };
 
-function readConvSession(id: string): ConvOpenCache | null {
+let convSessionRaw: string | null = null;
+let convSessionParsed: Record<string, ConvOpenCache> | null = null;
+
+function loadConvSessionMap(): Record<string, ConvOpenCache> {
   try {
     const raw = sessionStorage.getItem(CONV_SS_KEY);
-    if (!raw) return null;
+    if (!raw) {
+      convSessionRaw = null;
+      convSessionParsed = {};
+      return convSessionParsed;
+    }
+    if (raw === convSessionRaw && convSessionParsed) return convSessionParsed;
     const all = JSON.parse(raw) as Record<string, ConvOpenCache>;
-    const hit = all[id];
+    convSessionRaw = raw;
+    convSessionParsed = all && typeof all === "object" ? all : {};
+    return convSessionParsed;
+  } catch {
+    return {};
+  }
+}
+
+function readConvSession(id: string): ConvOpenCache | null {
+  try {
+    const hit = loadConvSessionMap()[id];
     if (!hit || Date.now() - hit.at > CONV_CACHE_TTL_MS) return null;
     if (!Array.isArray(hit.messages)) return null;
     return hit;
   } catch {
     return null;
+  }
+}
+
+function readConvListSession(): Conversation[] {
+  try {
+    const raw = sessionStorage.getItem(CONV_LIST_SS_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw) as Conversation[];
+    if (!Array.isArray(list)) return [];
+    return list.filter((c) => c && typeof c.id === "string" && typeof c.title === "string");
+  } catch {
+    return [];
+  }
+}
+
+function writeConvListSession(list: Conversation[]) {
+  try {
+    if (!list.length) {
+      sessionStorage.removeItem(CONV_LIST_SS_KEY);
+      return;
+    }
+    sessionStorage.setItem(
+      CONV_LIST_SS_KEY,
+      JSON.stringify(
+        list.map((c) => ({
+          id: c.id,
+          title: c.title,
+          model: c.model,
+          updatedAt: c.updatedAt,
+        })),
+      ),
+    );
+  } catch {
+    /* quota */
   }
 }
 
@@ -120,8 +172,7 @@ function writeConvSession(
   order: ReadonlyMap<string, number>,
 ) {
   try {
-    const raw = sessionStorage.getItem(CONV_SS_KEY);
-    const all = raw ? (JSON.parse(raw) as Record<string, ConvOpenCache>) : {};
+    const all = { ...loadConvSessionMap() };
     all[id] = entry;
     const ids = Object.keys(all);
     if (ids.length > CONV_CACHE_MAX) {
@@ -136,11 +187,16 @@ function writeConvSession(
         delete all[k];
       }
     }
-    sessionStorage.setItem(CONV_SS_KEY, JSON.stringify(all));
+    const raw = JSON.stringify(all);
+    sessionStorage.setItem(CONV_SS_KEY, raw);
+    convSessionRaw = raw;
+    convSessionParsed = all;
   } catch {
     /* quota */
   }
 }
+
+const useClientLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 type StrategyCacheEntry = { detail: StrategySessionDetail; at: number };
 
@@ -1295,6 +1351,13 @@ export default function ChatPage() {
   const busyRef = useRef(false);
   const chatOpeningRef = useRef(false);
   const strategyBusyRef = useRef(false);
+  /** 標題清單的網路請求結束後才准預取訊息，避免跟側欄標題搶連線 */
+  const convListReadyRef = useRef(false);
+  const convListInflightRef = useRef(false);
+  const strategyListReadyRef = useRef(false);
+  const strategyListInflightRef = useRef(false);
+  /** 近期那一間先抓，快取滿了時留著它 */
+  const strategyRecentIdRef = useRef<string | null>(null);
   const [chatOpening, setChatOpening] = useState(false);
   const openStrategyAbortRef = useRef<AbortController | null>(null);
   const openStrategyReqRef = useRef(0);
@@ -1385,15 +1448,33 @@ export default function ChatPage() {
   }, []);
 
   const refreshConversations = useCallback(async () => {
-    const res = await fetch("/api/conversations");
-    if (!res.ok) {
-      setConversations([]);
-      return;
+    convListInflightRef.current = true;
+    try {
+      const res = await fetch("/api/conversations", { priority: "high" } as RequestInit);
+      if (!res.ok) return;
+      const raw = (await res.json()) as Conversation[];
+      const list = Array.isArray(raw) ? raw : [];
+      const ordered = orderConversations(list);
+      setConversations(ordered);
+      writeConvListSession(ordered);
+    } catch {
+      // 標題已先畫出來就留著，下次再更新
+    } finally {
+      convListInflightRef.current = false;
+      convListReadyRef.current = true;
     }
-    const raw = (await res.json()) as Conversation[];
-    const list = Array.isArray(raw) ? raw : [];
-    setConversations(orderConversations(list));
   }, [orderConversations]);
+
+  useClientLayoutEffect(() => {
+    const cached = readConvListSession();
+    if (!cached.length) return;
+    setConversations((cur) => (cur.length ? cur : orderConversations(cached)));
+  }, [orderConversations]);
+
+  useEffect(() => {
+    if (!convListReadyRef.current) return;
+    writeConvListSession(conversations);
+  }, [conversations]);
 
   /** 使用者剛問話：立刻把該對話拉到側欄最上（Cursor 式，不必等 AI 跑完） */
   const bumpConversationToTop = useCallback((id: string, patch?: Partial<Conversation>) => {
@@ -1444,13 +1525,24 @@ export default function ChatPage() {
   }, []);
   const refreshStrategySessions = useCallback(async () => {
     // 用 cookie 直接拉，不必等 /api/auth/me 回來才開工（側欄會議室晚 10s 主因）
-    const res = await fetch("/api/strategy/workspaces", { cache: "no-store" });
-    if (!res.ok) {
-      setStrategyWorkspaces([]);
-      return;
+    strategyListInflightRef.current = true;
+    try {
+      const res = await fetch("/api/strategy/workspaces", {
+        cache: "no-store",
+        priority: "high",
+      } as RequestInit);
+      if (!res.ok) {
+        setStrategyWorkspaces([]);
+        return;
+      }
+      const data = (await res.json()) as { workspaces?: StrategyWorkspaceBrief[] };
+      setStrategyWorkspaces(Array.isArray(data.workspaces) ? data.workspaces : []);
+    } catch {
+      // 側欄清單已在畫面上就留著
+    } finally {
+      strategyListInflightRef.current = false;
+      strategyListReadyRef.current = true;
     }
-    const data = (await res.json()) as { workspaces?: StrategyWorkspaceBrief[] };
-    setStrategyWorkspaces(Array.isArray(data.workspaces) ? data.workspaces : []);
   }, []);
 
   useEffect(() => {
@@ -1584,16 +1676,23 @@ export default function ChatPage() {
     const target = Math.min(ids.length, CONV_PREFETCH_CAP, Math.max(half, Math.min(ids.length, CONV_PREFETCH_FLOOR)));
     const keep = new Set(ids.slice(0, target));
     convKeepRef.current = keep;
-    for (const id of ids.slice(0, CONV_PREFETCH_NOW)) prefetchConversation(id);
-
-    const rest = ids.slice(CONV_PREFETCH_NOW, target);
+    if (!convListReadyRef.current) return;
+    const rest = ids.slice(0, target);
     if (rest.length === 0) return;
     let cancelled = false;
     let timer = 0;
     let i = 0;
     const step = () => {
       if (cancelled) return;
-      if (document.hidden || busyRef.current || chatOpeningRef.current || strategyBusyRef.current) {
+      const recentRoomId = strategyRecentIdRef.current;
+      if (
+        document.hidden ||
+        busyRef.current ||
+        chatOpeningRef.current ||
+        strategyBusyRef.current ||
+        convListInflightRef.current ||
+        (recentRoomId != null && strategyInflightRef.current.has(recentRoomId))
+      ) {
         timer = window.setTimeout(step, 1200);
         return;
       }
@@ -1603,19 +1702,76 @@ export default function ChatPage() {
       if (i >= rest.length) return;
       const pending = id ? convInflightRef.current.get(id) : undefined;
       const next = () => {
-        if (!cancelled) timer = window.setTimeout(step, pending ? 500 : 60);
+        if (!cancelled) timer = window.setTimeout(step, pending ? 700 : 80);
       };
       if (pending) void pending.finally(next);
       else next();
     };
-    // 先讓最上面幾則搶頻寬，其餘在首頁背景一則一則補
-    timer = window.setTimeout(step, 1500);
+    // 標題先上畫面，訊息本體再一則一則低優先補
+    timer = window.setTimeout(step, 1600);
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversations]);
+
+  useEffect(() => {
+    const rooms = strategyWorkspaces
+      .flatMap((ws) => ws.rooms)
+      .sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
+    const recent = rooms[0];
+    strategyRecentIdRef.current = recent?.id ?? null;
+    if (!strategyListReadyRef.current || !recent) return;
+    const rest = rooms.slice(1, STRATEGY_CACHE_MAX);
+    let cancelled = false;
+    let timer = 0;
+    const prefetchRest = (index: number) => {
+      if (cancelled || index >= rest.length) return;
+      const recentId = strategyRecentIdRef.current;
+      if (
+        document.hidden ||
+        busyRef.current ||
+        chatOpeningRef.current ||
+        strategyBusyRef.current ||
+        convListInflightRef.current ||
+        strategyListInflightRef.current ||
+        (recentId != null && strategyInflightRef.current.has(recentId))
+      ) {
+        timer = window.setTimeout(() => prefetchRest(index), 1200);
+        return;
+      }
+      const id = rest[index]?.id;
+      if (id) prefetchStrategySession(id, { priority: "low" });
+      const pending = id ? strategyInflightRef.current.get(id) : undefined;
+      const next = () => {
+        if (!cancelled) timer = window.setTimeout(() => prefetchRest(index + 1), pending ? 700 : 80);
+      };
+      if (pending) void pending.finally(next);
+      else next();
+    };
+    const armRecent = () => {
+      if (cancelled) return;
+      if (convListInflightRef.current || strategyListInflightRef.current || document.hidden) {
+        timer = window.setTimeout(armRecent, 400);
+        return;
+      }
+      prefetchStrategySession(recent.id, { priority: "high" });
+      const pending = strategyInflightRef.current.get(recent.id);
+      const startRest = () => {
+        if (!cancelled) timer = window.setTimeout(() => prefetchRest(0), 600);
+      };
+      if (pending) void pending.finally(startRest);
+      else startRest();
+    };
+    // 清單先上畫面，再只先抓近期那一間
+    timer = window.setTimeout(armRecent, 400);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyWorkspaces]);
 
   useEffect(() => {
     // 平行開工：對話＋會議室列表與 auth 同時打（cookie 已在）
@@ -1842,11 +1998,17 @@ export default function ChatPage() {
     writeConvSession(id, entry, keep, order);
   }
 
-  function ensureConvFetch(id: string): Promise<ConvOpenCache | null> {
+  function ensureConvFetch(
+    id: string,
+    opts?: { priority?: "high" | "low" },
+  ): Promise<ConvOpenCache | null> {
     const inflight = convInflightRef.current.get(id);
     if (inflight) return inflight;
+    const priority = opts?.priority ?? "high";
     const p = (async () => {
-      const res = await fetch(`/api/conversations/${id}?limit=${INITIAL_MESSAGE_WINDOW}`);
+      const res = await fetch(`/api/conversations/${id}?limit=${INITIAL_MESSAGE_WINDOW}`, {
+        priority,
+      } as RequestInit);
       if (!res.ok) return null;
       const data = await res.json();
       const entry: ConvOpenCache = {
@@ -1868,7 +2030,7 @@ export default function ChatPage() {
 
   function prefetchConversation(id: string) {
     if (!id || getConvCache(id) || convInflightRef.current.has(id)) return;
-    void ensureConvFetch(id);
+    void ensureConvFetch(id, { priority: "low" });
   }
 
   function applyConvEntry(id: string, entry: ConvOpenCache) {
@@ -2041,16 +2203,19 @@ export default function ChatPage() {
   function putStrategyCache(id: string, detail: StrategySessionDetail) {
     const map = strategyCacheRef.current;
     map.set(id, { detail, at: Date.now() });
-    if (map.size <= STRATEGY_CACHE_MAX) return;
-    let oldestId: string | null = null;
-    let oldestAt = Infinity;
-    for (const [k, v] of map) {
-      if (v.at < oldestAt) {
-        oldestAt = v.at;
-        oldestId = k;
+    while (map.size > STRATEGY_CACHE_MAX) {
+      let oldestId: string | null = null;
+      let oldestAt = Infinity;
+      for (const [k, v] of map) {
+        if (k === id || k === strategyRecentIdRef.current) continue;
+        if (v.at < oldestAt) {
+          oldestAt = v.at;
+          oldestId = k;
+        }
       }
+      if (!oldestId) break;
+      map.delete(oldestId);
     }
-    if (oldestId) map.delete(oldestId);
   }
 
   function getStrategyCache(id: string): StrategySessionDetail | null {
@@ -2063,13 +2228,17 @@ export default function ChatPage() {
     return hit.detail;
   }
 
-  function ensureStrategyFetch(id: string): Promise<StrategySessionDetail | null> {
+  function ensureStrategyFetch(
+    id: string,
+    opts?: { priority?: "high" | "low" },
+  ): Promise<StrategySessionDetail | null> {
     const inflight = strategyInflightRef.current.get(id);
     if (inflight) return inflight;
+    const priority = opts?.priority ?? "high";
     const p = (async () => {
       const res = await fetch(
         `/api/strategy/sessions/${encodeURIComponent(id)}?limit=40&lite=1`,
-        { cache: "no-store" },
+        { cache: "no-store", priority } as RequestInit,
       );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return null;
@@ -2085,11 +2254,11 @@ export default function ChatPage() {
     return p;
   }
 
-  function prefetchStrategySession(id: string) {
+  function prefetchStrategySession(id: string, opts?: { priority?: "high" | "low" }) {
     if (!id) return;
     if (getStrategyCache(id)) return;
     if (strategyInflightRef.current.has(id)) return;
-    void ensureStrategyFetch(id);
+    void ensureStrategyFetch(id, { priority: opts?.priority ?? "low" });
   }
 
   function applyStrategyDetail(
@@ -2459,6 +2628,8 @@ export default function ChatPage() {
     setAuthUser(null);
     setHasPaidAccess(false);
     setWallet(null);
+    convListReadyRef.current = false;
+    writeConvListSession([]);
     setConversations([]);
     setMessages([]);
     setActiveId(null);
@@ -3333,8 +3504,8 @@ export default function ChatPage() {
                           key={s.id}
                           className={`conv-item strategy-session-item${strategyDetail?.session.id === s.id && viewMode !== "chat" ? " active" : ""}`}
                           onClick={() => void openStrategySession(s.id)}
-                          onMouseEnter={() => prefetchStrategySession(s.id)}
-                          onFocus={() => prefetchStrategySession(s.id)}
+                          onMouseEnter={() => prefetchStrategySession(s.id, { priority: "high" })}
+                          onFocus={() => prefetchStrategySession(s.id, { priority: "high" })}
                           title={`${s.name}（${strategyStatusLabel(s.status)}）${s.topic ? `\n主題：${s.topic}` : ""}`}
                         >
                           <span className="title">{s.name || "未命名會議室"}</span>
