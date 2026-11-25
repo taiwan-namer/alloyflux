@@ -2,7 +2,10 @@
  * 雲端（Vercel + Supabase）為唯一資料來源。
  * 本機未設 DATABASE_URL 時，讀寫 API 代理到 OAUTH_CLOUD_API_BASE / NEXT_PUBLIC_APP_URL。
  * 公開站台網址不是密鑰；DATABASE_URL 只應存在於 Vercel。
+ *
+ * E2E_ISOLATION=1 時：永不 fetch 雲端（fail-closed）；空 DATABASE_URL ≠ 隔離。
  */
+import { assertE2EOrPass, isE2EIsolationActive } from "@/lib/e2e-isolation";
 
 export const CLOUD_DB_PROXY_HEADER = "x-cloud-db-proxy";
 
@@ -44,6 +47,7 @@ type JsonBody = Record<string, unknown> & { action?: string };
 
 /** OAuth 寫入專用：POST JSON 到雲端 /api/oauth（轉發 cookie 以綁定擁有者） */
 export async function persistOAuthViaCloud(body: JsonBody, req?: Request): Promise<Record<string, unknown>> {
+  assertE2EOrPass("cloud-api.persistOAuthViaCloud");
   const url = `${cloudApiBase()}/api/oauth`;
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -71,6 +75,7 @@ export async function persistOAuthViaCloud(body: JsonBody, req?: Request): Promi
 }
 
 export async function proxyRequestToCloud(req: Request): Promise<Response> {
+  assertE2EOrPass("cloud-api.proxyRequestToCloud");
   const url = new URL(req.url);
   const target = `${cloudApiBase()}${url.pathname}${url.search}`;
   const headers = new Headers();
@@ -104,6 +109,16 @@ export async function proxyRequestToCloud(req: Request): Promise<Response> {
  * `const proxied = await cloudDbProxy(req); if (proxied) return proxied;`
  */
 export async function cloudDbProxy(req: Request): Promise<Response | null> {
+  // E2E：即使 shouldProxyToCloudDb 為 true（常見於空 DATABASE_URL），也絕不打正式雲
+  if (isE2EIsolationActive()) {
+    return Response.json(
+      {
+        error: "E2E_ISOLATION blocked: cloud-api.cloudDbProxy",
+        hint: "測試隔離中禁止雲端 DB 代理；空 DATABASE_URL 不代表已隔離",
+      },
+      { status: 503 },
+    );
+  }
   if (!shouldProxyToCloudDb(req)) return null;
   try {
     return await proxyRequestToCloud(req);

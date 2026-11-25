@@ -32,6 +32,7 @@ import {
 } from "./research-v2";
 import { appendStyleOverride } from "./persona-style";
 import { loadCodexTurnState, saveCodexTurnState } from "./prompt-cache-sticky";
+import { assertE2EOrPass } from "@/lib/e2e-isolation";
 export interface ChatImage {
   mimeType: string;
   data: string; // 純 base64，不含 data: prefix
@@ -1687,6 +1688,7 @@ export function streamFrom(
   styleOverrideContext?: string,
   cacheAffinityId?: string,
 ): AsyncGenerator<StreamEvent> {
+  assertE2EOrPass("providers.streamFrom");
   if (c.source.authType === "oauth_sub") {
     // 研究／相容路徑：平台持有的訂閱 OAuth（與 Node Agent 買家任務隔離）
     if (c.source.provider === "gemini" && model.antigravityId) {

@@ -10,6 +10,7 @@
  * 建議用 Transaction pooler（埠 6543）+ ?pgbouncer=true
  */
 import postgres, { type Sql } from "postgres";
+import { assertE2EOrPass } from "@/lib/e2e-isolation";
 
 export type SqlClient = Sql<{ bigint: number }>;
 
@@ -169,6 +170,7 @@ function wrapClient(client: SqlClient): Db {
 }
 
 export function db(): Db {
+  assertE2EOrPass("db.db");
   return wrapClient(sqlClient());
 }
 
