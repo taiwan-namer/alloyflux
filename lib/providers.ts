@@ -1049,6 +1049,19 @@ async function* chatgptSubscriptionStream(
     prompt_cache_key: cacheKey,
   };
 
+  const diagHash = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex").slice(0, 10);
+  const diagInput = body.input as unknown[];
+  const cacheDiag = {
+    model: upstreamModel,
+    affinity: cacheAffinityId ? "given" : "fallback",
+    sessionId: cacheKey.slice(0, 24),
+    instr: diagHash(body.instructions),
+    instrChars: String(body.instructions ?? "").length,
+    items: diagInput.length,
+    roles: diagInput.map((m) => String((m as { role?: string }).role ?? "?")[0]).join(""),
+    prefix: [1, 2, 4, 8, 16].filter((n) => n < diagInput.length).map((n) => `${n}:${diagHash(diagInput.slice(0, n))}`),
+  };
+
   let res: Response;
   try {
     res = await post(`${CHATGPT_OAUTH.codexBaseUrl}/codex/responses`, headers, body, signal);
@@ -1170,9 +1183,7 @@ async function* chatgptSubscriptionStream(
         usage.inputTokens = u.input_tokens ?? 0;
         usage.cachedInputTokens = u.input_tokens_details?.cached_tokens ?? u.cached_tokens ?? 0;
         usage.outputTokens = (u.output_tokens ?? 0) + (u.reasoning_tokens ?? 0);
-        if (!usage.cachedInputTokens && usage.inputTokens > 4000) {
-          console.info("[chatgpt-usage] cached=0", JSON.stringify({ model: upstreamModel, cacheKey, usage: u }));
-        }
+        console.info("[cache-diag]", JSON.stringify({ ...cacheDiag, usage: u }));
       }
     } else if (json.type === "codex.rate_limits" && json.rate_limits?.primary) {
       const toWin = (
