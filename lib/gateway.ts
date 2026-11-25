@@ -17,11 +17,26 @@ import { slideMessagesForUpstream } from "./context-window";
 import { listSources } from "./sources";
 import {
   attachResearchToDone,
+  gateEvidence,
   modelNeedsPlatformResearch,
   preparePlatformResearch,
   withPlatformResearchScope,
   type ResearchVerdict,
 } from "./research-v2";
+import { planResearch } from "./research-v2/planner";
+
+export type RouteChatOptions = {
+  /**
+   * 只用這段文字判斷是否即時查證（而非最後一則 user 全文）。
+   * 空字串＝本次不查證；provider 端也不會再自行查。
+   */
+  researchQuery?: string;
+};
+
+function skippedResearchVerdict(): ResearchVerdict {
+  const plan = planResearch({ text: "" });
+  return gateEvidence({ plan: { ...plan, intent: "skip", requireLive: false }, corpus: null });
+}
 
 /** 停止後立刻再問：短暫重試拿鎖，等上一輪 abort 釋放（避免誤判 busy／亂接力） */
 async function tryAcquireSourceLockBriefly(
@@ -213,6 +228,7 @@ export async function* routeChat(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  options?: RouteChatOptions,
 ): AsyncGenerator<GatewayEvent> {
   const upstreamMessages = slideMessagesForUpstream(messages);
   const ctx = extraSystemContext?.trim() || undefined;
@@ -225,13 +241,21 @@ export async function* routeChat(
     (await listOnlineNodesBriefly(route.providerKey, route.upstreamModel, signal)).length > 0;
 
   const supplyPath = nodeAvailable || model.category === "node-agent" ? "node" : "local";
-  const prepared = modelNeedsPlatformResearch(model)
-    ? await preparePlatformResearch({
-        messages: upstreamMessages.map((m) => ({ role: m.role, content: m.content })),
-        supplyPath,
-        signal,
-      })
-    : null;
+  const researchQuery = options?.researchQuery;
+  let prepared: ResearchVerdict | null = null;
+  if (researchQuery !== undefined) {
+    const q = researchQuery.trim();
+    prepared = q
+      ? await preparePlatformResearch({ messages: [{ role: "user", content: q }], supplyPath, signal })
+      : null;
+    prepared ??= skippedResearchVerdict();
+  } else if (modelNeedsPlatformResearch(model)) {
+    prepared = await preparePlatformResearch({
+      messages: upstreamMessages.map((m) => ({ role: m.role, content: m.content })),
+      supplyPath,
+      signal,
+    });
+  }
 
   // P0-1：Node 無 ALS → 注入進 extraSystemContext；Local 由 withResearchSystem＋ALS 重用，禁止雙重注入
   const ctxForNode =

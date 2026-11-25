@@ -22,6 +22,7 @@ import {
 import {
   addDispatchItems,
   addSessionMessage,
+  buildReportInjection,
   buildWorkspaceBrief,
   ensureDefaultWorkspace,
   extractJsonObject,
@@ -31,12 +32,13 @@ import {
   listRunsForSession,
   listSessionDispatch,
   listSessionMessages,
+  listSessionMessagesPage,
   listSessionReports,
   mergeDossier,
   queryRoomContent,
   readDossier,
   resolveSessionMembers,
-  selectBoundedHistory,
+  selectStrategyHistory,
   STRATEGY_LIMITS,
   STRATEGY_SESSION_STATUSES,
   updateStrategySession,
@@ -45,6 +47,13 @@ import {
   type StrategySession,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
+import {
+  applyLedgerTurn,
+  ledgerProtocolBlock,
+  readLedger,
+  renderLedgerForHost,
+  type HeldInstruction,
+} from "@/lib/strategy-ledger";
 import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
@@ -83,14 +92,15 @@ function readRoomQueryResults(meta: Record<string, unknown>): RoomQueryResult[] 
 
 function limitsBlock(): string {
   return `## 資料量限制（很重要）
-- 平台每回合只看得到：dossier（≤${L.dossierMaxChars} 字）、最近報告（合計 ≤${L.reportsInjectMaxChars} 字，單份 ≤${L.reportInjectEachMaxChars} 字）、最近幾則對話。
+- 平台每回合只看得到：主線帳本、dossier（≤${L.dossierMaxChars} 字）、你上一回合之後新上傳的報告正文（同系列 _p1/_p2 自動合併，合計 ≤${L.reportsInjectMaxChars} 字）、最近幾則對話。
+- 舊報告只有索引；需要再看時在 JSON 填 "reportFocus": ["srep_…"]（最多 ${L.reportFocusMax} 份），下一回合注入正文。
 - Cursor 單則訊息 ≤${L.messageMaxChars} 字；單份報告 ≤${L.reportMaxChars} 字。
 - 不要要求貼原始 K 線／完整 fills／decision_trace；只要本機彙總。
 - 重要結論寫進 memoryUpdates；summary ≤${L.summaryMaxChars} 字；roomQueries 每回合最多 ${L.roomQueriesPerTurn} 個。`;
 }
 
 function jsonOnlySystem(template: StrategyTemplate): string {
-  return `${template.systemPrompt}\n\n${limitsBlock()}`;
+  return `${template.systemPrompt}\n\n${limitsBlock()}\n\n${ledgerProtocolBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, escalationDecision, reportFocus。`;
 }
 
 function streamLeadSystem(template: StrategyTemplate): string {
@@ -98,7 +108,9 @@ function streamLeadSystem(template: StrategyTemplate): string {
 
 ${limitsBlock()}
 
-結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, roomQueries。
+${ledgerProtocolBlock()}
+
+結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, roomQueries；需要時另加 ledgerOps, workPackage, verdict, verdictReason, escalationDecision, reportFocus。
 分隔標記必須單獨一行：${STRATEGY_STATE_DELIMITER}
 ${STREAM_REPLY_EMPTY_RULE}`;
 }
@@ -113,6 +125,7 @@ async function buildContextBlock(
   fromWeb: boolean,
 ): Promise<{ contextBlock: string; dossier: ReturnType<typeof readDossier> }> {
   const dossier = readDossier(session.meta);
+  const ledger = readLedger(session.meta);
   const reports = await listSessionReports(authUserId, session.id, 30);
   const runs = await listRunsForSession(authUserId, session.id, 3);
   const { text: workspaceBrief } = await buildWorkspaceBrief(authUserId, session.workspaceId, {
@@ -123,19 +136,10 @@ async function buildContextBlock(
     ? []
     : (await listSessionDispatch(authUserId, session.id, 50)).filter((d) => d.status === "pending");
 
-  const reportIndex = reports
-    .map((r) => `- ${r.id}${r.requestId ? ` [${r.requestId}]` : ""}：${r.title}（${r.chars} 字）`)
-    .join("\n");
-  const reportBodies = budgetJoin(
-    reports.map((r) => {
-      const body =
-        r.content.length > L.reportInjectEachMaxChars
-          ? `${r.content.slice(0, L.reportInjectEachMaxChars)}\n…[截斷]`
-          : r.content;
-      return `\n### 報告 ${r.id}${r.requestId ? ` [${r.requestId}]` : ""}：${r.title}\n${body}\n`;
-    }),
-    L.reportsInjectMaxChars,
-  );
+  const { bodies: reportBodies, index: reportIndex } = buildReportInjection(reports, {
+    lastHostTurnAt: ledger.lastHostTurn?.at ?? 0,
+    focusIds: readReportFocus(session.meta),
+  });
   const runBodies = budgetJoin(
     runs.map(
       (r) =>
@@ -148,17 +152,25 @@ async function buildContextBlock(
     .join("");
 
   const contextBlock = [
+    renderLedgerForHost(ledger),
     workspaceBrief,
     `# 會議室 ${session.name}（${session.id}）｜phase=${session.status}${session.topic ? `｜主題：${session.topic}` : ""}`,
     session.summary ? `## 本會議室上一版摘要\n${session.summary}` : "",
     queryBodies ? `## 上一回合 roomQueries 的結果${queryBodies}` : "",
-    `## 策略檔案夾 dossier\n${JSON.stringify(dossier, null, 1)}`,
-    `## 已派給 Cursor 的待辦\n${JSON.stringify(session.pendingInstructions).slice(0, 3000)}`,
+    `## 策略檔案夾 dossier\n${JSON.stringify(dossier)}`,
+    // 帳本已列「你上一回合下的指令」時不重複
+    ledger.lastHostTurn
+      ? ""
+      : `## 已派給 Cursor 的待辦\n${JSON.stringify(session.pendingInstructions).slice(0, 3000)}`,
     awaitingApproval.length
       ? `## 等待使用者確認派送的指令（${awaitingApproval.length} 項）\n${JSON.stringify(awaitingApproval.map((d) => d.instruction)).slice(0, 2000)}`
       : "",
-    reports.length ? `## 已收到的報告索引\n${reportIndex}` : "## 尚未收到任何報告",
-    reportBodies ? `## 最近報告內容${reportBodies}` : "",
+    reportIndex
+      ? `## 報告索引（正文未注入；要看就填 reportFocus）\n${reportIndex}`
+      : reports.length
+        ? ""
+        : "## 尚未收到任何報告",
+    reportBodies ? `## 上一回合之後的新報告／指名報告${reportBodies}` : "",
     runBodies ? `## 已掛載 run${runBodies}` : "",
     `## 發言來源提示\n本回合訊息來自：${fromWeb ? "使用者（網頁）" : "Cursor"}`,
   ]
@@ -174,30 +186,61 @@ async function buildUpstream(
   contextBlock: string,
   content: string,
   includeCurrentUserInHistory: boolean,
+  lastHostTurnAt: number,
 ): Promise<ChatMessage[]> {
-  // 多撈再 bounded：預設 12 則＋字元 budget；不把完整 DB 歷史無限制送入模型
-  const fetched = await listSessionMessages(authUserId, sessionId, L.historyFetchLimit);
-  const bounded = selectBoundedHistory(fetched, {
-    maxMessages: L.historyMessages,
-    maxChars: L.historyCharBudget,
-  });
-  const upstream: ChatMessage[] = bounded
-    .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-  while (upstream.length && upstream[0]!.role !== "user") upstream.shift();
+  // 起點對齊整房絕對序號的格線，連續幾回合開頭相同才吃得到 prompt cache
+  const page = await listSessionMessagesPage(authUserId, sessionId, { limit: L.historyFetchLimit });
+  const fetched = page.messages;
+  const bounded = selectStrategyHistory(fetched, { offset: Math.max(0, page.total - fetched.length) });
+  const upstream: ChatMessage[] = bounded.map((m) => ({
+    role: m.role as "user" | "assistant",
+    content: m.content,
+  }));
+
+  const notes = fetched
+    .filter((m) => m.structured?.kind === "note" && m.createdAt > lastHostTurnAt)
+    .slice(-L.notesInjectMax)
+    .map((m) => `- ${m.content.length > L.noteInjectMaxChars ? `${m.content.slice(0, L.noteInjectMaxChars)}…` : m.content}`);
+  const block = notes.length
+    ? `${contextBlock}\n\n## 上一回合之後 Cursor 的通知（未觸發回合）\n${notes.join("\n")}`
+    : contextBlock;
 
   if (includeCurrentUserInHistory) {
     const last = upstream[upstream.length - 1];
     if (last?.role === "user") {
-      last.content = `${contextBlock}\n\n---\n# 本回合訊息\n${last.content}`;
+      last.content = `${block}\n\n---\n# 本回合訊息\n${last.content}`;
     }
   } else {
     upstream.push({
       role: "user",
-      content: `${contextBlock}\n\n---\n# 本回合訊息\n${content}`,
+      content: `${block}\n\n---\n# 本回合訊息\n${content}`,
     });
   }
   return upstream;
+}
+
+const DUPLICATE_WINDOW_MS = 15 * 60_000;
+
+/** Cursor 重送同一則訊息（補送／重試）且上次已有主持人回覆 → 直接回傳上次結果，不再花一回合 */
+async function findRecentDuplicateTurn(userId: string, sessionId: string, content: string) {
+  const recent = await listSessionMessages(userId, sessionId, 12);
+  const cutoff = Date.now() - DUPLICATE_WINDOW_MS;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const m = recent[i]!;
+    if (m.createdAt < cutoff) break;
+    if (m.role !== "user" || m.structured?.kind === "note" || m.content.trim() !== content) continue;
+    const reply = recent
+      .slice(i + 1)
+      .find((x) => x.role === "assistant" && x.structured?.kind !== "advisor");
+    return reply ?? null;
+  }
+  return null;
+}
+
+function readReportFocus(meta: Record<string, unknown>): string[] {
+  const raw = meta.reportFocus;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((x): x is string => typeof x === "string" && x.startsWith("srep_")).slice(0, L.reportFocusMax);
 }
 
 function parseAssistantStructured(
@@ -276,6 +319,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     content?: string;
     model?: string;
     stream?: boolean;
+    /** 只存成通知、不觸發主持人回合；下一回合以「Cursor 的通知」段落帶入 */
+    noReply?: boolean;
   };
   const content = (body.content || "").trim();
   if (!content) return Response.json({ error: "content required" }, { status: 400 });
@@ -287,6 +332,29 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       },
       { status: 413 },
     );
+  }
+
+  if (body.noReply === true) {
+    await addSessionMessage({
+      sessionId,
+      userId: auth.user.id,
+      role: "user",
+      content,
+      structured: { source: fromWeb ? "web" : "cursor", kind: "note" },
+    });
+    return Response.json({ ok: true, noted: true, session: await getStrategySession(auth.user.id, sessionId) });
+  }
+
+  if (!fromWeb && body.stream !== true) {
+    const dup = await findRecentDuplicateTurn(auth.user.id, sessionId, content);
+    if (dup) {
+      return Response.json({
+        session: await getStrategySession(auth.user.id, sessionId),
+        assistant: { ...dup.structured, reply: dup.content, duplicate: true },
+        dossier: readDossier(session.meta),
+        limits: L,
+      });
+    }
   }
 
   if ((await balance(auth.user.id)) <= 0) {
@@ -350,7 +418,8 @@ async function handleJsonMode(opts: {
   });
 
   const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb);
-  const upstream = await buildUpstream(authUserId, sessionId, contextBlock, content, true);
+  const lastHostTurnAt = readLedger(session.meta).lastHostTurn?.at ?? 0;
+  const upstream = await buildUpstream(authUserId, sessionId, contextBlock, content, true, lastHostTurnAt);
 
   const convId = await createConversation(authUserId, `strategy-session ${session.name}`, model.id, {
     hidden: true,
@@ -367,6 +436,8 @@ async function handleJsonMode(opts: {
       req.signal,
       undefined,
       jsonOnlySystem(template),
+      undefined,
+      { researchQuery: fromWeb ? content : "" },
     )) {
       if (ev.type === "text") answer += ev.text;
       if (ev.type === "done") {
@@ -470,8 +541,23 @@ async function finalizeTurn(input: {
     }
   }
 
-  const toDispatch = input.skipMemoryAndDispatch ? [] : [...instructions, ...reportRequests];
   const freshSession = await getStrategySession(input.authUserId, input.sessionId);
+  const baseMeta = freshSession?.meta ?? input.session.meta;
+  const ledgerResult = input.skipMemoryAndDispatch
+    ? null
+    : applyLedgerTurn(readLedger(baseMeta), {
+        ledgerOps: parsedPack.parsed.ledgerOps,
+        workPackage: parsedPack.parsed.workPackage,
+        verdict: parsedPack.parsed.verdict,
+        verdictReason: parsedPack.parsed.verdictReason,
+        escalationDecision: parsedPack.parsed.escalationDecision,
+        instructions,
+        reportRequests,
+      });
+  const allowedInstructions = ledgerResult?.allowedInstructions ?? [];
+  const allowedReportRequests = ledgerResult?.allowedReportRequests ?? [];
+  const held: HeldInstruction[] = ledgerResult?.held ?? [];
+  const toDispatch = [...allowedInstructions, ...allowedReportRequests];
   const shouldAutoDispatch =
     !input.skipMemoryAndDispatch &&
     (freshSession?.pauseState ?? "none") === "none" &&
@@ -483,6 +569,14 @@ async function finalizeTurn(input: {
         sessionId: input.sessionId,
         items: toDispatch,
         dispatched: shouldAutoDispatch,
+      })
+    : [];
+  const heldDispatchIds = held.length
+    ? await addDispatchItems({
+        userId: input.authUserId,
+        sessionId: input.sessionId,
+        items: held.map((h) => ({ text: h.text, itemId: h.itemId, heldReason: h.reason })),
+        dispatched: false,
       })
     : [];
 
@@ -522,8 +616,12 @@ async function finalizeTurn(input: {
   const structured = {
     reply,
     phase: nextStatus,
-    instructions: input.skipMemoryAndDispatch ? [] : instructions,
-    reportRequests: input.skipMemoryAndDispatch ? [] : reportRequests,
+    instructions: allowedInstructions,
+    reportRequests: allowedReportRequests,
+    heldInstructions: held,
+    heldDispatchIds,
+    ledgerEvents: ledgerResult?.events ?? [],
+    ledgerEscalated: ledgerResult?.escalated ?? false,
     openQuestions,
     canStartRun: nextStatus === "ready_to_run" || nextStatus === "ready_next_run",
     fPlan: input.skipMemoryAndDispatch ? input.dossier.fPlan : nextDossier.fPlan,
@@ -562,9 +660,11 @@ async function finalizeTurn(input: {
       status: nextStatus,
       ...(shouldAutoDispatch ? { pendingInstructions: toDispatch } : {}),
       meta: {
-        ...(freshSession?.meta ?? input.session.meta),
+        ...baseMeta,
         dossier: nextDossier,
         roomQueryResults: nextQueryResults,
+        reportFocus: readReportFocus({ reportFocus: parsedPack.parsed.reportFocus }),
+        ...(ledgerResult ? { ledger: ledgerResult.ledger } : {}),
       },
       model: input.leadModelId,
       summary,
@@ -671,7 +771,9 @@ async function handleStreamMode(opts: {
   }
 
   const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb);
-  const upstreamBase = await buildUpstream(authUserId, sessionId, contextBlock, content, false);
+  const lastHostTurnAt = readLedger(session.meta).lastHostTurn?.at ?? 0;
+  const upstreamBase = await buildUpstream(authUserId, sessionId, contextBlock, content, false, lastHostTurnAt);
+  const researchOpts = { researchQuery: fromWeb ? content : "" };
   const turnId = `turn_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
   // 串流開始即 idempotent 落庫 user，避免 abort 提前 return 丟訊
   await addSessionMessage({
@@ -802,6 +904,8 @@ async function handleStreamMode(opts: {
               req.signal,
               undefined,
               advisorSystem(adv.label),
+              undefined,
+              { researchQuery: "" },
             )) {
               // thinking 靜默丟棄，不轉發前端
               if (ev.type === "text") {
@@ -882,6 +986,8 @@ async function handleStreamMode(opts: {
             req.signal,
             undefined,
             streamLeadSystem(template),
+            undefined,
+            researchOpts,
           )) {
             if (Date.now() - startedAt > SOFT_DEADLINE_MS) {
               softTimeout = true;

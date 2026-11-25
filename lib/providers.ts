@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ModelInfo, Usage } from "./models";
 import {
   CHATGPT_OAUTH,
@@ -994,6 +995,11 @@ async function* chatgptSubscriptionStream(
     stream: true,
     store: false, // 強制無痕：絕不寫入供給者的 ChatGPT 歷史對話列表
     reasoning: { effort: reasoningEffortFor(model.effort), summary: "auto" },
+    // 同帳號＋同 instructions 路由到同一快取分片；不帶時 cached_tokens 幾乎恆為 0
+    prompt_cache_key: createHash("sha256")
+      .update(`${creds.accountId ?? c.source.id}\n${upstreamModel}\n${stable}`)
+      .digest("hex")
+      .slice(0, 40),
   };
 
   let res: Response;
@@ -1001,7 +1007,10 @@ async function* chatgptSubscriptionStream(
     res = await post(`${CHATGPT_OAUTH.codexBaseUrl}/codex/responses`, headers, body, signal);
   } catch (e) {
     const err = e instanceof UpstreamError ? e : new UpstreamError(0, String(e));
-    if (err.status === 400 && volatile && body.input !== input) {
+    if (err.status === 400 && body.prompt_cache_key && /prompt_cache_key/i.test(err.message)) {
+      delete body.prompt_cache_key;
+      res = await post(`${CHATGPT_OAUTH.codexBaseUrl}/codex/responses`, headers, body, signal);
+    } else if (err.status === 400 && volatile && body.input !== input) {
       console.warn("[chatgpt] developer context rejected; fallback to instructions", err.message.slice(0, 200));
       body.instructions = `${stable}\n\n${volatile}`;
       body.input = input;

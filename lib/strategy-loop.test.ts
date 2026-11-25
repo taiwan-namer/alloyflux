@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  buildReportInjection,
+  reportSeriesKey,
+  selectStrategyHistory,
   decodeMessageCursor,
   encodeMessageCursor,
   pickRelevantSnippets,
@@ -147,5 +150,76 @@ describe("4A partial／idempotent 契約（純函式／記憶體模擬）", () =
     assert.equal(store.size, 2);
     assert.equal(store.get("t1|assistant|lead")?.content, "full reply");
     assert.equal(store.get("t1|assistant|lead")?.status, "ok");
+  });
+});
+
+describe("selectStrategyHistory（cache 友善視窗）", () => {
+  const mk = (n: number, len = 50) =>
+    Array.from({ length: n }, (_, i) => ({
+      role: i % 2 === 0 ? "user" : "assistant",
+      content: `m${i}-${"x".repeat(len)}`,
+      structured: null as Record<string, unknown> | null,
+    }));
+
+  it("起點對齊格線：連續兩回合（+2 則）開頭相同", () => {
+    const all = mk(30);
+    const a = selectStrategyHistory(all.slice(0, 24));
+    const b = selectStrategyHistory(all.slice(0, 26));
+    assert.equal(a[0]!.content, b[0]!.content);
+  });
+
+  it("只撈最新 N 則時用 offset 維持絕對格線", () => {
+    const all = mk(60);
+    const full = selectStrategyHistory(all);
+    const partial = selectStrategyHistory(all.slice(20), { offset: 20 });
+    assert.equal(full[0]!.content, partial[0]!.content);
+    assert.equal(full.length, partial.length);
+  });
+
+  it("排除通知與顧問訊息，且從 user 開頭", () => {
+    const msgs = mk(10);
+    msgs[8]!.structured = { kind: "note" };
+    msgs[9]!.structured = { kind: "advisor" };
+    const out = selectStrategyHistory(msgs);
+    assert.ok(out.every((m) => !m.structured));
+    assert.equal(out[0]!.role, "user");
+  });
+
+  it("較舊的 assistant 壓縮、最後一則 assistant 保留全文", () => {
+    const msgs = mk(8, 3000);
+    const out = selectStrategyHistory(msgs, { maxChars: 1_000_000 });
+    assert.ok(out[1]!.content.length < 3000);
+    assert.equal(out[out.length - 1]!.content.length, msgs[7]!.content.length);
+  });
+});
+
+describe("buildReportInjection", () => {
+  const r = (id: string, title: string, createdAt: number, content = "body") => ({
+    id,
+    requestId: "",
+    title,
+    content,
+    chars: content.length,
+    createdAt,
+  });
+
+  it("系列標題去掉 _pN", () => {
+    assert.equal(reportSeriesKey("4A_evidence_p2"), reportSeriesKey("4A_evidence"));
+    assert.equal(reportSeriesKey("4A-evidence-p3"), "4a-evidence");
+  });
+
+  it("只注入上一回合之後的新報告與指名報告，同系列合併", () => {
+    const reports = [
+      r("srep_new2", "code_p2", 300, "second"),
+      r("srep_new1", "code_p1", 200, "first"),
+      r("srep_old", "舊報告", 50),
+      r("srep_focus", "指名報告", 40, "focused"),
+    ];
+    const out = buildReportInjection(reports, { lastHostTurnAt: 100, focusIds: ["srep_focus"] });
+    assert.deepEqual(new Set(out.injectedIds), new Set(["srep_new1", "srep_new2", "srep_focus"]));
+    assert.ok(out.bodies.indexOf("first") < out.bodies.indexOf("second"));
+    assert.match(out.bodies, /2 段已合併/);
+    assert.match(out.index, /srep_old/);
+    assert.doesNotMatch(out.index, /srep_new1/);
   });
 });

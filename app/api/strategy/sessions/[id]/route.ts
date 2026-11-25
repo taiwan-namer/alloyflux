@@ -18,6 +18,7 @@ import {
   type PauseAction,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
+import { readLedger, renderLedgerForHuman, validateLedgerInput } from "@/lib/strategy-ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -73,9 +74,12 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     createdAt: r.createdAt,
   }));
   const dispatch = await listSessionDispatch(auth.user.id, id, 50);
+  const ledger = readLedger(session.meta);
   return Response.json({
     session,
     dossier: readDossier(session.meta),
+    ledger,
+    ledgerText: renderLedgerForHuman(ledger),
     messages,
     hasMore: messagesMeta.hasMore,
     nextCursor: messagesMeta.nextCursor,
@@ -105,7 +109,25 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
     pauseState?: unknown;
     models?: unknown;
     templateId?: string;
+    ledger?: unknown;
   };
+
+  if (body.ledger !== undefined) {
+    const checked = validateLedgerInput(body.ledger);
+    if (!checked.ok) return Response.json({ error: checked.error }, { status: 400 });
+    const cur = await getStrategySession(auth.user.id, id);
+    if (!cur) return Response.json({ error: "Not found" }, { status: 404 });
+    const ok = await updateStrategySession(auth.user.id, id, {
+      meta: { ...cur.meta, ledger: checked.ledger },
+    });
+    if (!ok) return Response.json({ error: "Not found" }, { status: 404 });
+    const session = await getStrategySession(auth.user.id, id);
+    return Response.json({
+      session,
+      ledger: checked.ledger,
+      ledgerText: renderLedgerForHuman(checked.ledger),
+    });
+  }
 
   if (body.pauseState !== undefined) {
     return Response.json(

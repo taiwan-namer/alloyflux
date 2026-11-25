@@ -78,6 +78,20 @@ export const STRATEGY_LIMITS = {
   roomQueriesPerTurn: 3,
   workspaceMemoryMaxChars: 4000,
   workspaceBriefMaxChars: 6000,
+  /** 主持人歷史視窗：至少保留則數；起點對齊 historyWindowStep 的倍數（前綴穩定才吃得到 prompt cache） */
+  historyMinMessages: 8,
+  historyWindowStep: 4,
+  strategyHistoryCharBudget: 14000,
+  /** 歷史中較舊訊息的固定壓縮上限（依訊息本身決定，不隨回合變動） */
+  historyOlderAssistantMaxChars: 800,
+  historyOlderUserMaxChars: 3000,
+  /** 同一系列報告（_p1/_p2…）合併後的注入上限 */
+  reportSeriesInjectMaxChars: 12000,
+  reportsIndexMaxChars: 1500,
+  reportFocusMax: 3,
+  /** 未觸發回合的 Cursor 通知：注入則數／單則字數 */
+  notesInjectMax: 6,
+  noteInjectMaxChars: 600,
 } as const;
 
 export type StrategyMessageCompletionStatus =
@@ -165,6 +179,144 @@ export function selectBoundedHistory<T extends { role: string; content: string }
     slice = [{ ...first, content: first.content.slice(0, budget) }, ...slice.slice(1)];
   }
   return slice;
+}
+
+function headTail(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const head = Math.floor(max * 0.62);
+  const tail = Math.max(0, max - head);
+  return `${text.slice(0, head)}\n…[中略]…\n${text.slice(-tail)}`;
+}
+
+/** Cursor 通知（noReply）與顧問發言不進主持人歷史 */
+export function isHistoryExcluded(structured: Record<string, unknown> | null | undefined): boolean {
+  const kind = structured?.kind;
+  return kind === "note" || kind === "advisor";
+}
+
+/**
+ * 主持人歷史：起點對齊格線（每 historyWindowStep 則才前移），超出字數也按格線前移；
+ * 較舊訊息依自身內容固定壓縮。連續幾回合送出的開頭完全相同，才命中 prompt cache。
+ */
+export function selectStrategyHistory<
+  T extends { role: string; content: string; structured?: Record<string, unknown> | null },
+>(
+  messages: T[],
+  opts?: { minKeep?: number; step?: number; maxChars?: number; offset?: number },
+): T[] {
+  const minKeep = Math.max(2, opts?.minKeep ?? STRATEGY_LIMITS.historyMinMessages);
+  const step = Math.max(1, opts?.step ?? STRATEGY_LIMITS.historyWindowStep);
+  const maxChars = Math.max(500, opts?.maxChars ?? STRATEGY_LIMITS.strategyHistoryCharBudget);
+  // offset＝這批訊息之前還有幾則（DB 只撈最新 N 則時）；格線以整房的絕對序號計算
+  const offset = Math.max(0, Math.floor(opts?.offset ?? 0));
+  if (!messages.length) return [];
+
+  const total = offset + messages.length;
+  let startAbs = total <= minKeep ? 0 : Math.floor((total - minKeep) / step) * step;
+  if (startAbs < offset) startAbs = Math.ceil(offset / step) * step;
+  const counted = (m: T) => (isHistoryExcluded(m.structured) ? 0 : m.content?.length ?? 0);
+  const charsFrom = (abs: number) => messages.slice(abs - offset).reduce((n, m) => n + counted(m), 0);
+  while (startAbs + step < total && charsFrom(startAbs) > maxChars) startAbs += step;
+
+  const localStart = Math.min(Math.max(0, startAbs - offset), Math.max(0, messages.length - 2));
+  let slice = messages
+    .slice(localStart)
+    .filter((m) => (m.role === "user" || m.role === "assistant") && !isHistoryExcluded(m.structured));
+  while (slice.length > 1 && slice[0]!.role !== "user") slice = slice.slice(1);
+  if (!slice.length) return [];
+
+  let lastAssistant = -1;
+  for (let i = slice.length - 1; i >= 0; i--) {
+    if (slice[i]!.role === "assistant") {
+      lastAssistant = i;
+      break;
+    }
+  }
+  const lastIdx = slice.length - 1;
+  return slice.map((m, i) => {
+    if (i === lastIdx || i === lastAssistant) return m;
+    const max =
+      m.role === "assistant"
+        ? STRATEGY_LIMITS.historyOlderAssistantMaxChars
+        : STRATEGY_LIMITS.historyOlderUserMaxChars;
+    const content = headTail(m.content ?? "", max);
+    return content === m.content ? m : { ...m, content };
+  });
+}
+
+export type InjectableReport = {
+  id: string;
+  requestId: string;
+  title: string;
+  content: string;
+  chars: number;
+  createdAt: number;
+};
+
+/** `xxx_p2`、`xxx-p3` 視為同一系列 */
+export function reportSeriesKey(title: string): string {
+  return title.trim().replace(/[_\-\s]+p\d+$/i, "").toLowerCase() || title.trim().toLowerCase();
+}
+
+function oneLine(content: string, max = 60): string {
+  const line = content.replace(/\s+/g, " ").trim();
+  if (!line) return "（空）";
+  return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
+}
+
+/**
+ * 報告注入：只放「上一回合之後新上傳」與主持人指名（reportFocus）的報告正文，
+ * 同系列分段合併；其餘只進索引。
+ */
+export function buildReportInjection(
+  reports: InjectableReport[],
+  opts: { lastHostTurnAt: number; focusIds: string[] },
+): { bodies: string; index: string; injectedIds: string[] } {
+  const L = STRATEGY_LIMITS;
+  const focus = new Set(opts.focusIds.slice(0, L.reportFocusMax));
+  const picked = reports.filter((r) => r.createdAt > opts.lastHostTurnAt || focus.has(r.id));
+  const pickedIds = new Set(picked.map((r) => r.id));
+
+  const groups = new Map<string, InjectableReport[]>();
+  for (const r of picked) {
+    const key = reportSeriesKey(r.title);
+    const arr = groups.get(key) ?? [];
+    arr.push(r);
+    groups.set(key, arr);
+  }
+  const ordered = [...groups.values()]
+    .map((parts) => parts.sort((a, b) => a.createdAt - b.createdAt))
+    .sort((a, b) => b[b.length - 1]!.createdAt - a[a.length - 1]!.createdAt);
+
+  let bodies = "";
+  const injectedIds: string[] = [];
+  for (const parts of ordered) {
+    const head = parts
+      .map((r) => `${r.id}${r.requestId ? ` [${r.requestId}]` : ""}`)
+      .join("、");
+    const merged = parts.map((r) => r.content).join("\n");
+    const body = merged.length > L.reportSeriesInjectMaxChars
+      ? `${merged.slice(0, L.reportSeriesInjectMaxChars)}\n…[截斷]`
+      : merged;
+    const block = `\n### 報告 ${head}：${parts[0]!.title}${parts.length > 1 ? `（${parts.length} 段已合併）` : ""}\n${body}\n`;
+    if (bodies.length + block.length > L.reportsInjectMaxChars) continue;
+    bodies += block;
+    injectedIds.push(...parts.map((r) => r.id));
+  }
+
+  const injectedSet = new Set(injectedIds);
+  let index = "";
+  for (const r of reports) {
+    if (injectedSet.has(r.id)) continue;
+    const skipped = pickedIds.has(r.id) ? "（超出注入上限）" : "";
+    const line = `- ${r.id}：${r.title}（${r.chars} 字）${skipped} ${oneLine(r.content)}\n`;
+    if (index.length + line.length > L.reportsIndexMaxChars) {
+      index += "- …（更早的報告略）\n";
+      break;
+    }
+    index += line;
+  }
+  return { bodies, index: index.trimEnd(), injectedIds };
 }
 
 export type StrategyDossier = {
