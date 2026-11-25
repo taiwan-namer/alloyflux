@@ -384,6 +384,8 @@ async function prepareTables(): Promise<void> {
   // 熱路徑：一查就知道表在，側欄不必等 40+ 句 DDL
   try {
     await db().prepare(`SELECT 1 AS ok FROM strategy_workspaces LIMIT 1`).get();
+    // 側欄軟刪依賴此欄：probe 成功也同步補上，避免背景 migrate 尚未完成就 WHERE 爆掉
+    await db().exec(`ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS deleted_at BIGINT`);
     if (!schemaMigrated) {
       schemaMigrated = true;
       void createTables().catch((e) => {
@@ -530,6 +532,7 @@ async function createTables(): Promise<void> {
     `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS pause_state TEXT NOT NULL DEFAULT 'none'`,
     `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS models_json TEXT`,
     `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS template_id TEXT`,
+    `ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS deleted_at BIGINT`,
     `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_model TEXT`,
     `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_role TEXT`,
     `ALTER TABLE strategy_session_messages ADD COLUMN IF NOT EXISTS speaker_label TEXT`,
@@ -560,6 +563,9 @@ async function createTables(): Promise<void> {
       ON strategy_session_messages(session_id, turn_id)`,
     `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_workspace
       ON strategy_sessions(workspace_id, updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_strategy_sessions_user_active
+      ON strategy_sessions(user_id, updated_at DESC)
+      WHERE deleted_at IS NULL`,
     `CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_session
       ON strategy_dispatch_items(session_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_strategy_dispatch_user_status
@@ -1105,7 +1111,9 @@ export async function listStrategySessions(userId: string, limit = 20) {
   await ensureTables();
   const rows = (await db()
     .prepare(
-      `SELECT * FROM strategy_sessions WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?`,
+      `SELECT * FROM strategy_sessions
+       WHERE user_id = ? AND deleted_at IS NULL
+       ORDER BY updated_at DESC LIMIT ?`,
     )
     .all(userId, Math.min(Math.max(limit, 1), 50))) as Record<string, unknown>[];
   return rows.map(mapSession);
@@ -1114,9 +1122,25 @@ export async function listStrategySessions(userId: string, limit = 20) {
 export async function getStrategySession(userId: string, sessionId: string) {
   await ensureTables();
   const row = (await db()
-    .prepare(`SELECT * FROM strategy_sessions WHERE id = ? AND user_id = ?`)
+    .prepare(
+      `SELECT * FROM strategy_sessions
+       WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
+    )
     .get(sessionId, userId)) as Record<string, unknown> | undefined;
   return row ? mapSession(row) : null;
+}
+
+/** 側欄刪除會議室（軟刪；列表不再顯示） */
+export async function softDeleteStrategySession(userId: string, sessionId: string): Promise<boolean> {
+  await ensureTables();
+  const r = await db()
+    .prepare(
+      `UPDATE strategy_sessions
+       SET deleted_at = ?, updated_at = GREATEST(updated_at + 1, ?)
+       WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
+    )
+    .run(nowMs(), nowMs(), sessionId, userId);
+  return (r.changes ?? 0) > 0;
 }
 
 export async function updateStrategySession(
@@ -1347,7 +1371,7 @@ export async function listWorkspaceSessionsBrief(userId: string, workspaceId: st
     .prepare(
       `SELECT ${SESSION_BRIEF_COLS}
        FROM strategy_sessions
-       WHERE user_id = ? AND workspace_id = ?
+       WHERE user_id = ? AND workspace_id = ? AND deleted_at IS NULL
        ORDER BY updated_at DESC LIMIT 50`,
     )
     .all(userId, workspaceId)) as Record<string, unknown>[];
@@ -1366,7 +1390,7 @@ export async function listWorkspaceSessionsBriefMany(userId: string, workspaceId
     .prepare(
       `SELECT ${SESSION_BRIEF_COLS}
        FROM strategy_sessions
-       WHERE user_id = ? AND workspace_id IN (${placeholders})
+       WHERE user_id = ? AND workspace_id IN (${placeholders}) AND deleted_at IS NULL
        ORDER BY updated_at DESC`,
     )
     .all(userId, ...ids)) as Record<string, unknown>[];
@@ -1422,7 +1446,8 @@ export async function listWorkspaceSessions(userId: string, workspaceId: string)
   await ensureTables();
   const rows = (await db()
     .prepare(
-      `SELECT * FROM strategy_sessions WHERE user_id = ? AND workspace_id = ?
+      `SELECT * FROM strategy_sessions
+       WHERE user_id = ? AND workspace_id = ? AND deleted_at IS NULL
        ORDER BY updated_at DESC LIMIT 50`,
     )
     .all(userId, workspaceId)) as Record<string, unknown>[];

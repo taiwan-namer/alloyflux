@@ -1179,6 +1179,7 @@ export default function ChatPage() {
   const [memoryMsg, setMemoryMsg] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [convMenuId, setConvMenuId] = useState<string | null>(null);
+  const [roomMenuId, setRoomMenuId] = useState<string | null>(null);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [trashOpen, setTrashOpen] = useState(false);
@@ -1487,10 +1488,13 @@ export default function ChatPage() {
   }, [trashOpen, refreshTrashed]);
 
   useEffect(() => {
-    if (!convMenuId) return;
-    const close = () => setConvMenuId(null);
+    if (!convMenuId && !roomMenuId) return;
+    const close = () => {
+      setConvMenuId(null);
+      setRoomMenuId(null);
+    };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setConvMenuId(null);
+      if (e.key === "Escape") close();
     };
     window.addEventListener("click", close);
     window.addEventListener("keydown", onKey);
@@ -1498,7 +1502,7 @@ export default function ChatPage() {
       window.removeEventListener("click", close);
       window.removeEventListener("keydown", onKey);
     };
-  }, [convMenuId]);
+  }, [convMenuId, roomMenuId]);
 
   useEffect(() => {
     if (!sidebarOpen) return;
@@ -1723,6 +1727,31 @@ export default function ChatPage() {
     }
     await refreshConversations();
     if (trashOpen) void refreshTrashed();
+  }
+
+  /** 軟刪會議室：側欄消失（與對話 ⋯ 刪除同類操作） */
+  async function trashStrategyRoom(id: string) {
+    setRoomMenuId(null);
+    const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      setStrategyError(typeof data.error === "string" ? data.error : "無法刪除會議室");
+      return;
+    }
+    strategyCacheRef.current.delete(id);
+    strategyInflightRef.current.delete(id);
+    setStrategyWorkspaces((list) =>
+      list.map((ws) => ({
+        ...ws,
+        rooms: ws.rooms.filter((r) => r.id !== id),
+      })),
+    );
+    if (strategyDetail?.session.id === id) {
+      setStrategyDetail(null);
+      setStrategyDraft("");
+      setViewMode((m) => (m === "split" ? "chat" : m === "strategy" ? "chat" : m));
+    }
+    void refreshStrategySessions();
   }
 
   function startRename(c: Conversation) {
@@ -3078,6 +3107,37 @@ export default function ChatPage() {
                         >
                           <span className="title">{s.name || "未命名會議室"}</span>
                           <span className="strategy-status-chip">{strategyStatusLabel(s.status)}</span>
+                          <div className="conv-menu-wrap">
+                            <button
+                              type="button"
+                              className="conv-more"
+                              aria-label="會議室選項"
+                              aria-expanded={roomMenuId === s.id}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConvMenuId(null);
+                                setRoomMenuId((prev) => (prev === s.id ? null : s.id));
+                              }}
+                            >
+                              ⋯
+                            </button>
+                            {roomMenuId === s.id && (
+                              <div
+                                className="conv-menu"
+                                role="menu"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  className="danger"
+                                  onClick={() => void trashStrategyRoom(s.id)}
+                                >
+                                  刪除
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       ))
                     ))}

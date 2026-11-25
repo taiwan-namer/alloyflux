@@ -9,6 +9,7 @@ import {
   listSessionReports,
   PAUSE_ACTIONS,
   readDossier,
+  softDeleteStrategySession,
   STRATEGY_LIMITS,
   STRATEGY_SESSION_STATUSES,
   templateIdExists,
@@ -198,4 +199,16 @@ export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }>
   if (!ok) return Response.json({ error: "Not found" }, { status: 404 });
   const session = await getStrategySession(auth.user.id, id);
   return Response.json({ session });
+}
+
+/** 軟刪會議室：側欄消失；訊息仍留庫（與對話垃圾桶同概念，暫無還原 UI） */
+export async function DELETE(req: Request, ctx: { params: Promise<{ id: string }> }) {
+  const proxied = await cloudDbProxy(req);
+  if (proxied) return proxied;
+  const auth = await authenticateStrategyActor(req);
+  if (!auth) return Response.json({ error: "Unauthorized" }, { status: 401 });
+  const { id } = await ctx.params;
+  const ok = await softDeleteStrategySession(auth.user.id, id);
+  if (!ok) return Response.json({ error: "Not found" }, { status: 404 });
+  return Response.json({ ok: true });
 }
