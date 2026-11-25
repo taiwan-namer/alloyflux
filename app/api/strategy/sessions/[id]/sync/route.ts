@@ -1,11 +1,11 @@
 import { cloudDbProxy } from "@/lib/cloud-api";
 import { authenticateStrategyReader } from "@/lib/platform-api-auth";
 import {
-  collectSessionMessages,
   getSessionSyncMeta,
   getStrategySession,
   listRunsForSession,
   listSessionDispatch,
+  listSessionMessagesPage,
   listSessionReports,
   readDossier,
   STRATEGY_LIMITS,
@@ -54,7 +54,10 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   const session = await getStrategySession(auth.user.id, id);
   if (!session) return Response.json({ error: "Not found" }, { status: 404 });
 
-  const collected = await collectSessionMessages(auth.user.id, id);
+  // 輕量：只回最新一頁，前端 merge 保留已載入的更早訊息
+  const page = await listSessionMessagesPage(auth.user.id, id, {
+    limit: STRATEGY_LIMITS.messagesPageSize,
+  });
   const runs = await listRunsForSession(auth.user.id, id, 10);
   const reports = (await listSessionReports(auth.user.id, id, 30)).map((r) => ({
     id: r.id,
@@ -72,13 +75,13 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     sessionUpdatedAt: meta.sessionUpdatedAt,
     workspaceUpdatedAt: meta.workspaceUpdatedAt,
     messageCount: meta.messageCount,
-    hasMore: collected.hasMore,
-    nextCursor: collected.nextCursor,
-    messageTotal: collected.total,
+    hasMore: page.hasMore,
+    nextCursor: page.nextCursor,
+    messageTotal: page.total,
     workspaceMemoryNotes: meta.workspaceMemoryNotes,
     session,
     dossier: readDossier(session.meta),
-    messages: collected.messages,
+    messages: page.messages,
     runs,
     reports,
     dispatch,

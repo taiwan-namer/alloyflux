@@ -2,8 +2,8 @@ import { cloudDbProxy } from "@/lib/cloud-api";
 import { authenticateStrategyActor } from "@/lib/platform-api-auth";
 import {
   createStrategyWorkspace,
-  listStrategyWorkspaces,
-  listWorkspaceSessions,
+  listStrategyWorkspacesBrief,
+  listWorkspaceSessionsBrief,
 } from "@/lib/strategy-loop";
 
 export const dynamic = "force-dynamic";
@@ -14,17 +14,18 @@ export async function GET(req: Request) {
   const auth = await authenticateStrategyActor(req);
   if (!auth) return Response.json({ error: "Unauthorized" }, { status: 401 });
   const trash = new URL(req.url).searchParams.get("trash") === "1";
-  const workspaces = await listStrategyWorkspaces(auth.user.id, { trash });
+  // #8：側欄投影欄位（不含房間 summary／meta）；房間仍 1+N 但每查變輕
+  const workspaces = await listStrategyWorkspacesBrief(auth.user.id, { trash });
   const withRooms = await Promise.all(
     workspaces.map(async (ws) => ({
-      ...ws,
-      rooms: (await listWorkspaceSessions(auth.user.id, ws.id)).map((s) => ({
+      id: ws.id,
+      name: ws.name,
+      memory: ws.memory,
+      rooms: (await listWorkspaceSessionsBrief(auth.user.id, ws.id)).map((s) => ({
         id: s.id,
         name: s.name,
         topic: s.topic,
         status: s.status,
-        summary: s.summary,
-        summaryUpdatedAt: s.summaryUpdatedAt,
         autoDispatch: s.autoDispatch,
         updatedAt: s.updatedAt,
       })),

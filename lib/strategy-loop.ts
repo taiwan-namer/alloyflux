@@ -1252,6 +1252,38 @@ export async function listStrategyWorkspaces(userId: string, opts: { trash?: boo
   return rows.map(mapWorkspace);
 }
 
+/** 側欄用：不撈完整 memory／summary 大欄 */
+export async function listStrategyWorkspacesBrief(userId: string, opts: { trash?: boolean } = {}) {
+  await ensureTables();
+  if (!opts.trash) await ensureDefaultWorkspace(userId);
+  const rows = (await db()
+    .prepare(
+      `SELECT id, name, template_id, memory_json, created_at, updated_at, deleted_at
+       FROM strategy_workspaces
+       WHERE user_id = ? AND deleted_at IS ${opts.trash ? "NOT NULL" : "NULL"}
+       ORDER BY updated_at DESC LIMIT 50`,
+    )
+    .all(userId)) as Record<string, unknown>[];
+  return rows.map(mapWorkspace);
+}
+
+/** 側欄房間清單：不含 summary／meta／pending 大欄 */
+export async function listWorkspaceSessionsBrief(userId: string, workspaceId: string) {
+  await ensureTables();
+  const rows = (await db()
+    .prepare(
+      `SELECT id, user_id, name, profile_id, strategy_version, status, model, models_json, template_id,
+              workspace_id, topic, auto_dispatch, pause_state, created_at, updated_at,
+              '' AS summary, 0 AS summary_updated_at,
+              '[]' AS pending_instructions_json, '{}' AS meta_json
+       FROM strategy_sessions
+       WHERE user_id = ? AND workspace_id = ?
+       ORDER BY updated_at DESC LIMIT 50`,
+    )
+    .all(userId, workspaceId)) as Record<string, unknown>[];
+  return rows.map(mapSession);
+}
+
 export async function updateStrategyWorkspace(
   userId: string,
   workspaceId: string,

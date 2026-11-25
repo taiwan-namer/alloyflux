@@ -574,6 +574,19 @@ a {
   overflow: hidden;
 }
 
+/* 並排：明確還原聊天欄可互動（避免從 strategy 切過來仍吃到隱藏樣式／inert 殘留） */
+.app.view-split .main {
+  position: relative !important;
+  visibility: visible !important;
+  pointer-events: auto !important;
+  width: auto !important;
+  height: 100% !important;
+  overflow: hidden !important;
+  z-index: 1 !important;
+  min-width: 0;
+  min-height: 0;
+}
+
 .strategy-room-view {
   display: flex;
   flex-direction: column;
@@ -726,11 +739,12 @@ a {
 
 @media (min-width: 1024px) {
   .app.view-split {
-    grid-template-columns: 280px 1fr 1fr;
+    grid-template-columns: 280px minmax(0, 1fr) minmax(0, 1fr);
   }
 
-  .app.view-split .main,
-  .app.view-split .strategy-room-view {
+  .app.view-split .main {
+    grid-column: 2;
+    grid-row: 1;
     min-width: 0;
     min-height: 0;
     height: 100%;
@@ -738,7 +752,14 @@ a {
   }
 
   .app.view-split .strategy-room-view {
+    grid-column: 3;
+    grid-row: 1;
+    min-width: 0;
+    min-height: 0;
+    height: 100%;
+    overflow: hidden;
     border-left: 1px solid var(--border);
+    z-index: 1;
   }
 }
 
@@ -999,9 +1020,42 @@ a {
 
 .strategy-member-edit-list li {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.8fr) auto auto auto;
+  grid-template-columns: minmax(0, 1.4fr) auto minmax(0, 0.8fr) auto auto auto;
   gap: 6px;
   align-items: center;
+}
+
+.strategy-effort-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.strategy-effort-toggles label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text);
+}
+
+.strategy-effort-toggles label.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.strategy-effort-toggles input {
+  margin: 0;
+}
+
+.strategy-effort-fixed {
+  font-size: 12px;
+  text-transform: capitalize;
+  min-width: 3.5em;
 }
 
 @media (max-width: 768px) {

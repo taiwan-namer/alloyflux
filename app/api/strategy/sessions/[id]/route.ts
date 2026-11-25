@@ -2,7 +2,6 @@ import { cloudDbProxy } from "@/lib/cloud-api";
 import { authenticateStrategyActor, authenticateStrategyReader } from "@/lib/platform-api-auth";
 import {
   applySessionPauseAction,
-  collectSessionMessages,
   getStrategySession,
   listRunsForSession,
   listSessionDispatch,
@@ -45,24 +44,17 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   } = { hasMore: false, nextCursor: null, total: 0 };
 
   if (withMessages) {
-    if (pageMode) {
-      const limit = rawLimit == null ? STRATEGY_LIMITS.messagesPageSize : Number(rawLimit);
-      const page = await listSessionMessagesPage(auth.user.id, id, {
-        limit: Number.isFinite(limit) ? limit : STRATEGY_LIMITS.messagesPageSize,
-        before,
-      });
-      messages = page.messages;
-      messagesMeta = { hasMore: page.hasMore, nextCursor: page.nextCursor, total: page.total };
-    } else {
-      // 預設：合併讀取至 hardCap，避免舊 40 硬頂吃掉早期歷史
-      const collected = await collectSessionMessages(auth.user.id, id);
-      messages = collected.messages;
-      messagesMeta = {
-        hasMore: collected.hasMore,
-        nextCursor: collected.nextCursor,
-        total: collected.total,
-      };
-    }
+    // #8／#9：開房一律首屏分頁（預設 messagesPageSize），勿一次硬撈到 hardCap
+    const limit =
+      rawLimit == null || !Number.isFinite(Number(rawLimit))
+        ? STRATEGY_LIMITS.messagesPageSize
+        : Number(rawLimit);
+    const page = await listSessionMessagesPage(auth.user.id, id, {
+      limit,
+      before: pageMode ? before : null,
+    });
+    messages = page.messages;
+    messagesMeta = { hasMore: page.hasMore, nextCursor: page.nextCursor, total: page.total };
   }
 
   const runs = await listRunsForSession(auth.user.id, id, 10);

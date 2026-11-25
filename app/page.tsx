@@ -1699,7 +1699,11 @@ export default function ChatPage() {
       setWsMemoryDirty(false);
     }
     try {
-      const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(id)}`, { cache: "no-store" });
+      // #8：開房首屏只要最新一頁（limit=100），更早訊息用「載入更早」
+      const res = await fetch(
+        `/api/strategy/sessions/${encodeURIComponent(id)}?limit=100`,
+        { cache: "no-store" },
+      );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setStrategyDetail(null);
@@ -1886,16 +1890,42 @@ export default function ChatPage() {
     const nextDispatch = Array.isArray(data.dispatch) ? data.dispatch : strategyDetail.dispatch;
     const pendingIds = new Set(nextDispatch.filter((d) => d.status === "pending").map((d) => d.id));
     setDispatchSelected((sel) => new Set([...sel].filter((id) => pendingIds.has(id))));
+    // sync 只帶最新一頁：與既有訊息 merge，避免把「載入更早」洗掉
+    let nextMessages = strategyDetail.messages;
+    let nextHasMore = typeof data.hasMore === "boolean" ? data.hasMore : strategyDetail.hasMore;
+    let nextCursor = data.nextCursor !== undefined ? data.nextCursor : strategyDetail.nextCursor;
+    if (Array.isArray(data.messages)) {
+      const byId = new Map<string, (typeof strategyDetail.messages)[number]>();
+      for (const m of strategyDetail.messages) byId.set(m.id, m);
+      for (const m of data.messages) byId.set(m.id, m);
+      nextMessages = [...byId.values()].sort((a, b) => {
+        const dt = (a.createdAt || 0) - (b.createdAt || 0);
+        return dt !== 0 ? dt : String(a.id).localeCompare(String(b.id));
+      });
+      const syncOldest = data.messages[0];
+      const mergedOldest = nextMessages[0];
+      // 已載入比 sync 頁更舊的訊息時，保留原本的 hasMore／cursor
+      if (
+        syncOldest &&
+        mergedOldest &&
+        (mergedOldest.createdAt < syncOldest.createdAt ||
+          (mergedOldest.createdAt === syncOldest.createdAt &&
+            String(mergedOldest.id) < String(syncOldest.id)))
+      ) {
+        nextHasMore = strategyDetail.hasMore;
+        nextCursor = strategyDetail.nextCursor ?? null;
+      }
+    }
     setStrategyDetail({
       ...strategyDetail,
       session: { ...strategyDetail.session, ...data.session },
       dossier: data.dossier ?? strategyDetail.dossier,
-      messages: Array.isArray(data.messages) ? data.messages : strategyDetail.messages,
+      messages: nextMessages,
       runs: Array.isArray(data.runs) ? data.runs : strategyDetail.runs,
       reports: Array.isArray(data.reports) ? data.reports : strategyDetail.reports,
       dispatch: nextDispatch,
-      hasMore: typeof data.hasMore === "boolean" ? data.hasMore : strategyDetail.hasMore,
-      nextCursor: data.nextCursor !== undefined ? data.nextCursor : strategyDetail.nextCursor,
+      hasMore: nextHasMore,
+      nextCursor,
       messageTotal:
         typeof data.messageTotal === "number"
           ? data.messageTotal
@@ -3029,7 +3059,12 @@ export default function ChatPage() {
         </div>
       </aside>
 
-      <main className="main" aria-hidden={viewMode === "strategy"}>
+      <main
+        className="main"
+        aria-hidden={viewMode === "strategy" ? true : undefined}
+        // 僅全螢幕會議室時讓出互動；並排必須可點聊天欄（inert 為 HTML 標準屬性）
+        inert={viewMode === "strategy" ? true : undefined}
+      >
         <div className="topbar">
           <button type="button" className="menu-btn" aria-label="開啟對話紀錄" onClick={() => setSidebarOpen(true)}>
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
@@ -3573,9 +3608,9 @@ export default function ChatPage() {
           onRefresh={() => {
             if (strategyDetail?.session.id) void openStrategySession(strategyDetail.session.id);
           }}
-          onStreamCommitted={async (sid) => {
-            await openStrategySession(sid);
-            await refreshStrategySessions();
+          onStreamCommitted={async (_sid) => {
+            // #9：不再整房重載；只背景刷側欄
+            void refreshStrategySessions();
           }}
           onRefreshWallet={() => {
             void refreshWallet();

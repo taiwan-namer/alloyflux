@@ -42,6 +42,16 @@ import {
   shouldRollbackTemplate,
   type SopTemplateGate,
 } from "@/lib/sop-template-sync";
+import {
+  buildModelFamilies,
+  familyIdOf,
+  familyOptionText,
+  familyOptionTitle,
+  resolveFamilyModelId,
+  stripEffortSuffix,
+  uiEffortOf,
+  type ModelFamilyOption,
+} from "@/lib/strategy-model-family";
 
 export type StrategyRoomViewProps = {
   detail: StrategySessionDetail;
@@ -199,14 +209,6 @@ const HistoryMessages = memo(function HistoryMessages(props: {
   );
 });
 
-function modelOptionText(opt: StrategyModelOption): string {
-  const base = opt.familyLabel
-    ? `${opt.familyLabel}${opt.effort ? ` · ${opt.effort}` : ""}`
-    : opt.label;
-  if (opt.available) return base;
-  return `${base}（${opt.note?.trim() || "暫不可用"}）`;
-}
-
 function modelOptionTitle(opt: StrategyModelOption): string {
   const parts = [opt.label];
   if (opt.categoryLabel) parts.push(opt.categoryLabel);
@@ -252,10 +254,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  /** generating：串流接收中；committing：收尾同步中（可打字、禁重送） */
+  /** generating：串流接收中；committing 保留相容（#9 後收尾改背景，不再擋輸入／送出） */
   const [generating, setGenerating] = useState(false);
   const [committing, setCommitting] = useState(false);
-  const streaming = generating || committing;
+  const streaming = generating;
   const [pendingUser, setPendingUser] = useState<string | null>(null);
   const [streamBubbles, setStreamBubbles] = useState<StreamingMemberBubble[]>([]);
   const [notices, setNotices] = useState<string[]>([]);
@@ -277,6 +279,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const streamRunIdRef = useRef(0);
   const streamContentRef = useRef("");
   const streamCommittingRef = useRef(false);
+  /** done 後保留串流氣泡直到歷史訊息進畫面，避免閃空白 */
+  const handoffPendingRef = useRef(false);
   const abortReasonRef = useRef<"user" | "switch" | null>(null);
   /** 已接收串流緩衝（權威內容；動畫不得改寫） */
   const bubblesRef = useRef<StreamingMemberBubble[]>([]);
@@ -407,6 +411,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const prev = sessionIdRef.current;
     if (prev !== detail.session.id) {
       invalidateStream("switch");
+      handoffPendingRef.current = false;
       setGenerating(false);
       setCommitting(false);
       setPendingUser(null);
@@ -440,6 +445,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     if (seenSessionIdRef.current !== sessionId) {
       seenSessionIdRef.current = sessionId;
       seen.clear();
+      handoffPendingRef.current = false;
       for (const m of detail.messages) seen.add(m.id);
       setRevealIds((cur) => (cur.size ? new Set() : cur));
       return;
@@ -447,14 +453,30 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const fresh = detail.messages.filter((m) => !seen.has(m.id));
     if (!fresh.length) return;
     for (const m of fresh) seen.add(m.id);
-    // 本機串流（含送出／commit 重新載入）期間產生的訊息：直接顯示，不 reveal
-    if (streamingRef.current) return;
+    // 本機串流或 done→歷史交接中：直接顯示、不 reveal；交接完成後同幀清暫存氣泡（避免閃空白）
+    if (streamingRef.current || handoffPendingRef.current) {
+      if (handoffPendingRef.current) {
+        const userText = streamContentRef.current.trim();
+        const freshHasTurn = fresh.some(
+          (m) =>
+            m.role === "assistant" ||
+            (m.role === "user" && (!userText || m.content.trim() === userText)),
+        );
+        if (freshHasTurn) {
+          handoffPendingRef.current = false;
+          setPendingUser(null);
+          setStreamBubbles([]);
+          clearDripAndBubbles();
+        }
+      }
+      return;
+    }
     setRevealIds((cur) => {
       const next = new Set(cur);
       for (const m of fresh) next.add(m.id);
       return next;
     });
-  }, [sessionId, detail.messages]);
+  }, [sessionId, detail.messages, clearDripAndBubbles]);
 
   const modelsKey = JSON.stringify(detail.session.models ?? null);
 
@@ -500,6 +522,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     ta.style.height = "auto";
     ta.style.height = `${Math.min(Math.max(ta.scrollHeight, 72), 220)}px`;
   }, [draft]);
+
+  const syncPullRef = useRef<(force?: boolean) => Promise<void>>(async () => {});
 
   useEffect(() => {
     let cancelled = false;
@@ -547,6 +571,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       }
     }
 
+    syncPullRef.current = pull;
     void pull(true);
     const timer = window.setInterval(() => void pull(false), 3000);
     const onVis = () => {
@@ -569,10 +594,29 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     stickToBottomRef.current = dist < 80;
   }
 
+  /** #9：輕量 reconciliation——force sync＋背景刷側欄；不重開整房 */
   async function reconcileOnce(runId: number, sid: string) {
     if (reconcileRunRef.current === runId) return;
     reconcileRunRef.current = runId;
-    await onStreamCommittedRef.current(sid);
+    await syncPullRef.current(true);
+    void onStreamCommittedRef.current(sid);
+  }
+
+  /** done／中斷後立刻可打字、可再送；背景 sync 不擋 composer */
+  function beginBackgroundReconcile(runId: number, sid: string, refreshWallet = false) {
+    streamCommittingRef.current = false;
+    setCommitting(false);
+    void reconcileOnce(runId, sid)
+      .catch(() => {})
+      .finally(() => {
+        if (refreshWallet && sid === sessionIdRef.current) void onRefreshWallet();
+        // sync 若未帶進新訊息，最多 8 秒解除 handoff 旗標（氣泡仍保留以免空白）
+        window.setTimeout(() => {
+          if (sid === sessionIdRef.current && handoffPendingRef.current) {
+            handoffPendingRef.current = false;
+          }
+        }, 8000);
+      });
   }
 
   async function loadOlderMessages() {
@@ -611,6 +655,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const runId = streamRunIdRef.current;
     // 立即失效本輪：清拆吐佇列，殘留非同步因 runId 不符靜默結束
     invalidateStream("user");
+    handoffPendingRef.current = false;
     setStreamBubbles([]);
     setPendingUser(null);
     setNotices([]);
@@ -619,12 +664,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     onError(null);
     if (content) onDraftChange(content);
     requestAnimationFrame(() => textareaRef.current?.focus());
-    void onRefreshWallet();
-    // 4A：停止後最多一次 reconciliation；可打字≠可在 reconciliation 完成前重送
-    setCommitting(true);
-    void reconcileOnce(runId, sid).finally(() => {
-      if (sid === sessionIdRef.current) setCommitting(false);
-    });
+    // #9：停止後立刻可打字／可重送；背景 sync 不擋 composer
+    beginBackgroundReconcile(runId, sid, true);
   }
 
   async function sendStream(text: string) {
@@ -719,42 +760,26 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       if (!isCurrent()) return;
 
       if (completion?.aborted || completion?.completionStatus === "failed") {
-        // 非使用者／切房造成：伺服器端失敗；先清暫存再 reconciliation（4A 資料去重）
+        // 非使用者／切房造成：伺服器端失敗；先清暫存再背景 reconciliation
         clearDripAndBubbles();
         setPendingUser(null);
         setStreamBubbles([]);
         onError("生成失敗或已中斷");
         onDraftChange(content);
         setGenerating(false);
-        streamCommittingRef.current = true;
-        setCommitting(true);
-        try {
-          await reconcileOnce(runId, sid);
-        } finally {
-          streamCommittingRef.current = false;
-          if (sid === sessionIdRef.current) setCommitting(false);
-        }
+        beginBackgroundReconcile(runId, sid);
         return;
       }
 
       if (sawDone && (completion?.completionStatus === "ok" || completion?.completionStatus === "degraded")) {
         if (completion.completionStatus === "degraded") setDegradedHint(true);
-        // done：顯示對齊已接收全文後立刻進 committing，不等待拆吐播完
+        // done：立刻解鎖；保留串流氣泡直到歷史 sync 進畫面（一般聊天無此空隙）
         flushDripNow();
-        clearDripAndBubbles();
-        setPendingUser(null);
-        setStreamBubbles([]);
+        bubblesRef.current = bubblesRef.current.map((b) => ({ ...b, done: true }));
+        setStreamBubbles((prev) => prev.map((b) => ({ ...b, done: true })));
+        handoffPendingRef.current = true;
         setGenerating(false);
-        streamCommittingRef.current = true;
-        setCommitting(true);
-        try {
-          await reconcileOnce(runId, sid);
-          if (!isCurrent()) return;
-          void onRefreshWallet();
-        } finally {
-          streamCommittingRef.current = false;
-          if (sid === sessionIdRef.current) setCommitting(false);
-        }
+        beginBackgroundReconcile(runId, sid, true);
         return;
       }
 
@@ -765,14 +790,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       onError("連線中斷，回覆未完成");
       onDraftChange(content);
       setGenerating(false);
-      streamCommittingRef.current = true;
-      setCommitting(true);
-      try {
-        await reconcileOnce(runId, sid);
-      } finally {
-        streamCommittingRef.current = false;
-        if (sid === sessionIdRef.current) setCommitting(false);
-      }
+      beginBackgroundReconcile(runId, sid);
     } catch (e) {
       if (!isCurrent()) return;
       clearDripAndBubbles();
@@ -787,14 +805,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       }
       onDraftChange(content);
       setGenerating(false);
-      streamCommittingRef.current = true;
-      setCommitting(true);
-      try {
-        await reconcileOnce(runId, sid);
-      } finally {
-        streamCommittingRef.current = false;
-        if (sid === sessionIdRef.current) setCommitting(false);
-      }
+      beginBackgroundReconcile(runId, sid);
     } finally {
       if (runId === streamRunIdRef.current) {
         if (streamAbortRef.current === controller) streamAbortRef.current = null;
@@ -893,7 +904,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const leads = copy.filter((m) => m.role === "lead");
     if (leads.length === 1) return copy;
     if (copy.length === 0) {
-      return [{ modelId: "gemini-4-neon-high", role: "lead", label: "主導" }];
+      return [{ modelId: "gemini-4-neon-low", role: "lead", label: "主導" }];
     }
     copy.forEach((m, i) => {
       m.role = i === 0 ? "lead" : m.role === "lead" ? "custom" : m.role;
@@ -917,12 +928,25 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   function addMember() {
     setMemberDraft((prev) => {
       if (prev.length >= 4) return prev;
-      const pick = models.find((m) => m.available && !prev.some((p) => p.modelId === m.id));
-      const modelId = pick?.id || models.find((m) => m.available)?.id || "gemini-4-neon-high";
-      return ensureOneLead([
-        ...prev,
-        { modelId, role: "custom", label: pick?.label?.split("·")[0]?.trim() || "顧問" },
-      ]);
+      const usedFamilies = new Set(
+        prev.map((p) => {
+          const opt = models.find((m) => m.id === p.modelId);
+          return opt ? familyIdOf(opt) : stripEffortSuffix(p.modelId);
+        }),
+      );
+      const fam =
+        allFamilies.find((f) => f.available && !usedFamilies.has(f.familyId)) ||
+        allFamilies.find((f) => f.available) ||
+        null;
+      // 新增成員預設 Low（無 Low 則退到唯一／最低可用強度）
+      const modelId = fam
+        ? resolveFamilyModelId(fam, "low")
+        : models.find((m) => m.available)?.id || "gemini-4-neon-low";
+      const label =
+        fam?.familyLabel.replace(/（.*?）\s*$/, "").trim() ||
+        models.find((m) => m.id === modelId)?.label?.split("·")[0]?.trim() ||
+        "顧問";
+      return ensureOneLead([...prev, { modelId, role: "custom", label }]);
     });
   }
 
@@ -1021,27 +1045,65 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     }
   }
 
-  const modelOptionsForSelect = (selectedId: string) => {
+  const allFamilies = buildModelFamilies(models);
+
+  const familiesForSelect = (selectedId: string) => {
     const selected = models.find((m) => m.id === selectedId);
-    const avail = models.filter((m) => m.available || m.id === selectedId);
-    if (selected && !avail.some((m) => m.id === selected.id)) avail.unshift(selected);
-    return avail;
+    const selectedFamilyId = selected ? familyIdOf(selected) : stripEffortSuffix(selectedId);
+    const list = allFamilies.filter((f) => f.available || f.familyId === selectedFamilyId);
+    if (selected && !list.some((f) => f.familyId === selectedFamilyId)) {
+      // 目前選到的模型若不在清單（例如僅剩 xhigh），補一列以免 select 空白
+      list.unshift({
+        familyId: selectedFamilyId,
+        familyLabel:
+          selected.familyLabel?.trim() ||
+          selected.label.replace(/\s*·\s*(Low|Medium|High|Extra High)\s*/gi, "").trim() ||
+          selectedFamilyId,
+        categoryLabel: selected.categoryLabel?.trim() || "其他",
+        available: selected.available,
+        note: selected.note,
+        efforts: [],
+        byEffort: {},
+        singleton: selected,
+      });
+    }
+    return list;
   };
 
   /** 依 categoryLabel 分組（保留首次出現順序） */
-  const groupedModelOptions = (selectedId: string) => {
-    const groups: { label: string; items: StrategyModelOption[] }[] = [];
-    for (const opt of modelOptionsForSelect(selectedId)) {
-      const label = opt.categoryLabel?.trim() || "其他";
+  const groupedFamilyOptions = (selectedId: string) => {
+    const groups: { label: string; items: ModelFamilyOption[] }[] = [];
+    for (const fam of familiesForSelect(selectedId)) {
+      const label = fam.categoryLabel || "其他";
       let g = groups.find((x) => x.label === label);
       if (!g) {
         g = { label, items: [] };
         groups.push(g);
       }
-      g.items.push(opt);
+      g.items.push(fam);
     }
     return groups;
   };
+
+  function patchMemberModel(index: number, nextModelId: string) {
+    const opt = models.find((x) => x.id === nextModelId);
+    setMemberDraft((prev) =>
+      prev.map((row, j) =>
+        j === index
+          ? {
+              ...row,
+              modelId: nextModelId,
+              label:
+                row.role === "lead"
+                  ? row.label
+                  : opt?.familyLabel?.replace(/（.*?）\s*$/, "").trim() ||
+                    opt?.label?.split("·")[0]?.trim() ||
+                    row.label,
+            }
+          : row,
+      ),
+    );
+  }
 
   return (
     <section className="strategy-room-view" aria-label="策略會議室">
@@ -1161,44 +1223,80 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
             </button>
           </div>
           <ul className="strategy-member-edit-list">
-            {memberDraft.map((m, i) => (
+            {memberDraft.map((m, i) => {
+              const cur = models.find((x) => x.id === m.modelId);
+              const familyId = cur ? familyIdOf(cur) : stripEffortSuffix(m.modelId);
+              const fam =
+                allFamilies.find((f) => f.familyId === familyId) ||
+                familiesForSelect(m.modelId).find((f) => f.familyId === familyId);
+              const uiEffort = uiEffortOf(cur, m.modelId);
+              const canMedium = Boolean(fam?.byEffort.medium);
+              const canHigh = Boolean(fam?.byEffort.high);
+              const showEffortToggles = Boolean(fam && fam.efforts.length >= 2);
+              return (
               <li key={`${m.modelId}-${i}`}>
                 <select
-                  value={m.modelId}
-                  title={(() => {
-                    const cur = models.find((x) => x.id === m.modelId);
-                    return cur ? modelOptionTitle(cur) : m.modelId;
-                  })()}
+                  value={familyId}
+                  title={fam ? familyOptionTitle(fam) : cur ? modelOptionTitle(cur) : m.modelId}
                   disabled={metaSaving || streaming}
                   onChange={(e) => {
-                    const id = e.target.value;
-                    const opt = models.find((x) => x.id === id);
-                    setMemberDraft((prev) =>
-                      prev.map((row, j) =>
-                        j === i
-                          ? {
-                              ...row,
-                              modelId: id,
-                              label: row.role === "lead" ? row.label : opt?.label?.split("·")[0]?.trim() || row.label,
-                            }
-                          : row,
-                      ),
-                    );
+                    const nextFam = allFamilies.find((f) => f.familyId === e.target.value);
+                    if (!nextFam) return;
+                    // 換家族：預設 Low（無則退最低可用）
+                    patchMemberModel(i, resolveFamilyModelId(nextFam, "low"));
                   }}
                 >
-                  {!models.some((x) => x.id === m.modelId) ? (
-                    <option value={m.modelId}>{m.modelId}</option>
-                  ) : null}
-                  {groupedModelOptions(m.modelId).map((g) => (
+                  {!fam ? <option value={familyId}>{familyId}</option> : null}
+                  {groupedFamilyOptions(m.modelId).map((g) => (
                     <optgroup key={g.label} label={g.label}>
-                      {g.items.map((opt) => (
-                        <option key={opt.id} value={opt.id} title={modelOptionTitle(opt)}>
-                          {modelOptionText(opt)}
+                      {g.items.map((f) => (
+                        <option key={f.familyId} value={f.familyId} title={familyOptionTitle(f)}>
+                          {familyOptionText(f)}
                         </option>
                       ))}
                     </optgroup>
                   ))}
                 </select>
+                <div className="strategy-effort-toggles" title="預設 Low；Medium／High 互斥">
+                  {showEffortToggles ? (
+                    <>
+                      <label className={!canMedium ? "is-disabled" : undefined}>
+                        <input
+                          type="checkbox"
+                          checked={uiEffort === "medium"}
+                          disabled={metaSaving || streaming || !canMedium || !fam}
+                          onChange={(e) => {
+                            if (!fam) return;
+                            patchMemberModel(
+                              i,
+                              resolveFamilyModelId(fam, e.target.checked ? "medium" : "low"),
+                            );
+                          }}
+                        />
+                        <span>Medium</span>
+                      </label>
+                      <label className={!canHigh ? "is-disabled" : undefined}>
+                        <input
+                          type="checkbox"
+                          checked={uiEffort === "high"}
+                          disabled={metaSaving || streaming || !canHigh || !fam}
+                          onChange={(e) => {
+                            if (!fam) return;
+                            patchMemberModel(
+                              i,
+                              resolveFamilyModelId(fam, e.target.checked ? "high" : "low"),
+                            );
+                          }}
+                        />
+                        <span>High</span>
+                      </label>
+                    </>
+                  ) : (
+                    <span className="muted strategy-effort-fixed">
+                      {uiEffort ? uiEffort : "—"}
+                    </span>
+                  )}
+                </div>
                 <input
                   value={m.label}
                   maxLength={80}
@@ -1218,7 +1316,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                   移除
                 </button>
               </li>
-            ))}
+              );
+            })}
           </ul>
           <div className="row" style={{ justifyContent: "flex-end", gap: 8 }}>
             <button type="button" className="ghost" disabled={metaSaving} onClick={() => setSettingsOpen(false)}>
@@ -1260,7 +1359,9 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
             {pendingUser ? (
               <div className="strategy-msg strategy-msg-user is-pending">
-                <div className="strategy-msg-role">你（網頁）· 送出中</div>
+                <div className="strategy-msg-role">
+                  {generating ? "你（網頁）· 送出中" : "你（網頁）"}
+                </div>
                 <pre className="strategy-msg-body">{pendingUser}</pre>
               </div>
             ) : null}
@@ -1314,24 +1415,18 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               placeholder={
                 detail.session.status === "closed"
                   ? "會議室已關閉"
-                  : committing
-                    ? "同步中，可先打字；完成前無法再次送出"
-                    : "在會議室發言（Enter 送出，Shift+Enter 換行）"
+                  : "在會議室發言（Enter 送出，Shift+Enter 換行）"
               }
               onChange={(e) => onDraftChange(e.target.value)}
               onKeyDown={onKeyDown}
             />
             <div className="row" style={{ justifyContent: "space-between", gap: 8 }}>
               <span className="muted" style={{ fontSize: 12 }}>
-                {committing ? "同步中…" : "每次發言會依 token 扣點"}
+                每次發言會依 token 扣點
               </span>
               {generating ? (
                 <button type="button" className="strategy-stop-btn" onClick={stopGeneration}>
                   停止生成
-                </button>
-              ) : committing ? (
-                <button type="button" disabled>
-                  同步中
                 </button>
               ) : (
                 <button type="submit" disabled={!draft.trim() || detail.session.status === "closed"}>
