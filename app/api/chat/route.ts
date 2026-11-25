@@ -186,45 +186,12 @@ export async function POST(req: Request) {
       }
     }
 
-    // 先寫入本輪語氣／事實記憶，再組裝注入（避免本輪 style 趕不上注入）
-    try {
-      await applyPersonaFromUserMessage({
-        userId: sessionUser ? userId : null,
-        conversationId: convId,
-        content: upstreamContent,
-        sourceMessageId: userMsgId,
-      });
-    } catch (memErr) {
-      console.warn("[chat] persona remember failed", memErr instanceof Error ? memErr.message : memErr);
-    }
-
     const workspaceId = sessionUser && typeof body.strategyWorkspaceId === "string" ? body.strategyWorkspaceId : "";
-    const [userMemoryCtx, styleOverrideCtx, stateNoteCtx, workspaceCtx] = await Promise.all([
-      sessionUser ? buildUserMemoryContext(userId, convId).then((s) => s || "") : Promise.resolve(""),
-      buildStyleOverrideContext(sessionUser ? userId : null, convId),
-      buildConversationStateContext(convId),
-      workspaceId
-        ? buildWorkspaceBrief(userId, workspaceId)
-            .then((r) =>
-              r.text
-                ? `【使用者附加的策略主體：以下是主體共用記憶與各會議室的最新摘要，回答相關問題時以此為準】\n${r.text}`
-                : "",
-            )
-            .catch((e) => {
-              console.warn("[chat] workspace brief failed", e instanceof Error ? e.message : e);
-              return "";
-            })
-        : Promise.resolve(""),
-    ]);
-    // 事實／狀態 → 非當前指令；語氣 → 獨立 styleOverride 通道
-    const extraSystemContext =
-      [stateNoteCtx, userMemoryCtx, workspaceCtx].filter((s) => s.trim()).join("\n\n") || undefined;
-    const styleOverrideContext = styleOverrideCtx.trim() || undefined;
-
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
         const send = (obj: unknown) => controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
+        // 問話一入庫立刻通知前端置頂側欄（不必等記憶／workspace context）
         send({ type: "conversation", conversationId: convId });
         const announceAuto = () => {
           if (!autoDecision) return;
@@ -237,6 +204,41 @@ export async function POST(req: Request) {
           });
         };
         announceAuto();
+
+        // 先寫入本輪語氣／事實記憶，再組裝注入（避免本輪 style 趕不上注入）
+        try {
+          await applyPersonaFromUserMessage({
+            userId: sessionUser ? userId : null,
+            conversationId: convId,
+            content: upstreamContent,
+            sourceMessageId: userMsgId,
+          });
+        } catch (memErr) {
+          console.warn("[chat] persona remember failed", memErr instanceof Error ? memErr.message : memErr);
+        }
+
+        const [userMemoryCtx, styleOverrideCtx, stateNoteCtx, workspaceCtx] = await Promise.all([
+          sessionUser ? buildUserMemoryContext(userId, convId).then((s) => s || "") : Promise.resolve(""),
+          buildStyleOverrideContext(sessionUser ? userId : null, convId),
+          buildConversationStateContext(convId),
+          workspaceId
+            ? buildWorkspaceBrief(userId, workspaceId)
+                .then((r) =>
+                  r.text
+                    ? `【使用者附加的策略主體：以下是主體共用記憶與各會議室的最新摘要，回答相關問題時以此為準】\n${r.text}`
+                    : "",
+                )
+                .catch((e) => {
+                  console.warn("[chat] workspace brief failed", e instanceof Error ? e.message : e);
+                  return "";
+                })
+            : Promise.resolve(""),
+        ]);
+        // 事實／狀態 → 非當前指令；語氣 → 獨立 styleOverride 通道
+        const extraSystemContext =
+          [stateNoteCtx, userMemoryCtx, workspaceCtx].filter((s) => s.trim()).join("\n\n") || undefined;
+        const styleOverrideContext = styleOverrideCtx.trim() || undefined;
+
         let answer = "";
         let settled = false;
         let lastSourceId = "";

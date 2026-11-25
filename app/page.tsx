@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 import { extractOfficeAttachmentText, isOfficeAttachment } from "@/lib/office-attachments";
 import {
   DEFAULT_MAX_CHARS_PER_PART,
@@ -1288,6 +1289,21 @@ export default function ChatPage() {
     }
   }, [activeId, hasOlderMessages, loadingOlder, busy, messages]);
 
+  /** 問話中強制置頂的 id；避免中途 refresh 又被舊排序蓋掉 */
+  const pinnedConvTopRef = useRef<string | null>(null);
+
+  const orderConversations = useCallback((list: Conversation[]) => {
+    const sorted = [...list].sort(
+      (a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0),
+    );
+    const pin = pinnedConvTopRef.current;
+    if (!pin) return sorted;
+    const idx = sorted.findIndex((c) => c.id === pin);
+    if (idx <= 0) return sorted;
+    const item = sorted[idx]!;
+    return [item, ...sorted.slice(0, idx), ...sorted.slice(idx + 1)];
+  }, []);
+
   const refreshConversations = useCallback(async () => {
     const res = await fetch("/api/conversations");
     if (!res.ok) {
@@ -1296,44 +1312,47 @@ export default function ChatPage() {
     }
     const raw = (await res.json()) as Conversation[];
     const list = Array.isArray(raw) ? raw : [];
-    // 保險：依 updatedAt 新→舊（與後端 ORDER BY 一致）
-    list.sort((a, b) => (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0));
-    setConversations(list);
-  }, []);
+    setConversations(orderConversations(list));
+  }, [orderConversations]);
 
-  /** 使用者剛問話：立刻把該對話拉到側欄最上（不必等 AI 跑完才 refresh） */
+  /** 使用者剛問話：立刻把該對話拉到側欄最上（Cursor 式，不必等 AI 跑完） */
   const bumpConversationToTop = useCallback((id: string, patch?: Partial<Conversation>) => {
     if (!id) return;
     const now = Date.now();
-    setConversations((list) => {
-      const idx = list.findIndex((c) => c.id === id);
-      if (idx < 0) {
-        return [
-          {
-            id,
-            title: patch?.title?.trim() || "新對話",
-            model: patch?.model || "",
-            updatedAt: now,
-            ...patch,
-          },
-          ...list,
-        ];
-      }
-      const cur = list[idx]!;
-      const next: Conversation = {
-        ...cur,
-        ...patch,
-        id,
-        title: patch?.title?.trim() || cur.title,
-        updatedAt: now,
-      };
-      if (idx === 0) {
-        const copy = list.slice();
-        copy[0] = next;
-        return copy;
-      }
-      return [next, ...list.slice(0, idx), ...list.slice(idx + 1)];
-    });
+    pinnedConvTopRef.current = id;
+    const apply = () => {
+      setConversations((list) => {
+        const idx = list.findIndex((c) => c.id === id);
+        if (idx < 0) {
+          return [
+            {
+              id,
+              title: patch?.title?.trim() || "新對話",
+              model: patch?.model || "",
+              updatedAt: now,
+              ...patch,
+            },
+            ...list,
+          ];
+        }
+        const cur = list[idx]!;
+        const next: Conversation = {
+          ...cur,
+          ...patch,
+          id,
+          title: patch?.title?.trim() || cur.title,
+          updatedAt: now,
+        };
+        if (idx === 0) {
+          const copy = list.slice();
+          copy[0] = next;
+          return copy;
+        }
+        return [next, ...list.slice(0, idx), ...list.slice(idx + 1)];
+      });
+    };
+    // 同步上畫面，避免被隨後的 busy／串流 render 拖到結束才看到
+    flushSync(apply);
   }, []);
   const refreshTrashed = useCallback(async () => {
     const res = await fetch("/api/conversations?trash=1");
@@ -2641,6 +2660,9 @@ export default function ChatPage() {
     };
     const startedConvId = activeId;
 
+    // Cursor 式：一送出就置頂（先於清空輸入／busy，立刻看得到）
+    if (startedConvId) bumpConversationToTop(startedConvId, { model: modelId });
+
     stopVoiceInput();
 
     if (!opts?.regenerate) {
@@ -2657,8 +2679,6 @@ export default function ChatPage() {
     setBusy(true);
     stickToBottomRef.current = true;
     setShowJumpLatest(false);
-    // 最後一次問話 → 側欄立刻置頂（既有對話）
-    if (activeId) bumpConversationToTop(activeId, { model: modelId });
     const displayContent =
       imgs.length > 0 ? `[已上傳 ${imgs.length} 張圖片]\n${content || "（見附圖）"}` : content;
     const userMsgId = crypto.randomUUID();
@@ -2735,12 +2755,13 @@ export default function ChatPage() {
           const ev = JSON.parse(line);
           if (ev.type === "conversation") {
             setActiveId(ev.conversationId);
-            // 新開對話：一有 id 就插入側欄最上
+            // 新開／既有：伺服器確認問話入庫後再置頂一次（並提早刷列表）
             const titleGuess =
               typeof ev.title === "string" && ev.title.trim()
                 ? ev.title.trim().slice(0, 80)
                 : displayContent.replace(/\s+/g, " ").trim().slice(0, 30) || "新對話";
             bumpConversationToTop(ev.conversationId, { title: titleGuess, model: modelId });
+            void refreshConversations();
           }
           if (ev.type === "auto_route")
             patch((m) => ({ ...m, model: ev.modelId, autoRouted: true, autoLane: ev.lane }));
@@ -2844,7 +2865,9 @@ export default function ChatPage() {
         }
       }
       setBusy(false);
-      refreshConversations();
+      void refreshConversations().finally(() => {
+        pinnedConvTopRef.current = null;
+      });
       if (authUser) refreshWallet();
       else void refreshMe();
     }
