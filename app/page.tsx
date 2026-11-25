@@ -108,11 +108,21 @@ function loadConvSessionMap(): Record<string, ConvOpenCache> {
   }
 }
 
-function readConvSession(id: string): ConvOpenCache | null {
+/** 單次開對話請求上限；逾時就放棄，避免閒置後的死連線把「載入對話…」掛死 */
+const CONV_FETCH_TIMEOUT_MS = 12_000;
+
+type InflightJob<T> = {
+  promise: Promise<T>;
+  abort: () => void;
+  startedAt: number;
+  priority: "high" | "low";
+};
+
+function readConvSession(id: string, allowStale = false): ConvOpenCache | null {
   try {
     const hit = loadConvSessionMap()[id];
-    if (!hit || Date.now() - hit.at > CONV_CACHE_TTL_MS) return null;
-    if (!Array.isArray(hit.messages)) return null;
+    if (!hit || !Array.isArray(hit.messages)) return null;
+    if (!allowStale && Date.now() - hit.at > CONV_CACHE_TTL_MS) return null;
     return hit;
   } catch {
     return null;
@@ -1344,7 +1354,9 @@ export default function ChatPage() {
   const openConvReqRef = useRef(0);
   const activeIdRef = useRef<string | null>(null);
   const convCacheRef = useRef<Map<string, ConvOpenCache>>(new Map());
-  const convInflightRef = useRef<Map<string, Promise<ConvOpenCache | null>>>(new Map());
+  const convInflightRef = useRef<Map<string, InflightJob<ConvOpenCache | null>>>(new Map());
+  /** 使用者正在點開對話；這段時間背景預取先讓路 */
+  const convUserFetchRef = useRef(false);
   /** 側欄由上到下的順序，快取滿了先丟最下面、沒在預取範圍裡的 */
   const convOrderRef = useRef<Map<string, number>>(new Map());
   const convKeepRef = useRef<Set<string>>(new Set());
@@ -1362,7 +1374,7 @@ export default function ChatPage() {
   const openStrategyAbortRef = useRef<AbortController | null>(null);
   const openStrategyReqRef = useRef(0);
   const strategyCacheRef = useRef<Map<string, StrategyCacheEntry>>(new Map());
-  const strategyInflightRef = useRef<Map<string, Promise<StrategySessionDetail | null>>>(new Map());
+  const strategyInflightRef = useRef<Map<string, InflightJob<StrategySessionDetail | null>>>(new Map());
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1668,6 +1680,22 @@ export default function ChatPage() {
   }, [strategyBusy]);
 
   useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState !== "visible") return;
+      const now = Date.now();
+      for (const map of [convInflightRef.current, strategyInflightRef.current]) {
+        for (const [id, job] of map) {
+          if (job.priority === "high" && now - job.startedAt < CONV_FETCH_TIMEOUT_MS) continue;
+          job.abort();
+          map.delete(id);
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, []);
+
+  useEffect(() => {
     const ids = conversations.map((c) => c.id);
     const order = new Map<string, number>();
     ids.forEach((id, i) => order.set(id, i));
@@ -1689,6 +1717,7 @@ export default function ChatPage() {
         document.hidden ||
         busyRef.current ||
         chatOpeningRef.current ||
+        convUserFetchRef.current ||
         strategyBusyRef.current ||
         convListInflightRef.current ||
         (recentRoomId != null && strategyInflightRef.current.has(recentRoomId))
@@ -1700,7 +1729,7 @@ export default function ChatPage() {
       i += 1;
       if (id) prefetchConversation(id);
       if (i >= rest.length) return;
-      const pending = id ? convInflightRef.current.get(id) : undefined;
+      const pending = id ? convInflightRef.current.get(id)?.promise : undefined;
       const next = () => {
         if (!cancelled) timer = window.setTimeout(step, pending ? 700 : 80);
       };
@@ -1733,6 +1762,7 @@ export default function ChatPage() {
         document.hidden ||
         busyRef.current ||
         chatOpeningRef.current ||
+        convUserFetchRef.current ||
         strategyBusyRef.current ||
         convListInflightRef.current ||
         strategyListInflightRef.current ||
@@ -1743,7 +1773,7 @@ export default function ChatPage() {
       }
       const id = rest[index]?.id;
       if (id) prefetchStrategySession(id, { priority: "low" });
-      const pending = id ? strategyInflightRef.current.get(id) : undefined;
+      const pending = id ? strategyInflightRef.current.get(id)?.promise : undefined;
       const next = () => {
         if (!cancelled) timer = window.setTimeout(() => prefetchRest(index + 1), pending ? 700 : 80);
       };
@@ -1757,7 +1787,7 @@ export default function ChatPage() {
         return;
       }
       prefetchStrategySession(recent.id, { priority: "high" });
-      const pending = strategyInflightRef.current.get(recent.id);
+      const pending = strategyInflightRef.current.get(recent.id)?.promise;
       const startRest = () => {
         if (!cancelled) timer = window.setTimeout(() => prefetchRest(0), 600);
       };
@@ -1968,14 +1998,27 @@ export default function ChatPage() {
     };
   }, []);
 
-  function getConvCache(id: string): ConvOpenCache | null {
+  function getConvCache(id: string, allowStale = false): ConvOpenCache | null {
     const mem = convCacheRef.current.get(id);
-    if (mem && Date.now() - mem.at <= CONV_CACHE_TTL_MS) return mem;
-    if (mem) convCacheRef.current.delete(id);
-    const ss = readConvSession(id);
+    if (mem) {
+      const fresh = Date.now() - mem.at <= CONV_CACHE_TTL_MS;
+      if (fresh || allowStale) return mem;
+      convCacheRef.current.delete(id);
+    }
+    const ss = readConvSession(id, allowStale);
     if (!ss) return null;
     convCacheRef.current.set(id, ss);
     return ss;
+  }
+
+  function abortBackgroundPrefetch() {
+    for (const map of [convInflightRef.current, strategyInflightRef.current]) {
+      for (const [id, job] of map) {
+        if (job.priority !== "low") continue;
+        job.abort();
+        map.delete(id);
+      }
+    }
   }
 
   function putConvCache(id: string, entry: ConvOpenCache) {
@@ -2002,30 +2045,68 @@ export default function ChatPage() {
     id: string,
     opts?: { priority?: "high" | "low" },
   ): Promise<ConvOpenCache | null> {
-    const inflight = convInflightRef.current.get(id);
-    if (inflight) return inflight;
     const priority = opts?.priority ?? "high";
-    const p = (async () => {
-      const res = await fetch(`/api/conversations/${id}?limit=${INITIAL_MESSAGE_WINDOW}`, {
-        priority,
-      } as RequestInit);
-      if (!res.ok) return null;
-      const data = await res.json();
-      const entry: ConvOpenCache = {
-        messages: markAutoRouted((data.messages as Message[]) ?? []),
-        hasMore: Boolean(data.hasMore),
-        model: typeof data.conversation?.model === "string" ? data.conversation.model : undefined,
-        at: Date.now(),
-      };
-      putConvCache(id, entry);
-      return entry;
-    })()
-      .catch(() => null)
-      .finally(() => {
-        convInflightRef.current.delete(id);
-      });
-    convInflightRef.current.set(id, p);
-    return p;
+    const existing = convInflightRef.current.get(id);
+    if (existing) {
+      const stale = Date.now() - existing.startedAt > 8_000;
+      const preempt = priority === "high" && (existing.priority === "low" || stale);
+      if (!preempt) return existing.promise;
+      existing.abort();
+      convInflightRef.current.delete(id);
+    }
+    const controllers: AbortController[] = [];
+    let dropped = false;
+    const once = async (): Promise<ConvOpenCache | null> => {
+      const controller = new AbortController();
+      controllers.push(controller);
+      const timer = window.setTimeout(() => controller.abort(), CONV_FETCH_TIMEOUT_MS);
+      try {
+        const res = await fetch(`/api/conversations/${id}?limit=${INITIAL_MESSAGE_WINDOW}`, {
+          priority,
+          signal: controller.signal,
+          cache: "no-store",
+        } as RequestInit);
+        if (!res.ok) return null;
+        const data = await res.json();
+        const entry: ConvOpenCache = {
+          messages: markAutoRouted((data.messages as Message[]) ?? []),
+          hasMore: Boolean(data.hasMore),
+          model: typeof data.conversation?.model === "string" ? data.conversation.model : undefined,
+          at: Date.now(),
+        };
+        putConvCache(id, entry);
+        return entry;
+      } finally {
+        window.clearTimeout(timer);
+      }
+    };
+    const job: InflightJob<ConvOpenCache | null> = {
+      promise: Promise.resolve(null),
+      abort: () => {
+        dropped = true;
+        for (const controller of controllers) controller.abort();
+      },
+      startedAt: Date.now(),
+      priority,
+    };
+    const promise = (async () => {
+      try {
+        return await once();
+      } catch {
+        if (dropped || priority !== "high") return null;
+        try {
+          job.startedAt = Date.now();
+          return await once();
+        } catch {
+          return null;
+        }
+      }
+    })().finally(() => {
+      if (convInflightRef.current.get(id) === job) convInflightRef.current.delete(id);
+    });
+    job.promise = promise;
+    convInflightRef.current.set(id, job);
+    return promise;
   }
 
   function prefetchConversation(id: string) {
@@ -2054,22 +2135,26 @@ export default function ChatPage() {
     setLoadingOlder(false);
     setComposerHint(null);
 
-    const cached = getConvCache(id);
-    if (cached) {
-      applyConvEntry(id, cached);
+    // 放很久後，背景預取可能佔著死連線；點下去先清掉，改走這次的請求
+    abortBackgroundPrefetch();
+    const cached = getConvCache(id, true);
+    const cachedUsable = cached && cached.messages.length > 0 ? cached : null;
+    if (cachedUsable) {
+      applyConvEntry(id, cachedUsable);
       // 剛預取／剛看過：不再打一輪，避免點開又等網路
-      if (Date.now() - cached.at < 20_000) return;
+      if (Date.now() - cachedUsable.at < 20_000) return;
     } else {
       setHasOlderMessages(false);
       setMessages([]);
       setChatOpening(true);
     }
 
+    convUserFetchRef.current = true;
     try {
-      const entry = await ensureConvFetch(id);
+      const entry = await ensureConvFetch(id, { priority: "high" });
       if (reqId !== openConvReqRef.current || activeIdRef.current !== id) return;
       if (!entry) {
-        if (!cached) {
+        if (!cachedUsable) {
           if (activeIdRef.current === id) activeIdRef.current = null;
           setActiveId(null);
           setMessages([]);
@@ -2084,7 +2169,9 @@ export default function ChatPage() {
     } catch (e) {
       if (reqId !== openConvReqRef.current) return;
       setChatOpening(false);
-      if (!cached) setComposerHint(e instanceof Error ? e.message : "載入對話失敗，請稍後再試。");
+      if (!cachedUsable) setComposerHint(e instanceof Error ? e.message : "載入對話失敗，請稍後再試。");
+    } finally {
+      if (reqId === openConvReqRef.current) convUserFetchRef.current = false;
     }
   }
 
@@ -2232,13 +2319,27 @@ export default function ChatPage() {
     id: string,
     opts?: { priority?: "high" | "low" },
   ): Promise<StrategySessionDetail | null> {
-    const inflight = strategyInflightRef.current.get(id);
-    if (inflight) return inflight;
     const priority = opts?.priority ?? "high";
-    const p = (async () => {
+    const existing = strategyInflightRef.current.get(id);
+    if (existing) {
+      const stale = Date.now() - existing.startedAt > 8_000;
+      const preempt = priority === "high" && (existing.priority === "low" || stale);
+      if (!preempt) return existing.promise;
+      existing.abort();
+      strategyInflightRef.current.delete(id);
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), CONV_FETCH_TIMEOUT_MS);
+    const job: InflightJob<StrategySessionDetail | null> = {
+      promise: Promise.resolve(null),
+      abort: () => controller.abort(),
+      startedAt: Date.now(),
+      priority,
+    };
+    const promise = (async () => {
       const res = await fetch(
         `/api/strategy/sessions/${encodeURIComponent(id)}?limit=40&lite=1`,
-        { cache: "no-store", priority } as RequestInit,
+        { cache: "no-store", priority, signal: controller.signal } as RequestInit,
       );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return null;
@@ -2248,10 +2349,12 @@ export default function ChatPage() {
     })()
       .catch(() => null)
       .finally(() => {
-        strategyInflightRef.current.delete(id);
+        window.clearTimeout(timer);
+        if (strategyInflightRef.current.get(id) === job) strategyInflightRef.current.delete(id);
       });
-    strategyInflightRef.current.set(id, p);
-    return p;
+    job.promise = promise;
+    strategyInflightRef.current.set(id, job);
+    return promise;
   }
 
   function prefetchStrategySession(id: string, opts?: { priority?: "high" | "low" }) {
