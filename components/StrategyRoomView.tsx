@@ -1350,8 +1350,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               </div>
             ) : null}
             {detail.messages.length === 0 && !pendingUser && streamBubbles.length === 0 ? (
-              <div className="muted" style={{ fontSize: 13, padding: "12px 0" }}>
-                尚無訊息
+              <div className="muted strategy-room-loading-copy">
+                {busy ? "載入中…" : "尚無訊息"}
               </div>
             ) : (
               <HistoryMessages messages={detail.messages} revealIds={revealIds} onProgress={scrollIfSticky} />

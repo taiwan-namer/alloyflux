@@ -64,6 +64,26 @@ interface Conversation {
 /** 進入對話先顯示最近幾則，往上滑再載入更舊（降低長串 Markdown 卡頓） */
 const INITIAL_MESSAGE_WINDOW = 5;
 const OLDER_MESSAGE_PAGE = 10;
+/** 會議室記憶體快取：再點／切房秒開；懸停預取共用同一 in-flight */
+const STRATEGY_CACHE_TTL_MS = 90_000;
+const STRATEGY_CACHE_MAX = 12;
+
+type StrategyCacheEntry = { detail: StrategySessionDetail; at: number };
+
+function normalizeStrategyDetail(data: StrategySessionDetail): StrategySessionDetail {
+  return {
+    ...data,
+    dispatch: Array.isArray(data.dispatch) ? data.dispatch : [],
+    hasMore: Boolean(data.hasMore),
+    nextCursor: data.nextCursor ?? null,
+    messageTotal:
+      typeof data.messageTotal === "number"
+        ? data.messageTotal
+        : Array.isArray(data.messages)
+          ? data.messages.length
+          : 0,
+  };
+}
 
 interface Message {
   id: string;
@@ -1194,6 +1214,8 @@ export default function ChatPage() {
   const activeIdRef = useRef<string | null>(null);
   const openStrategyAbortRef = useRef<AbortController | null>(null);
   const openStrategyReqRef = useRef(0);
+  const strategyCacheRef = useRef<Map<string, StrategyCacheEntry>>(new Map());
+  const strategyInflightRef = useRef<Map<string, Promise<StrategySessionDetail | null>>>(new Map());
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1720,13 +1742,78 @@ export default function ChatPage() {
     }
   }
 
-  async function openStrategySession(id: string) {
+  function putStrategyCache(id: string, detail: StrategySessionDetail) {
+    const map = strategyCacheRef.current;
+    map.set(id, { detail, at: Date.now() });
+    if (map.size <= STRATEGY_CACHE_MAX) return;
+    let oldestId: string | null = null;
+    let oldestAt = Infinity;
+    for (const [k, v] of map) {
+      if (v.at < oldestAt) {
+        oldestAt = v.at;
+        oldestId = k;
+      }
+    }
+    if (oldestId) map.delete(oldestId);
+  }
+
+  function getStrategyCache(id: string): StrategySessionDetail | null {
+    const hit = strategyCacheRef.current.get(id);
+    if (!hit) return null;
+    if (Date.now() - hit.at > STRATEGY_CACHE_TTL_MS) {
+      strategyCacheRef.current.delete(id);
+      return null;
+    }
+    return hit.detail;
+  }
+
+  function ensureStrategyFetch(id: string): Promise<StrategySessionDetail | null> {
+    const inflight = strategyInflightRef.current.get(id);
+    if (inflight) return inflight;
+    const p = (async () => {
+      const res = await fetch(
+        `/api/strategy/sessions/${encodeURIComponent(id)}?limit=40&lite=1`,
+        { cache: "no-store" },
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) return null;
+      const detail = normalizeStrategyDetail(data as StrategySessionDetail);
+      putStrategyCache(id, detail);
+      return detail;
+    })()
+      .catch(() => null)
+      .finally(() => {
+        strategyInflightRef.current.delete(id);
+      });
+    strategyInflightRef.current.set(id, p);
+    return p;
+  }
+
+  function prefetchStrategySession(id: string) {
+    if (!id) return;
+    if (getStrategyCache(id)) return;
+    if (strategyInflightRef.current.has(id)) return;
+    void ensureStrategyFetch(id);
+  }
+
+  function applyStrategyDetail(
+    detail: StrategySessionDetail,
+    opts: { switching: boolean; refreshMemory: boolean },
+  ) {
+    setStrategyDetail(detail);
+    putStrategyCache(detail.session.id, detail);
+    const ws = strategyWorkspaces.find((w) => w.id === detail.session.workspaceId);
+    if (opts.refreshMemory && (opts.switching || !wsMemoryDirty)) {
+      setWsMemoryDraft(ws?.memory.notes ?? "");
+    }
+  }
+
+  async function openStrategySession(id: string, opts?: { force?: boolean }) {
     const reqId = ++openStrategyReqRef.current;
     openStrategyAbortRef.current?.abort();
     const ac = new AbortController();
     openStrategyAbortRef.current = ac;
 
-    setStrategyBusy(true);
     setStrategyError(null);
     setViewMode((m) => (m === "split" && canSplit ? "split" : "strategy"));
     if (!canSplit) setSidebarOpen(false);
@@ -1735,7 +1822,23 @@ export default function ChatPage() {
       setStrategyDraft("");
       setDispatchSelected(new Set());
       setWsMemoryDirty(false);
-      // 切房立刻清空舊訊息，避免連點時先閃第 2 間再跳第 3 間
+    }
+
+    const cached = opts?.force ? null : getStrategyCache(id);
+    if (cached) {
+      // 快取命中：立刻上屏，背景靜默重抓
+      applyStrategyDetail(cached, { switching, refreshMemory: true });
+      setStrategyBusy(false);
+      void ensureStrategyFetch(id).then((fresh) => {
+        if (reqId !== openStrategyReqRef.current || ac.signal.aborted || !fresh) return;
+        applyStrategyDetail(fresh, { switching: false, refreshMemory: !wsMemoryDirty });
+      });
+      return;
+    }
+
+    setStrategyBusy(true);
+    if (switching) {
+      // 無快取切房：先空殼＋載入中，勿閃上一間訊息
       setStrategyDetail((prev) =>
         prev
           ? {
@@ -1752,35 +1855,16 @@ export default function ChatPage() {
           : prev,
       );
     }
+
     try {
-      // #8：開房首屏只要最新 40 則；更早用「載入更早」；lite=1 跳過報告內文
-      const res = await fetch(
-        `/api/strategy/sessions/${encodeURIComponent(id)}?limit=40&lite=1`,
-        { cache: "no-store", signal: ac.signal },
-      );
-      if (reqId !== openStrategyReqRef.current) return;
-      const data = await res.json().catch(() => ({}));
-      if (reqId !== openStrategyReqRef.current) return;
-      if (!res.ok) {
+      const detail = await ensureStrategyFetch(id);
+      if (reqId !== openStrategyReqRef.current || ac.signal.aborted) return;
+      if (!detail) {
         setStrategyDetail(null);
-        setStrategyError(typeof data.error === "string" ? data.error : "無法載入會議室");
+        setStrategyError("無法載入會議室");
         return;
       }
-      const detail = data as StrategySessionDetail;
-      setStrategyDetail({
-        ...detail,
-        dispatch: Array.isArray(detail.dispatch) ? detail.dispatch : [],
-        hasMore: Boolean((data as StrategySessionDetail).hasMore),
-        nextCursor: (data as StrategySessionDetail).nextCursor ?? null,
-        messageTotal:
-          typeof (data as StrategySessionDetail).messageTotal === "number"
-            ? (data as StrategySessionDetail).messageTotal
-            : Array.isArray(detail.messages)
-              ? detail.messages.length
-              : 0,
-      });
-      const ws = strategyWorkspaces.find((w) => w.id === detail.session.workspaceId);
-      if (switching || !wsMemoryDirty) setWsMemoryDraft(ws?.memory.notes ?? "");
+      applyStrategyDetail(detail, { switching, refreshMemory: true });
     } catch (e) {
       if (ac.signal.aborted || reqId !== openStrategyReqRef.current) return;
       setStrategyDetail(null);
@@ -1973,7 +2057,7 @@ export default function ChatPage() {
         nextCursor = strategyDetail.nextCursor ?? null;
       }
     }
-    setStrategyDetail({
+    const next: StrategySessionDetail = {
       ...strategyDetail,
       session: { ...strategyDetail.session, ...data.session },
       dossier: data.dossier ?? strategyDetail.dossier,
@@ -1989,7 +2073,9 @@ export default function ChatPage() {
           : typeof data.messageCount === "number"
             ? data.messageCount
             : strategyDetail.messageTotal,
-    });
+    };
+    setStrategyDetail(next);
+    putStrategyCache(next.session.id, next);
     if (!wsMemoryDirty && typeof data.workspaceMemoryNotes === "string") {
       setWsMemoryDraft(data.workspaceMemoryNotes);
     }
@@ -2005,13 +2091,15 @@ export default function ChatPage() {
       if (!prev) return prev;
       const seen = new Set(prev.messages.map((m) => m.id));
       const older = payload.messages.filter((m) => !seen.has(m.id));
-      return {
+      const next = {
         ...prev,
         messages: [...older, ...prev.messages],
         hasMore: payload.hasMore,
         nextCursor: payload.nextCursor,
         messageTotal: payload.messageTotal || prev.messageTotal,
       };
+      putStrategyCache(prev.session.id, next);
+      return next;
     });
   }
 
@@ -2933,6 +3021,8 @@ export default function ChatPage() {
                           key={s.id}
                           className={`conv-item strategy-session-item${strategyDetail?.session.id === s.id && viewMode !== "chat" ? " active" : ""}`}
                           onClick={() => void openStrategySession(s.id)}
+                          onMouseEnter={() => prefetchStrategySession(s.id)}
+                          onFocus={() => prefetchStrategySession(s.id)}
                           title={`${s.name}（${strategyStatusLabel(s.status)}）${s.topic ? `\n主題：${s.topic}` : ""}`}
                         >
                           <span className="title">{s.name || "未命名會議室"}</span>
@@ -3655,10 +3745,11 @@ export default function ChatPage() {
           onBackToChat={() => setViewMode("chat")}
           onOpenSidebar={() => setSidebarOpen(true)}
           onRefresh={() => {
-            if (strategyDetail?.session.id) void openStrategySession(strategyDetail.session.id);
+            if (strategyDetail?.session.id) void openStrategySession(strategyDetail.session.id, { force: true });
           }}
-          onStreamCommitted={async (_sid) => {
-            // #9：不再整房重載；只背景刷側欄
+          onStreamCommitted={async (sid) => {
+            // #9：不再整房重載；只背景刷側欄；失效該房快取以免再開是舊的
+            strategyCacheRef.current.delete(sid);
             void refreshStrategySessions();
           }}
           onRefreshWallet={() => {
@@ -3675,6 +3766,26 @@ export default function ChatPage() {
           onPatchSessionMeta={patchStrategySessionMeta}
           wsMemorySaving={wsMemorySaving}
         />
+      ) : viewMode !== "chat" && strategyBusy ? (
+        <div className="strategy-room-view strategy-room-loading" aria-busy="true" aria-live="polite">
+          <div className="strategy-room-topbar">
+            <div className="strategy-room-topbar-left">
+              <strong className="strategy-room-title">載入會議室…</strong>
+            </div>
+          </div>
+          <div className="strategy-room-body">
+            <div className="strategy-room-main">
+              <div className="strategy-room-msg-list">
+                <p className="muted strategy-room-loading-copy">正在載入訊息，請稍候</p>
+                <div className="strategy-room-loading-bars" aria-hidden>
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {trashOpen && (
