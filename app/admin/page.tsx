@@ -725,23 +725,54 @@ export default function AdminPage() {
   }
 
   async function toggleSource(s: SourceRow) {
+    const nextEnabled = !s.enabled;
     setBusyId(s.id);
     setMsg(null);
+    // 樂觀更新：開關立刻翻轉，避免以為沒反應
+    setOv((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        sources: prev.sources.map((x) => (x.id === s.id ? { ...x, enabled: nextEnabled } : x)),
+      };
+    });
     try {
       const res = await fetch(`/api/sources/${encodeURIComponent(s.id)}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled: !s.enabled }),
+        body: JSON.stringify({ enabled: nextEnabled }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setMsg(data.error || (res.status === 403 ? "無權啟停此貨源（需供給者登入）" : "更新失敗"));
+        const err =
+          data.error ||
+          (res.status === 401
+            ? "請先登入後再啟停貨源"
+            : res.status === 403
+              ? "無權啟停此貨源"
+              : "更新失敗");
+        setMsg(err);
+        // 回滾樂觀更新
+        setOv((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            sources: prev.sources.map((x) => (x.id === s.id ? { ...x, enabled: s.enabled } : x)),
+          };
+        });
       } else {
-        setMsg(`${s.label} 已${s.enabled ? "停用" : "啟用"}`);
+        setMsg(`${s.label} 已${nextEnabled ? "啟用" : "停用"}`);
       }
       await refreshOverview();
     } catch {
       setMsg("更新失敗：網路錯誤");
+      setOv((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          sources: prev.sources.map((x) => (x.id === s.id ? { ...x, enabled: s.enabled } : x)),
+        };
+      });
     } finally {
       setBusyId(null);
     }
