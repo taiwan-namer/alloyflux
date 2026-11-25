@@ -101,6 +101,13 @@ function mergeNodeGrounding(
   }
 }
 
+function stableAgSessionId(affinity: string): string {
+  let h = 0;
+  for (let i = 0; i < affinity.length; i++) h = (Math.imul(31, h) + affinity.charCodeAt(i)) | 0;
+  const n = Math.abs(h) * 1_000_000 + (affinity.length % 1_000_000);
+  return `-${n || 1}`;
+}
+
 async function* geminiStream(
   creds: LocalCreds,
   modelId: string,
@@ -109,6 +116,7 @@ async function* geminiStream(
   customSystemPrompt?: string,
   signal?: AbortSignal,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<AdapterEvent> {
   const project = creds.projectId || "default";
   const url =
@@ -119,8 +127,12 @@ async function* geminiStream(
   }));
   const sysText = buildNodeSystemText(extraSystemContext, customSystemPrompt, styleOverrideContext);
   const withSearch = supportsNativeGeminiSearch(modelId);
+  const affinity = (cacheAffinityId || `${project}:${modelId}`).trim();
 
-  const requestBody: Record<string, unknown> = { contents };
+  const requestBody: Record<string, unknown> = {
+    contents,
+    sessionId: stableAgSessionId(affinity),
+  };
   if (sysText) {
     requestBody.systemInstruction = {
       role: "user",
@@ -206,12 +218,16 @@ async function* chatgptStream(
   customSystemPrompt?: string,
   signal?: AbortSignal,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<AdapterEvent> {
+  const cacheKey = (cacheAffinityId || `${creds.accountId || "acct"}:${modelId}`).trim().slice(0, 128);
   const headers: Record<string, string> = {
     Authorization: `Bearer ${creds.accessToken}`,
     "Content-Type": "application/json",
     Accept: "text/event-stream",
     "OpenAI-Beta": "responses_websockets=2026-02-06",
+    "session-id": cacheKey,
+    "conversation-id": cacheKey,
   };
   if (creds.accountId) headers["ChatGPT-Account-Id"] = creds.accountId;
 
@@ -221,6 +237,7 @@ async function* chatgptStream(
     input: messages.map((m) => ({ role: m.role, content: m.content })),
     stream: true,
     store: false,
+    prompt_cache_key: cacheKey,
   };
   if (sysText) {
     reqBody.instructions = sysText;
@@ -276,9 +293,26 @@ export const antigravityAdapter: ProviderAdapter = {
   supports(providerKey) {
     return providerKey === "antigravity";
   },
-  async *run({ modelId, messages, extraSystemContext, customSystemPrompt, styleOverrideContext, signal }) {
+  async *run({
+    modelId,
+    messages,
+    extraSystemContext,
+    customSystemPrompt,
+    styleOverrideContext,
+    cacheAffinityId,
+    signal,
+  }) {
     const creds = loadCreds("gemini");
-    yield* geminiStream(creds, modelId, messages, extraSystemContext, customSystemPrompt, signal, styleOverrideContext);
+    yield* geminiStream(
+      creds,
+      modelId,
+      messages,
+      extraSystemContext,
+      customSystemPrompt,
+      signal,
+      styleOverrideContext,
+      cacheAffinityId,
+    );
   },
 };
 
@@ -287,8 +321,25 @@ export const chatgptCodexAdapter: ProviderAdapter = {
   supports(providerKey) {
     return providerKey === "chatgpt-codex";
   },
-  async *run({ modelId, messages, extraSystemContext, customSystemPrompt, styleOverrideContext, signal }) {
+  async *run({
+    modelId,
+    messages,
+    extraSystemContext,
+    customSystemPrompt,
+    styleOverrideContext,
+    cacheAffinityId,
+    signal,
+  }) {
     const creds = loadCreds("openai");
-    yield* chatgptStream(creds, modelId, messages, extraSystemContext, customSystemPrompt, signal, styleOverrideContext);
+    yield* chatgptStream(
+      creds,
+      modelId,
+      messages,
+      extraSystemContext,
+      customSystemPrompt,
+      signal,
+      styleOverrideContext,
+      cacheAffinityId,
+    );
   },
 };

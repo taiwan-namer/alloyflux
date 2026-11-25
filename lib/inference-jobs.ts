@@ -59,6 +59,8 @@ export interface InferenceJob {
   customSystemPrompt?: string;
   /** 使用者語氣／排版覆蓋（最高優先；不包「非當前指令」） */
   styleOverrideContext?: string;
+  /** Prompt cache 黏著鍵（不進簽章；節點用來帶 session-id／x-grok-conv-id 等） */
+  cacheAffinityId?: string;
   status: JobStatus;
   assignedNodeId: string | null;
   resultText: string;
@@ -114,12 +116,13 @@ function sha256(s: string): string {
   return createHash("sha256").update(s).digest("hex");
 }
 
-/** messages_json：舊格式為陣列；新格式為 { messages, extraSystemContext?, customSystemPrompt?, styleOverrideContext? } */
+/** messages_json：舊格式為陣列；新格式為 { messages, extraSystemContext?, …, cacheAffinityId? } */
 function parseJobMessagesJson(raw: string): {
   messages: ChatMessage[];
   extraSystemContext?: string;
   customSystemPrompt?: string;
   styleOverrideContext?: string;
+  cacheAffinityId?: string;
 } {
   const parsed = JSON.parse(raw) as
     | ChatMessage[]
@@ -128,6 +131,7 @@ function parseJobMessagesJson(raw: string): {
         extraSystemContext?: string;
         customSystemPrompt?: string;
         styleOverrideContext?: string;
+        cacheAffinityId?: string;
       };
   if (Array.isArray(parsed)) return { messages: parsed };
   return {
@@ -135,6 +139,7 @@ function parseJobMessagesJson(raw: string): {
     extraSystemContext: parsed.extraSystemContext?.trim() || undefined,
     customSystemPrompt: parsed.customSystemPrompt?.trim() || undefined,
     styleOverrideContext: parsed.styleOverrideContext?.trim() || undefined,
+    cacheAffinityId: parsed.cacheAffinityId?.trim() || undefined,
   };
 }
 
@@ -143,16 +148,19 @@ function serializeJobMessagesJson(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): string {
   const ctx = extraSystemContext?.trim();
   const custom = customSystemPrompt?.trim();
   const style = styleOverrideContext?.trim();
-  if (ctx || custom || style) {
+  const affinity = cacheAffinityId?.trim();
+  if (ctx || custom || style || affinity) {
     return JSON.stringify({
       messages,
       extraSystemContext: ctx || undefined,
       customSystemPrompt: custom || undefined,
       styleOverrideContext: style || undefined,
+      cacheAffinityId: affinity || undefined,
     });
   }
   return JSON.stringify(messages);
@@ -170,6 +178,7 @@ function rowToJob(r: Record<string, unknown>): InferenceJob {
     extraSystemContext: parsed.extraSystemContext,
     customSystemPrompt: parsed.customSystemPrompt,
     styleOverrideContext: parsed.styleOverrideContext,
+    cacheAffinityId: parsed.cacheAffinityId,
     status: r.status as JobStatus,
     assignedNodeId: (r.assigned_node_id as string) ?? null,
     resultText: (r.result_text as string) ?? "",
@@ -244,10 +253,12 @@ export async function enqueueInferenceJob(input: {
   extraSystemContext?: string;
   customSystemPrompt?: string;
   styleOverrideContext?: string;
+  cacheAffinityId?: string;
 }): Promise<InferenceJob> {
   const ctx = input.extraSystemContext?.trim() || undefined;
   const custom = input.customSystemPrompt?.trim() || undefined;
   const style = input.styleOverrideContext?.trim() || undefined;
+  const affinity = input.cacheAffinityId?.trim() || undefined;
   const payload = payloadCanonical(input.messages, input.modelId, input.upstreamModel, ctx, custom, style);
   if (Buffer.byteLength(payload, "utf8") > MAX_MESSAGES_BYTES) {
     throw Object.assign(new Error("訊息過大"), { status: 413 });
@@ -268,7 +279,7 @@ export async function enqueueInferenceJob(input: {
       input.modelId,
       input.providerKey,
       input.upstreamModel,
-      serializeJobMessagesJson(input.messages, ctx, custom, style),
+      serializeJobMessagesJson(input.messages, ctx, custom, style, affinity),
       `settle:${id}`,
       now,
       now + JOB_TIMEOUT_MS,
@@ -623,6 +634,7 @@ export function jobPublicForNode(job: InferenceJob) {
     extraSystemContext: job.extraSystemContext,
     customSystemPrompt: job.customSystemPrompt,
     styleOverrideContext: job.styleOverrideContext,
+    cacheAffinityId: job.cacheAffinityId,
     payloadSha256: job.payloadSha256,
     timeoutAt: job.timeoutAt,
   };

@@ -511,7 +511,7 @@ async function handleJsonMode(opts: {
       undefined,
       jsonOnlySystem(template, lean),
       undefined,
-      { researchQuery: fromWeb ? content : "" },
+      { researchQuery: fromWeb ? content : "", cacheAffinityId: sessionId },
     )) {
       if (ev.type === "text") answer += ev.text;
       if (ev.type === "done") {
@@ -850,7 +850,7 @@ async function handleStreamMode(opts: {
   const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb, lean);
   const lastHostTurnAt = readLedger(session.meta).lastHostTurn?.at ?? 0;
   const upstreamBase = await buildUpstream(authUserId, sessionId, contextBlock, content, false, lastHostTurnAt, lean);
-  const researchOpts = { researchQuery: fromWeb ? content : "" };
+  const researchOpts = { researchQuery: fromWeb ? content : "", cacheAffinityId: sessionId };
   const turnId = `turn_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
   // 串流開始即 idempotent 落庫 user，避免 abort 提前 return 丟訊
   await addSessionMessage({
@@ -982,7 +982,7 @@ async function handleStreamMode(opts: {
               undefined,
               advisorSystem(adv.label),
               undefined,
-              { researchQuery: "" },
+              { researchQuery: "", cacheAffinityId: sessionId },
             )) {
               // thinking 靜默丟棄，不轉發前端
               if (ev.type === "text") {

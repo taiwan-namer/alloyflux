@@ -3,7 +3,12 @@ import { describe, it } from "node:test";
 import { alignedTail, alignedWindowStart, slideMessagesForUpstream, UPSTREAM_MAX_MESSAGES } from "./context-window";
 import { MODELS } from "./models";
 import type { ChatMessage } from "./providers";
-import { splitSystemPromptForCache, systemPromptFor } from "./providers";
+import {
+  antigravityStableSessionId,
+  resolvePromptCacheKey,
+  splitSystemPromptForCache,
+  systemPromptFor,
+} from "./providers";
 
 const model = MODELS.find((m) => m.id === "gpt-6-astra") ?? MODELS[0]!;
 
@@ -23,6 +28,31 @@ function legacyWindow(messages: ChatMessage[]): ChatMessage[] {
   while (sliced.length && sliced[0].role !== "user") sliced = sliced.slice(1);
   return sliced;
 }
+
+describe("resolvePromptCacheKey / Antigravity sessionId", () => {
+  it("優先使用對話／會議室親和鍵", () => {
+    assert.equal(resolvePromptCacheKey("conv-abc", "fallback"), "conv-abc");
+    assert.equal(resolvePromptCacheKey("  sess_x  ", "fallback"), "sess_x");
+  });
+
+  it("無親和鍵時以 fallback 穩定雜湊", () => {
+    const a = resolvePromptCacheKey(undefined, "seed-1");
+    const b = resolvePromptCacheKey("", "seed-1");
+    const c = resolvePromptCacheKey(undefined, "seed-2");
+    assert.equal(a, b);
+    assert.notEqual(a, c);
+    assert.match(a, /^[a-f0-9]{40}$/);
+  });
+
+  it("Antigravity sessionId 同鍵穩定、為負數字串", () => {
+    const a = antigravityStableSessionId("conv-1");
+    const b = antigravityStableSessionId("conv-1");
+    const c = antigravityStableSessionId("conv-2");
+    assert.equal(a, b);
+    assert.notEqual(a, c);
+    assert.match(a, /^-\d+$/);
+  });
+});
 
 describe("splitSystemPromptForCache", () => {
   it("stable + volatile 與原本整段 System 一字不差", () => {

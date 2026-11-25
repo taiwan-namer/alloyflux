@@ -42,6 +42,7 @@ export class AgentApi {
         extraSystemContext?: string;
         customSystemPrompt?: string;
         styleOverrideContext?: string;
+        cacheAffinityId?: string;
         payloadSha256: string;
       };
       signature?: string;

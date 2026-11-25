@@ -31,6 +31,11 @@ export type RouteChatOptions = {
    * 空字串＝本次不查證；provider 端也不會再自行查。
    */
   researchQuery?: string;
+  /**
+   * 跨供應商 prompt cache 黏著鍵（聊天 conversationId／會議室 sessionId）。
+   * 連續輪次必須相同，否則 ChatGPT／xAI／Gemini 訂閱路徑幾乎無法命中快取。
+   */
+  cacheAffinityId?: string;
 };
 
 function skippedResearchVerdict(): ResearchVerdict {
@@ -156,6 +161,7 @@ async function* streamViaNodeAgent(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<GatewayEvent> {
   const route = resolveNodeRoute(model);
   if (!route) throw new UpstreamError(400, "此模型未設定 Node Agent 路由");
@@ -174,6 +180,7 @@ async function* streamViaNodeAgent(
     extraSystemContext,
     styleOverrideContext,
     customSystemPrompt,
+    cacheAffinityId,
   });
 
   yield {
@@ -234,6 +241,7 @@ export async function* routeChat(
   const ctx = extraSystemContext?.trim() || undefined;
   const customSys = customSystemPrompt?.trim() || undefined;
   const styleCtx = styleOverrideContext?.trim() || undefined;
+  const cacheAffinityId = options?.cacheAffinityId?.trim() || undefined;
 
   const route = resolveNodeRoute(model);
   const nodeAvailable =
@@ -275,6 +283,7 @@ export async function* routeChat(
           ctxForNode,
           customSys,
           styleCtx,
+          cacheAffinityId,
         )) {
           yield attachResearchToDone(ev, prepared);
         }
@@ -291,7 +300,17 @@ export async function* routeChat(
       }
     }
 
-    yield* routeLocalCandidates(model, upstreamMessages, userId, signal, ctxForLocal, customSys, prepared, styleCtx);
+    yield* routeLocalCandidates(
+      model,
+      upstreamMessages,
+      userId,
+      signal,
+      ctxForLocal,
+      customSys,
+      prepared,
+      styleCtx,
+      cacheAffinityId,
+    );
   }
 
   yield* withPlatformResearchScope(prepared, supplyPath, routeBody());
@@ -306,6 +325,7 @@ async function* routeLocalCandidates(
   customSys: string | undefined,
   prepared: ResearchVerdict | null,
   styleCtx?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<GatewayEvent> {
   // 混合水庫：含 oauth_sub；candidatesFor 已過濾 share_limit / cooldown／delegatedToNode
   const allCandidates = await candidatesFor(model);
@@ -334,7 +354,17 @@ async function* routeLocalCandidates(
     let started = false;
     let usage: Usage | null = null;
     try {
-      for await (const ev of streamFrom(c, model, upstreamMessages, safetyId, signal, ctx, customSys, styleCtx)) {
+      for await (const ev of streamFrom(
+        c,
+        model,
+        upstreamMessages,
+        safetyId,
+        signal,
+        ctx,
+        customSys,
+        styleCtx,
+        cacheAffinityId,
+      )) {
         if (ev.type === "text" || ev.type === "thinking") {
           if (!started) {
             started = true;

@@ -108,6 +108,8 @@ export async function POST(req: Request) {
       req.signal,
       undefined,
       SYSTEM,
+      undefined,
+      { cacheAffinityId: `analyze:${auth.user.id}` },
     )) {
       if (ev.type === "text") answer += ev.text;
       if (ev.type === "done") {

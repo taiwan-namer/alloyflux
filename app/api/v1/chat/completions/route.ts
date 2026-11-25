@@ -151,6 +151,10 @@ export async function POST(req: Request) {
             undefined,
             clientSystemPrompt,
             styleOverrideContext,
+            {
+              // 外部 API 每輪新建影子對話；用首則＋system 做跨輪黏著
+              cacheAffinityId: `${userId}:${model.id}:${(clientSystemPrompt || "").slice(0, 80)}:${messages[0]?.content?.slice(0, 120) || ""}`,
+            },
           )) {
             if (ev.type === "text") {
               answer += ev.text;
@@ -300,6 +304,9 @@ async function collectDone(
     undefined,
     customSystemPrompt,
     styleOverrideContext,
+    {
+      cacheAffinityId: `${userId}:${model.id}:${(customSystemPrompt || "").slice(0, 80)}:${messages[0]?.content?.slice(0, 120) || ""}`,
+    },
   )) {
     if (ev.type === "text") onText(ev.text);
     if (ev.type === "done") {

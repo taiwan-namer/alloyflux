@@ -164,6 +164,7 @@ async function start() {
         extraSystemContext: job.extraSystemContext,
         customSystemPrompt: job.customSystemPrompt,
         styleOverrideContext: job.styleOverrideContext,
+        cacheAffinityId: job.cacheAffinityId,
       })) {
         if (ev.type === "text") {
           await api.result({ action: "event", jobId: job.id, event: { type: "text", text: ev.text } });

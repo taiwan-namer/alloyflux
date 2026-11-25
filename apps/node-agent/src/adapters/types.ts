@@ -28,6 +28,8 @@ export interface ProviderAdapter {
     extraSystemContext?: string;
     customSystemPrompt?: string;
     styleOverrideContext?: string;
+    /** 與主站 cacheAffinityId 對齊：ChatGPT session-id／Gemini sessionId */
+    cacheAffinityId?: string;
     signal?: AbortSignal;
   }): AsyncGenerator<AdapterEvent>;
 }

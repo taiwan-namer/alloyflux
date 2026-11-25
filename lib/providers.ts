@@ -31,7 +31,6 @@ import {
   type ResearchVerdict,
 } from "./research-v2";
 import { appendStyleOverride } from "./persona-style";
-
 export interface ChatImage {
   mimeType: string;
   data: string; // 純 base64，不含 data: prefix
@@ -129,6 +128,23 @@ export type StreamEvent =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
   | { type: "usage"; usage: Usage };
+
+/**
+ * 跨供應商快取黏著鍵：聊天 conversationId／會議室 sessionId 優先。
+ * ChatGPT Codex 看 session-id 標頭；xAI 看 prompt_cache_key／x-grok-conv-id；
+ * Gemini Antigravity 看 request.sessionId；Claude 則靠 cache_control＋穩定前綴。
+ */
+export function resolvePromptCacheKey(affinityId: string | undefined, fallbackSeed: string): string {
+  const a = affinityId?.trim();
+  if (a) return a.slice(0, 128);
+  return createHash("sha256").update(fallbackSeed).digest("hex").slice(0, 40);
+}
+
+/** Antigravity 既有格式：負數字串；改由親和鍵穩定派生，避免每輪亂數打散快取 */
+export function antigravityStableSessionId(affinityKey: string): string {
+  const n = createHash("sha256").update(`ag:${affinityKey}`).digest().readUIntBE(0, 6);
+  return `-${n}`;
+}
 
 /** 未指定 effort 一律視為 low */
 export function normalizeEffort(effort?: ModelInfo["effort"]): "low" | "medium" | "high" {
@@ -596,10 +612,21 @@ async function* geminiSubscriptionStream(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<StreamEvent> {
   let creds = await ensureFreshOAuth(c.source.id, c.oauthCreds!);
   try {
-    yield* geminiSubscriptionStreamOnce(c, model, messages, creds, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
+    yield* geminiSubscriptionStreamOnce(
+      c,
+      model,
+      messages,
+      creds,
+      signal,
+      extraSystemContext,
+      customSystemPrompt,
+      styleOverrideContext,
+      cacheAffinityId,
+    );
     return;
   } catch (e) {
     const err = e instanceof UpstreamError ? e : new UpstreamError(0, e instanceof Error ? e.message : String(e));
@@ -608,7 +635,17 @@ async function* geminiSubscriptionStream(
   // Token／專案失效：強制 refresh + 重抓 projectId，再試一次
   creds = await forceRefreshGeminiOAuth(c.source.id, creds);
   try {
-    yield* geminiSubscriptionStreamOnce(c, model, messages, creds, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
+    yield* geminiSubscriptionStreamOnce(
+      c,
+      model,
+      messages,
+      creds,
+      signal,
+      extraSystemContext,
+      customSystemPrompt,
+      styleOverrideContext,
+      cacheAffinityId,
+    );
   } catch (e) {
     const err = e instanceof UpstreamError ? e : new UpstreamError(0, e instanceof Error ? e.message : String(e));
     throw humanizeGeminiAuthError(err);
@@ -761,6 +798,7 @@ async function* geminiSubscriptionStreamOnce(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<StreamEvent> {
   const catalogBefore = await loadAntigravityCatalog(c.source.id, creds);
   logAntigravityCatalogIds(catalogBefore);
@@ -794,8 +832,12 @@ async function* geminiSubscriptionStreamOnce(
 
   const effort = normalizeEffort(model.effort);
   const generationConfig = geminiGenerationConfig(effort);
+  const affinity = resolvePromptCacheKey(
+    cacheAffinityId,
+    `${c.source.id}\n${upstreamModel}\n${projectId}`,
+  );
   const requestBody: Record<string, unknown> = {
-    sessionId: `-${Math.floor(Math.random() * 9_000_000_000_000)}`,
+    sessionId: antigravityStableSessionId(affinity),
     systemInstruction: {
       role: "user",
       parts: [
@@ -957,6 +999,7 @@ async function* chatgptSubscriptionStream(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<StreamEvent> {
   const creds = await ensureFreshOAuth(c.source.id, c.oauthCreds!);
   const upstreamModel = model.codexId ?? model.id;
@@ -988,14 +1031,13 @@ async function* chatgptSubscriptionStream(
     research,
   );
 
-  // 同帳號＋同 instructions 路由到同一快取分片；不帶時 cached_tokens 幾乎恆為 0
-  const cacheKey = createHash("sha256")
-    .update(`${creds.accountId ?? c.source.id}\n${upstreamModel}\n${stable}`)
-    .digest("hex")
-    .slice(0, 40);
-  // Codex CLI 同時以 session_id／conversation_id 標頭做黏著路由；只帶 body 的 key 實測仍為 0
-  headers["session_id"] = cacheKey;
-  headers["conversation_id"] = cacheKey;
+  // ChatGPT Codex：快取親和看 HTTP `session-id`（連字號），不是 body 的 prompt_cache_key
+  const cacheKey = resolvePromptCacheKey(
+    cacheAffinityId,
+    `${creds.accountId ?? c.source.id}\n${upstreamModel}\n${stable}`,
+  );
+  headers["session-id"] = cacheKey;
+  headers["conversation-id"] = cacheKey;
 
   const body: Record<string, unknown> = {
     model: upstreamModel,
@@ -1207,13 +1249,16 @@ async function* grokSubscriptionStream(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<StreamEvent> {
   const creds = await ensureFreshOAuth(c.source.id, c.oauthCreds!);
   const upstreamModel = model.grokId ?? model.id;
+  const cacheKey = resolvePromptCacheKey(cacheAffinityId, `${c.source.id}\n${upstreamModel}`);
   const headers: Record<string, string> = {
     ...grokProxyHeaders(creds.accessToken),
     "Content-Type": "application/json",
     Accept: "text/event-stream",
+    "x-grok-conv-id": cacheKey,
   };
 
   // 自研查證注入 Instructions；不掛載上游 web_search／x_search（平台統一控制查證）
@@ -1235,6 +1280,7 @@ async function* grokSubscriptionStream(
     stream: true,
     store: false,
     reasoning: { effort: reasoningEffortFor(model.effort) },
+    prompt_cache_key: cacheKey,
   };
   const url = `${GROK_OAUTH.proxyBaseUrl}/responses`;
   let res: Response;
@@ -1342,7 +1388,9 @@ async function* geminiApiKeyStream(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  _cacheAffinityId?: string,
 ): AsyncGenerator<StreamEvent> {
+  // Gemini 4／新模型：隱式快取自動開啟；穩定前綴即可（explicit cachedContents 不支援 Gemini 4）
   const apiModel = model.geminiApiId ?? model.id;
   const res = await post(
     `${BASE_URL.gemini}/models/${apiModel}:streamGenerateContent?alt=sse&key=${encodeURIComponent(c.apiKey!)}`,
@@ -1373,6 +1421,8 @@ async function* geminiApiKeyStream(
     }
     if (json.usageMetadata) {
       usage.inputTokens = json.usageMetadata.promptTokenCount ?? usage.inputTokens;
+      usage.cachedInputTokens =
+        json.usageMetadata.cachedContentTokenCount ?? usage.cachedInputTokens;
       usage.outputTokens =
         (json.usageMetadata.candidatesTokenCount ?? 0) + (json.usageMetadata.thoughtsTokenCount ?? 0) ||
         usage.outputTokens;
@@ -1391,12 +1441,14 @@ async function* openaiCompatible(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<StreamEvent> {
   const isOpenRouter = c.source.provider === "openrouter";
   const isXai = c.source.provider === "xai";
   const base = isOpenRouter ? BASE_URL.openrouter : isXai ? BASE_URL.xai : BASE_URL.openai;
   const upstream = isOpenRouter ? model.openrouterId : model.grokId ?? model.id;
   const url = `${base}/chat/completions`;
+  const cacheKey = resolvePromptCacheKey(cacheAffinityId, `${c.source.id}\n${upstream}`);
   // 自研查證注入 system（外層 Gateway 已跑過則透過 ALS 零成本重用；未跑過如 failover 亦可補齊）
   const research = await researchForMessages(messages, signal);
   const body: Record<string, unknown> = {
@@ -1423,8 +1475,14 @@ async function* openaiCompatible(
   } else if (!isXai) {
     body.store = false;
     body.safety_identifier = safetyId;
+    body.prompt_cache_key = cacheKey;
   }
-  const res = await post(url, { authorization: `Bearer ${c.apiKey}` }, body, signal);
+  const headers: Record<string, string> = { authorization: `Bearer ${c.apiKey}` };
+  if (isXai) {
+    headers["x-grok-conv-id"] = cacheKey;
+    body.prompt_cache_key = cacheKey;
+  }
+  const res = await post(url, headers, body, signal);
 
   const usage: Usage = {
     inputTokens: 0,
@@ -1468,23 +1526,44 @@ async function* anthropic(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  _cacheAffinityId?: string,
 ): AsyncGenerator<StreamEvent> {
   const effort = normalizeEffort(model.effort);
   const budget = thinkingBudgetFor(effort);
   // 自研查證注入 system；不掛載上游 web_search／web_fetch（平台統一控制查證）
   const research = await researchForMessages(messages, signal);
+  const systemText = withResearchSystem(
+    systemPromptFor(model, model.id, extraSystemContext, customSystemPrompt, styleOverrideContext),
+    research,
+  );
+  const wireMessages = messages.map((m) => ({
+    role: m.role,
+    content: anthropicContentForMessage(m, model),
+  }));
+  // 在最後一則 user／可見內容加上 cache breakpoint，讓多輪前綴可被讀取
+  if (wireMessages.length) {
+    const last = wireMessages[wireMessages.length - 1]!;
+    if (typeof last.content === "string") {
+      last.content = [
+        { type: "text", text: last.content || " ", cache_control: { type: "ephemeral" } },
+      ];
+    } else if (Array.isArray(last.content) && last.content.length) {
+      const block = last.content[last.content.length - 1]!;
+      block.cache_control = { type: "ephemeral" };
+    }
+  }
 
   const body: Record<string, unknown> = {
     model: model.id,
     max_tokens: maxOutputTokensFor(effort),
-    system: withResearchSystem(
-      systemPromptFor(model, model.id, extraSystemContext, customSystemPrompt, styleOverrideContext),
-      research,
-    ),
-    messages: messages.map((m) => ({
-      role: m.role,
-      content: anthropicContentForMessage(m, model),
-    })),
+    system: [
+      {
+        type: "text",
+        text: systemText,
+        cache_control: { type: "ephemeral" },
+      },
+    ],
+    messages: wireMessages,
     stream: true,
     metadata: { user_id: safetyId },
     // 永遠正整數 budget（與 Antigravity 對齊；max_tokens > budget_tokens）
@@ -1497,13 +1576,33 @@ async function* anthropic(
       {
         "x-api-key": c.apiKey!,
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": "interleaved-thinking-2025-05-14",
+        "anthropic-beta": "interleaved-thinking-2025-05-14,prompt-caching-2024-07-31",
       },
       body,
       signal,
     );
   } catch (e) {
-    throw e instanceof UpstreamError ? e : new UpstreamError(0, String(e));
+    const err = e instanceof UpstreamError ? e : new UpstreamError(0, String(e));
+    // 舊帳號／代理不吃 cache_control 時降級重試，避免整輪失敗
+    if (err.status === 400 && /cache_control|prompt.cach/i.test(err.message)) {
+      body.system = systemText;
+      body.messages = messages.map((m) => ({
+        role: m.role,
+        content: anthropicContentForMessage(m, model),
+      }));
+      res = await post(
+        `${BASE_URL.anthropic}/messages`,
+        {
+          "x-api-key": c.apiKey!,
+          "anthropic-version": "2023-06-01",
+          "anthropic-beta": "interleaved-thinking-2025-05-14",
+        },
+        body,
+        signal,
+      );
+    } else {
+      throw err;
+    }
   }
 
   const usage: Usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, upstreamModelId: model.id };
@@ -1563,24 +1662,81 @@ export function streamFrom(
   extraSystemContext?: string,
   customSystemPrompt?: string,
   styleOverrideContext?: string,
+  cacheAffinityId?: string,
 ): AsyncGenerator<StreamEvent> {
   if (c.source.authType === "oauth_sub") {
     // 研究／相容路徑：平台持有的訂閱 OAuth（與 Node Agent 買家任務隔離）
     if (c.source.provider === "gemini" && model.antigravityId) {
-      return geminiSubscriptionStream(c, model, messages, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
+      return geminiSubscriptionStream(
+        c,
+        model,
+        messages,
+        signal,
+        extraSystemContext,
+        customSystemPrompt,
+        styleOverrideContext,
+        cacheAffinityId,
+      );
     }
     if (c.source.provider === "openai") {
-      return chatgptSubscriptionStream(c, model, messages, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
+      return chatgptSubscriptionStream(
+        c,
+        model,
+        messages,
+        signal,
+        extraSystemContext,
+        customSystemPrompt,
+        styleOverrideContext,
+        cacheAffinityId,
+      );
     }
     if (c.source.provider === "xai") {
-      return grokSubscriptionStream(c, model, messages, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
+      return grokSubscriptionStream(
+        c,
+        model,
+        messages,
+        signal,
+        extraSystemContext,
+        customSystemPrompt,
+        styleOverrideContext,
+        cacheAffinityId,
+      );
     }
   }
   if (c.source.provider === "gemini") {
-    return geminiApiKeyStream(c, model, messages, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
+    return geminiApiKeyStream(
+      c,
+      model,
+      messages,
+      signal,
+      extraSystemContext,
+      customSystemPrompt,
+      styleOverrideContext,
+      cacheAffinityId,
+    );
   }
   if (c.source.provider === "anthropic") {
-    return anthropic(c, model, messages, safetyId, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
+    return anthropic(
+      c,
+      model,
+      messages,
+      safetyId,
+      signal,
+      extraSystemContext,
+      customSystemPrompt,
+      styleOverrideContext,
+      cacheAffinityId,
+    );
   }
-  return openaiCompatible(c, model, messages, safetyId, signal, extraSystemContext, customSystemPrompt, styleOverrideContext);
+  return openaiCompatible(
+    c,
+    model,
+    messages,
+    safetyId,
+    signal,
+    extraSystemContext,
+    customSystemPrompt,
+    styleOverrideContext,
+    cacheAffinityId,
+  );
 }

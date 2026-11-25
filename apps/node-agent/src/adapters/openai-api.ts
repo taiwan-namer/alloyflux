@@ -15,6 +15,7 @@ export const openaiApiAdapter: ProviderAdapter = {
     extraSystemContext,
     customSystemPrompt,
     styleOverrideContext,
+    cacheAffinityId,
     signal,
   }): AsyncGenerator<AdapterEvent> {
     const key = process.env.OPENAI_API_KEY?.trim();
@@ -34,6 +35,7 @@ export const openaiApiAdapter: ProviderAdapter = {
       ...(sysText ? [{ role: "system" as const, content: sysText }] : []),
       ...messages.map((m) => ({ role: m.role, content: m.content })),
     ];
+    const cacheKey = (cacheAffinityId || `openai-api:${modelId}`).trim().slice(0, 128);
 
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -46,6 +48,7 @@ export const openaiApiAdapter: ProviderAdapter = {
         messages: wireMessages,
         stream: true,
         stream_options: { include_usage: true },
+        prompt_cache_key: cacheKey,
       }),
       signal,
     });
@@ -74,14 +77,18 @@ export const openaiApiAdapter: ProviderAdapter = {
         try {
           const json = JSON.parse(data) as {
             choices?: { delta?: { content?: string } }[];
-            usage?: { prompt_tokens?: number; completion_tokens?: number };
+            usage?: {
+              prompt_tokens?: number;
+              completion_tokens?: number;
+              prompt_tokens_details?: { cached_tokens?: number };
+            };
           };
           const text = json.choices?.[0]?.delta?.content;
           if (text) yield { type: "text", text };
           if (json.usage) {
             usage = {
               inputTokens: json.usage.prompt_tokens ?? 0,
-              cachedInputTokens: 0,
+              cachedInputTokens: json.usage.prompt_tokens_details?.cached_tokens ?? 0,
               outputTokens: json.usage.completion_tokens ?? 0,
             };
           }

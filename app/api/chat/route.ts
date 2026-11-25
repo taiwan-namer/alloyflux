@@ -253,6 +253,7 @@ export async function POST(req: Request) {
                 extraSystemContext,
                 undefined,
                 styleOverrideContext,
+                { cacheAffinityId: convId! },
               )) {
                 if (ev.type === "text" || ev.type === "thinking") streamed = true;
                 if (ev.type === "text") answer += ev.text;
