@@ -310,6 +310,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const activeTemplate = templates.find((t) => t.id === activeTemplateId) ?? templates[0];
 
   streamingRef.current = streaming;
+  const generatingRef = useRef(false);
+  generatingRef.current = generating;
   onSyncPatchRef.current = onSyncPatch;
   onStreamingChangeRef.current = onStreamingChange;
   onStreamCommittedRef.current = onStreamCommitted;
@@ -660,8 +662,13 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   }
 
   function stopGeneration() {
-    // committing：生成已完成，不提供無效停止鈕／no-op
-    if (!generating || streamCommittingRef.current || committing) return;
+    // 跟聊天介面一樣：以 AbortController／reader 為準，不依賴可能過期的 generating state
+    const hasLive =
+      generatingRef.current ||
+      Boolean(streamAbortRef.current) ||
+      Boolean(streamReaderRef.current);
+    if (!hasLive) return;
+    if (streamCommittingRef.current) return;
     const content = streamContentRef.current;
     const sid = sessionIdRef.current;
     const runId = streamRunIdRef.current;
@@ -673,6 +680,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     setNotices([]);
     setDegradedHint(false);
     setGenerating(false);
+    setCommitting(false);
     onError(null);
     if (content) onDraftChange(content);
     requestAnimationFrame(() => textareaRef.current?.focus());
@@ -1438,8 +1446,16 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                 每次發言會依 token 扣點
               </span>
               {generating ? (
-                <button type="button" className="strategy-stop-btn" onClick={stopGeneration}>
-                  停止生成
+                <button
+                  type="button"
+                  className="strategy-stop-btn"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    stopGeneration();
+                  }}
+                >
+                  停止
                 </button>
               ) : (
                 <button type="submit" disabled={!draft.trim() || detail.session.status === "closed"}>

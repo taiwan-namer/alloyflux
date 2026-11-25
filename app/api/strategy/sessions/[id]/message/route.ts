@@ -847,9 +847,6 @@ async function handleStreamMode(opts: {
     return Response.json({ error: `Unknown model: ${leadMember.modelId}` }, { status: 400 });
   }
 
-  const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb, lean);
-  const lastHostTurnAt = readLedger(session.meta).lastHostTurn?.at ?? 0;
-  const upstreamBase = await buildUpstream(authUserId, sessionId, contextBlock, content, false, lastHostTurnAt, lean);
   const researchOpts = { researchQuery: fromWeb ? content : "", cacheAffinityId: sessionId };
   const turnId = `turn_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
   // 串流開始即 idempotent 落庫 user，避免 abort 提前 return 丟訊
@@ -866,6 +863,7 @@ async function handleStreamMode(opts: {
   const startedAt = Date.now();
   const encoder = encodeNdjson;
 
+  // 先回串流讓前端可立刻「停止」；組 context／upstream 放到 start 內並尊重 req.signal
   const stream = new ReadableStream({
     async start(controller) {
       const send = (obj: unknown) => {
@@ -875,6 +873,57 @@ async function handleStreamMode(opts: {
           /* client gone */
         }
       };
+
+      send({ type: "stage", stage: "starting" });
+      if (req.signal.aborted) {
+        send({ type: "error", message: "aborted", aborted: true });
+        send({ type: "done", completionStatus: "failed", aborted: true });
+        controller.close();
+        return;
+      }
+
+      let contextBlock: string;
+      let dossier: ReturnType<typeof readDossier>;
+      let upstreamBase: ChatMessage[];
+      try {
+        const built = await buildContextBlock(authUserId, session, fromWeb, lean);
+        contextBlock = built.contextBlock;
+        dossier = built.dossier;
+        if (req.signal.aborted) {
+          send({ type: "error", message: "aborted", aborted: true });
+          send({ type: "done", completionStatus: "failed", aborted: true });
+          controller.close();
+          return;
+        }
+        const lastHostTurnAt = readLedger(session.meta).lastHostTurn?.at ?? 0;
+        upstreamBase = await buildUpstream(
+          authUserId,
+          sessionId,
+          contextBlock,
+          content,
+          false,
+          lastHostTurnAt,
+          lean,
+        );
+      } catch (e) {
+        if (isAbortError(e) || req.signal.aborted) {
+          send({ type: "error", message: "aborted", aborted: true });
+          send({ type: "done", completionStatus: "failed", aborted: true });
+          controller.close();
+          return;
+        }
+        send({ type: "error", message: e instanceof Error ? e.message : String(e) });
+        send({ type: "done", completionStatus: "failed" });
+        controller.close();
+        return;
+      }
+
+      if (req.signal.aborted) {
+        send({ type: "error", message: "aborted", aborted: true });
+        send({ type: "done", completionStatus: "failed", aborted: true });
+        controller.close();
+        return;
+      }
 
       let hiddenConvId: string | null = null;
       const advisorTexts: { member: SessionMember; text: string }[] = [];
