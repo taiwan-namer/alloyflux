@@ -55,6 +55,8 @@ export type StrategyStreamEvent =
   | { type: "text"; text: string; modelId?: string; role?: string }
   | { type: "stage"; stage: string }
   | { type: "member_done"; role?: string; modelId?: string; label?: string }
+  /** 可見文字已結束；落庫／派送仍在背景——前端應立刻解鎖輸入 */
+  | { type: "input_ready" }
   | { type: "notice"; message: string }
   | { type: "error"; message: string; aborted?: boolean }
   | {

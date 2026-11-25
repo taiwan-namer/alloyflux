@@ -10,7 +10,6 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { flushSync } from "react-dom";
 import {
   DISPATCH_STATUS_LABEL,
   MEMBER_ROLE_LABEL,
@@ -324,9 +323,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       content: b.displayed,
       done: b.done,
     }));
-    flushSync(() => {
-      setStreamBubbles(mapped);
-    });
+    // 不用 flushSync：每幀強制同步 render＋Markdown 會卡住主執行緒（體感當機）
+    setStreamBubbles(mapped);
     const el = roomScrollRef.current;
     if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
   }, []);
@@ -360,6 +358,20 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     }
     publishDrip(driver.flushDisplay());
   }, [publishDrip]);
+
+  /** 可見文字結束：立刻解鎖 composer；歷史 sync 仍等 done */
+  const unlockComposerAfterVisible = useCallback(() => {
+    flushDripNow();
+    bubblesRef.current = bubblesRef.current.map((b) => ({ ...b, done: true }));
+    setStreamBubbles((prev) => prev.map((b) => ({ ...b, done: true })));
+    handoffPendingRef.current = true;
+    streamCommittingRef.current = false;
+    setCommitting(false);
+    setGenerating(false);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [flushDripNow]);
+  const unlockComposerAfterVisibleRef = useRef(unlockComposerAfterVisible);
+  unlockComposerAfterVisibleRef.current = unlockComposerAfterVisible;
 
   const clearDripAndBubbles = useCallback(() => {
     dripDriverRef.current.stopAndClear();
@@ -773,12 +785,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
       if (sawDone && (completion?.completionStatus === "ok" || completion?.completionStatus === "degraded")) {
         if (completion.completionStatus === "degraded") setDegradedHint(true);
-        // done：立刻解鎖；保留串流氣泡直到歷史 sync 進畫面（一般聊天無此空隙）
-        flushDripNow();
-        bubblesRef.current = bubblesRef.current.map((b) => ({ ...b, done: true }));
-        setStreamBubbles((prev) => prev.map((b) => ({ ...b, done: true })));
-        handoffPendingRef.current = true;
-        setGenerating(false);
+        // input_ready 多半已解鎖；舊後端無此事件時在此補解鎖
+        unlockComposerAfterVisible();
         beginBackgroundReconcile(runId, sid, true);
         return;
       }
@@ -865,6 +873,11 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       const buf = bubblesRef.current;
       if (buf.length) buf[buf.length - 1]!.done = true;
       syncDripFromReceived();
+      return;
+    }
+    if (ev.type === "input_ready") {
+      // 伺服器：可見文字已完，落庫仍在跑 → 立刻可打字
+      unlockComposerAfterVisibleRef.current();
       return;
     }
     if (ev.type === "done") {

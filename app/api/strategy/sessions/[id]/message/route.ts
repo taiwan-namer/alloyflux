@@ -1128,6 +1128,16 @@ async function handleStreamMode(opts: {
           leadAnswer = visibleText;
         }
 
+        // #9：可見文字結束立刻解鎖輸入；settle／finalize（落庫、派送）再背景做
+        // 否則前端要等數秒 done 才解除 generating，體感像當機
+        send({
+          type: "member_done",
+          role: "lead",
+          modelId: leadModel.id,
+          label: leadMember.label,
+        });
+        send({ type: "input_ready" });
+
         if (doneEv && (visibleText || jsonRaw)) {
           await settle(leadModel, visibleText || jsonRaw, doneEv);
         }
@@ -1161,13 +1171,6 @@ async function handleStreamMode(opts: {
           completionStatus: softTimeout ? "degraded" : "ok",
         });
 
-        // 若有可見文字但 JSON reply 不同，確保前端已看過的文字與存檔一致
-        send({
-          type: "member_done",
-          role: "lead",
-          modelId: leadModel.id,
-          label: leadMember.label,
-        });
         send({
           type: "done",
           completionStatus: softTimeout ? "degraded" : "ok",
