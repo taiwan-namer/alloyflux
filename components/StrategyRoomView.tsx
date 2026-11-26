@@ -35,7 +35,7 @@ import {
   type ViewMode,
 } from "@/components/strategy-types";
 import SafeLightMarkdown from "@/components/SafeLightMarkdown";
-import { createAdaptiveDripDriver } from "@/lib/adaptive-drip";
+import { createAdaptiveDripDriver, typewriterTakeCount } from "@/lib/adaptive-drip";
 import {
   applyServerTemplateId,
   beginTemplateSave,
@@ -252,6 +252,9 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   /** 已接收串流緩衝（權威內容；動畫不得改寫） */
   const bubblesRef = useRef<StreamingMemberBubble[]>([]);
   const dripDriverRef = useRef(createAdaptiveDripDriver());
+  const remoteDripRef = useRef(createAdaptiveDripDriver(undefined, undefined, typewriterTakeCount));
+  const remoteSeededRef = useRef<Set<string>>(new Set());
+  const [remoteBubble, setRemoteBubble] = useState<StreamingMemberBubble | null>(null);
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const seenSessionIdRef = useRef<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -577,7 +580,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
     syncPullRef.current = pull;
     void pull(true);
-    const timer = window.setInterval(() => void pull(false), 1000);
+    const timer = window.setInterval(() => void pull(false), 400);
     const onVis = () => {
       if (document.visibilityState === "visible") void pull(true);
     };
@@ -590,12 +593,76 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     };
   }, [sessionId]);
 
+  const remotePartial = useMemo(() => {
+    const live =
+      generating ||
+      streamBubbles.some((b) => b.content.trim()) ||
+      parkedBubbles.some((b) => b.content.trim());
+    if (live) return null;
+    for (let i = detail.messages.length - 1; i >= 0; i--) {
+      const m = detail.messages[i]!;
+      if (
+        m.role === "assistant" &&
+        m.completionStatus === "partial" &&
+        m.speakerRole !== "advisor" &&
+        Date.now() - (m.createdAt || 0) < 5 * 60 * 1000
+      ) {
+        return m;
+      }
+    }
+    return null;
+  }, [detail.messages, generating, streamBubbles, parkedBubbles]);
+
   const historyMessages = useMemo(() => {
     const live =
       streamBubbles.some((b) => b.content.trim()) || parkedBubbles.some((b) => b.content.trim());
-    if (!live) return detail.messages;
-    return detail.messages.filter((m) => !(m.role === "assistant" && m.completionStatus === "partial"));
-  }, [detail.messages, streamBubbles, parkedBubbles]);
+    if (!live && !remotePartial) return detail.messages;
+    return detail.messages.filter((m) => {
+      if (remotePartial && m.id === remotePartial.id) return false;
+      if (live && m.role === "assistant" && m.completionStatus === "partial") return false;
+      return true;
+    });
+  }, [detail.messages, streamBubbles, parkedBubbles, remotePartial]);
+
+  const remoteIndex = remotePartial ? detail.messages.findIndex((m) => m.id === remotePartial.id) : -1;
+  const historyBefore = remoteIndex >= 0 ? detail.messages.slice(0, remoteIndex) : historyMessages;
+  const historyAfter = remoteIndex >= 0 ? detail.messages.slice(remoteIndex + 1) : [];
+
+  useEffect(() => {
+    const driver = remoteDripRef.current;
+    if (!remotePartial) {
+      driver.stopAndClear();
+      setRemoteBubble(null);
+      return;
+    }
+    const current = driver.snapshot()[0];
+    if (current && current.key !== remotePartial.id) driver.stopAndClear();
+    const first = !remoteSeededRef.current.has(remotePartial.id);
+    if (first) remoteSeededRef.current.add(remotePartial.id);
+    driver.upsert({
+      key: remotePartial.id,
+      role: remotePartial.speakerRole || "lead",
+      modelId: remotePartial.speakerModel || "",
+      label: remotePartial.speakerLabel || "主導",
+      received: remotePartial.content,
+      done: false,
+      ...(first && remotePartial.content.length > 24 ? { displayed: remotePartial.content } : {}),
+    });
+    driver.schedule((snap) => {
+      const b = snap.find((x) => x.key === remotePartial.id) ?? snap[0];
+      if (!b) return;
+      setRemoteBubble({
+        key: b.key,
+        role: b.role,
+        modelId: b.modelId,
+        label: b.label,
+        content: b.displayed,
+        done: false,
+      });
+      const el = roomScrollRef.current;
+      if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+    });
+  }, [remotePartial]);
 
   function onScroll() {
     const el = roomScrollRef.current;
@@ -1454,7 +1521,22 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                 {busy ? "載入中…" : "尚無訊息"}
               </div>
             ) : (
-              <HistoryMessages messages={historyMessages} />
+              <>
+                <HistoryMessages messages={historyBefore} />
+                {remoteBubble ? (
+                  <div className="strategy-msg strategy-msg-assistant is-streaming">
+                    <div className="strategy-msg-role">
+                      <span className={`strategy-role-badge is-${remoteBubble.role}`}>{remoteBubble.label}</span>
+                      {remoteBubble.modelId ? <span className="muted"> · {remoteBubble.modelId}</span> : null}
+                    </div>
+                    <div className="strategy-msg-body strategy-md-body">
+                      <SafeLightMarkdown content={remoteBubble.content || ""} streaming />
+                      <span className="stream-caret" aria-hidden />
+                    </div>
+                  </div>
+                ) : null}
+                {historyAfter.length ? <HistoryMessages messages={historyAfter} /> : null}
+              </>
             )}
 
             {parkedBubbles.map((b) => (

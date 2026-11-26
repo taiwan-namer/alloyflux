@@ -20,10 +20,21 @@ export function adaptiveTakeCount(backlog: number): number {
   return Math.min(backlog, Math.max(80, Math.ceil(backlog / 2)));
 }
 
-export function takeAdaptiveSlice(pending: string): { take: string; rest: string } {
+/** 遠端回覆用：一次一個字，積壓很多才加快，看起來像聊天吐字 */
+export function typewriterTakeCount(backlog: number): number {
+  if (backlog <= 0) return 0;
+  if (backlog <= 48) return 1;
+  if (backlog <= 160) return 2;
+  return Math.min(24, Math.max(4, Math.ceil(backlog / 10)));
+}
+
+export function takeAdaptiveSlice(
+  pending: string,
+  takeCount: (backlog: number) => number = adaptiveTakeCount,
+): { take: string; rest: string } {
   if (!pending) return { take: "", rest: "" };
   const pts = toCodePoints(pending);
-  const n = adaptiveTakeCount(pts.length);
+  const n = takeCount(pts.length);
   if (n >= pts.length) return { take: pending, rest: "" };
   return {
     take: joinCodePoints(pts.slice(0, n)),
@@ -51,6 +62,8 @@ export type AdaptiveDripDriver = {
     label: string;
     received: string;
     done?: boolean;
+    /** 只在新建時使用，避免一進房把已經寫好的字再打一遍 */
+    displayed?: string;
   }) => void;
   markDone: (key: string) => void;
   /** 顯示立刻對齊已接收（done／進入 committing 前） */
@@ -72,6 +85,7 @@ export function createAdaptiveDripDriver(
   caf: (id: number) => void = typeof cancelAnimationFrame !== "undefined"
     ? cancelAnimationFrame
     : (id) => clearTimeout(id),
+  takeCount: (backlog: number) => number = adaptiveTakeCount,
 ): AdaptiveDripDriver {
   const byKey = new Map<string, DripBubbleState>();
   const order: string[] = [];
@@ -99,7 +113,7 @@ export function createAdaptiveDripDriver(
       const recvPts = toCodePoints(b.received);
       const dispPts = toCodePoints(b.displayed);
       const backlogPts = recvPts.slice(dispPts.length);
-      const { take, rest } = takeAdaptiveSlice(joinCodePoints(backlogPts));
+      const { take, rest } = takeAdaptiveSlice(joinCodePoints(backlogPts), takeCount);
       b.displayed = joinCodePoints(dispPts) + take;
       if (rest) pending = true;
       else if (b.displayed !== b.received) pending = true;
@@ -132,7 +146,8 @@ export function createAdaptiveDripDriver(
           modelId: bubble.modelId,
           label: bubble.label,
           received: bubble.received,
-          displayed: "",
+          displayed:
+            bubble.displayed && bubble.received.startsWith(bubble.displayed) ? bubble.displayed : "",
           done: Boolean(bubble.done),
         });
       } else {
