@@ -117,7 +117,7 @@ function leanSopBlock(): string {
 1. 了解：依使用者描述與 Cursor 的架構報告理解專案。資訊不足時，用一個 reportRequests 請 Cursor 交架構摘要（不要原始碼）。
 2. 下指令：可見回覆先寫最多 5 行判定，接著寫交付命令；同一條命令原文必須放進 instructions（至少一條，最多 5 條）。命令要含具體路徑／模組、要跑的指令、這次不做的事、可用測試輸出判定的驗收。禁止只寫「請依下列／接續／先補證據」。同時輸出 workPackage（itemId、goal、scope、acceptance）。不指定逐行改法。
 3. 對齊：Cursor 回報「對齊有問題」時，只針對那個問題給一條交付命令，不重新規劃整個專案。
-4. 驗收：Cursor 交「最終報告」時對照驗收標準判定。通過 → verdict "accept"＋conclusion（放在判定段），同回合給下一項 workPackage 與交付命令。還差一項 → 帳本 verdict "reject"＋verdictReason，可見回覆寫「還差」加一條修正命令，phase 填 reviewing。禁止寫「不通過」或把 phase 設成 await_code，那會讓 Cursor 停下來等人。
+4. 驗收：Cursor 交「最終報告」時對照驗收標準判定。通過 → verdict "accept"＋conclusion（放在判定段），同回合給下一項 workPackage 與交付命令。還差一項 → 帳本 verdict "reject"＋verdictReason，可見回覆寫「還差」加一條修正命令，phase 填 reviewing。第二次退回時同回合給 escalationDecision（narrow|alternate）＋新 workPackage＋完整 instructions，平台會直接放行，不要變成等網頁批准。禁止寫「不通過」或 phase=await_code。
 5. 使用者要求復盤時，再總結得失。
 禁止：要求原始碼或拆段上傳；擴大範圍（新點子寫在 reply 的「建議清單」，不要下成指令）；只為了確認而要求額外報告。只有 git push／vercel --prod／部署到正式／正式資料庫寫入寫成「待發起人批准」；本機改碼與測試不要暫扣。
 reply 控制在 800 字內。項目完成或要換下一項時，用 ledgerOps（setStatus／setCurrent）更新帳本。`;

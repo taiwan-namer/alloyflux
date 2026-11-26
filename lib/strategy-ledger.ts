@@ -502,13 +502,15 @@ export function applyLedgerTurn(
 
   applyOps(ledger, turn.ledgerOps, now, events);
 
-  // 僵局處置：必須先選一條路，才能再派施工指令
+  // 僵局處置：已僵局，或本回合剛第二次退回，只要有 narrow／alternate＋新包（或 park）就同回合放行，不必等網頁批准
   let escalationResolved = false;
-  if (wasEscalated && turn.escalationDecision && typeof turn.escalationDecision === "object") {
+  const resolveEscalation = (source: "prior" | "same_turn") => {
+    if (!turn.escalationDecision || typeof turn.escalationDecision !== "object") return false;
+    if (!ledger.currentPackage) return false;
     const d = turn.escalationDecision as Record<string, unknown>;
     const choice = str(d.choice) as EscalationChoice;
     const reason = clip(str(d.reason) || "未註明", LEDGER_LIMITS.noteMaxChars);
-    const pkg = ledger.currentPackage!;
+    const pkg = ledger.currentPackage;
     if (choice === "park") {
       const item = ledger.items.find((i) => i.id === pkg.itemId);
       if (item) {
@@ -520,24 +522,36 @@ export function applyLedgerTurn(
       }
       if (ledger.currentItemId === pkg.itemId) ledger.currentItemId = null;
       ledger.currentPackage = null;
-      events.push(`僵局處置：暫停 ${pkg.itemId}（${clip(reason, 80)}）`);
-      escalationResolved = true;
-    } else if (choice === "narrow" || choice === "alternate") {
-      // 需要搭配新的 workPackage；沒有就維持僵局
-      if (turn.workPackage) {
-        events.push(`僵局處置：${choice === "narrow" ? "縮小範圍" : "換做法"}（${clip(reason, 80)}）`);
-        escalationResolved = true;
-      }
+      events.push(
+        `僵局處置：暫停 ${pkg.itemId}（${clip(reason, 80)}）${source === "same_turn" ? "｜同回合" : ""}`,
+      );
+      return true;
     }
+    if ((choice === "narrow" || choice === "alternate") && turn.workPackage) {
+      events.push(
+        `僵局處置：${choice === "narrow" ? "縮小範圍" : "換做法"}（${clip(reason, 80)}）${source === "same_turn" ? "｜同回合放行" : ""}`,
+      );
+      return true;
+    }
+    return false;
+  };
+
+  if (wasEscalated) {
+    escalationResolved = resolveEscalation("prior");
   }
 
   // 驗收判定：針對本回合開始時的工作包，先判再裝新包，否則「通過＋下一包」會判到新包上
   const verdict = str(turn.verdict) as LedgerVerdict;
+  const newPkgId =
+    turn.workPackage && typeof turn.workPackage === "object"
+      ? str((turn.workPackage as Record<string, unknown>).id)
+      : "";
   const newPkgItemId =
     turn.workPackage && typeof turn.workPackage === "object"
       ? str((turn.workPackage as Record<string, unknown>).itemId)
       : "";
   const judged = ledger.currentPackage;
+  let justEscalated = false;
   if (
     judged &&
     !wasEscalated &&
@@ -562,11 +576,28 @@ export function applyLedgerTurn(
       if (reason) judged.lastRejectReason = reason;
       if (judged.rejectCount >= LEDGER_LIMITS.rejectEscalateAt) {
         judged.status = "escalated";
+        justEscalated = true;
         events.push(`工作包 ${judged.id} 已退回 ${judged.rejectCount} 次 → 進入僵局處置`);
       } else {
         judged.status = "executing";
         events.push(`工作包 ${judged.id} 退回第 ${judged.rejectCount} 次${reason ? `：${clip(reason, 60)}` : ""}`);
       }
+    }
+  }
+
+  // 第二次退回同一回合已給處置＋新包／指令：立刻放行，不要變成「等網頁批准」
+  if (justEscalated && !escalationResolved) {
+    if (resolveEscalation("same_turn")) {
+      escalationResolved = true;
+    } else if (
+      turn.workPackage &&
+      typeof turn.workPackage === "object" &&
+      newPkgId &&
+      newPkgId !== judged?.id &&
+      turn.instructions.some((x) => instructionText(x).length > 0)
+    ) {
+      events.push(`僵局處置：同回合已給新工作包 ${newPkgId} 與指令，視為 narrow 放行`);
+      escalationResolved = true;
     }
   }
 
@@ -789,12 +820,12 @@ export function renderLedgerForHost(ledger: StrategyLedger): string {
     if (pkg.status === "escalated") {
       parts.push(
         `## ⚠ 僵局處置（本回合必做）
-此工作包已退回 ${pkg.rejectCount} 次。本回合不得再對同一工作包下修補指令（會被程式攔下）。
-必須輸出 escalationDecision：{"choice":"narrow|alternate|park","reason":"…","resumeTrigger":"park 時填恢復點"}。
-- narrow：縮小範圍，同時輸出新的 workPackage，並把交付命令寫進 instructions（只寫在回覆裡不會派送）
-- alternate：換做法，同時輸出新的 workPackage，並把交付命令寫進 instructions
-- park：暫停此項，回到主線下一個項目；若下一項要開工，同樣要有 workPackage 與 instructions
-資訊不足時可先用 reportRequests 要 Cursor 交「卡關說明」（≤2000 字：卡在哪、試過什麼、可選方案）。`,
+此工作包已退回 ${pkg.rejectCount} 次。不要再對「同一個工作包 id」下修補指令。
+本回合輸出 escalationDecision（narrow|alternate|park）＋新的 workPackage＋完整 instructions；平台會同回合放行，不必等網頁批准。
+若只寫交付命令、沒有新 workPackage，指令會被暫扣。
+- narrow／alternate：新工作包 id 必須不同，交付命令寫進 instructions
+- park：暫停此項；下一項要開工同樣要有 workPackage 與 instructions
+資訊不足時可先用 reportRequests 要 Cursor 交「卡關說明」（≤2000 字）。`,
       );
     }
   }
@@ -828,7 +859,7 @@ export function ledgerProtocolBlock(): string {
 - 交付命令／instructions 一次寫完整，讓 Cursor 不用再問就能做完交報告：具體路徑或模組、要跑的指令、這次不做的事、可用輸出判定的驗收。每條驗收要有固定輸入、比對欄位、程序邊界、數字或狀態。禁止用「完整／正確／足夠／釐清／接續」當條件。
 - 暫扣只給真的 git push／vercel --prod／部署到正式／正式資料庫寫入。本機改碼、測試、持久化例外、副本掛接不要標成不可逆。
 - 驗收通過（verdict "accept"）時必填 "conclusion"（放在判定段，3–5 行：做了什麼、驗收結果、數字、這次不代表什麼）。程式會結案並切到下一項；同一回合必須給下一項 workPackage 與對應交付命令。workPackage：{"id":"wp-…","itemId":"目前項目 id","goal":"…","scope":["允許改的檔案／模組"],"acceptance":["可用測試輸出判定的條件，不要形容詞"],"stopConditions":["遇到就停下回報的情況"]}。一個工作包要能一次做完再回報。
-- 還差一項：帳本用 verdict "reject"（附 verdictReason）＋一條修正命令，把要改的點和要重測的證據寫完。可見回覆禁止寫「不通過」「待改碼」「await_code」，改寫「還差：一句話」然後接交付命令；phase 必須填 reviewing。有 instructions 時禁止把 phase 設成 await_code，那個階段會讓 Cursor 停下來等使用者。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局；僵局時 narrow／alternate 也要新 workPackage 加非空 instructions。
+- 還差一項：帳本用 verdict "reject"（附 verdictReason）＋一條修正命令，把要改的點和要重測的證據寫完。可見回覆禁止寫「不通過」「待改碼」「await_code」，改寫「還差：一句話」然後接交付命令；phase 必須填 reviewing。有 instructions 時禁止把 phase 設成 await_code。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局：本回合必須 escalationDecision（narrow|alternate|park）＋新 workPackage＋完整 instructions；平台同回合放行，不要變成等網頁批准。若同回合已給不同 id 的新工作包與非空 instructions，即使漏寫 escalationDecision 也視為 narrow 放行。
 - 本回合訊息來自 Cursor 時必須派工（accept 接下一項、reject 一條修正、或 reportRequests 指名缺的證據）。不要只回覆使用者。
 - instructions 可寫字串或 {"itemId":"…","text":"…"}；itemId 與目前項目不同會被保留不派送。只有 git push／vercel --prod／部署到正式／正式資料庫寫入保留給發起人。
 - 要看程式碼時，指名函式或行號範圍（每段 ≤150 行）；不要要求整份檔案。

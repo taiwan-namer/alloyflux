@@ -210,6 +210,54 @@ describe("strategy ledger", () => {
     assert.match(renderLedgerForHost(blocked.ledger), /僵局處置/);
   });
 
+  it("第二次退回同一回合給 narrow＋新包＋指令：直接放行，不等網頁", () => {
+    let l = applyLedgerTurn(seeded(), { workPackage: pkgInput, instructions: [], reportRequests: [] }, NOW).ledger;
+    l = applyLedgerTurn(l, { verdict: "reject", instructions: ["第一次修"], reportRequests: [] }, NOW + 1).ledger;
+    const r = applyLedgerTurn(
+      l,
+      {
+        verdict: "reject",
+        verdictReason: "還差一致性",
+        escalationDecision: { choice: "narrow", reason: "縮小為一致性補證" },
+        workPackage: {
+          ...pkgInput,
+          id: "wp-4b-consistency",
+          goal: "補齊預期表",
+        },
+        instructions: [
+          "Cursor：執行 wp-4b-consistency，只改 fixtures 與離線測試，交付殘差≤1e-8 報告。",
+        ],
+        reportRequests: [],
+      },
+      NOW + 2,
+    );
+    assert.equal(r.escalated, false);
+    assert.equal(r.ledger.currentPackage?.id, "wp-4b-consistency");
+    assert.equal(r.ledger.currentPackage?.status, "executing");
+    assert.equal(r.ledger.currentPackage?.rejectCount, 0);
+    assert.equal(r.allowedInstructions.length, 1);
+    assert.equal(r.held.length, 0);
+    assert.ok(r.events.some((e) => /同回合放行|縮小範圍/.test(e)));
+  });
+
+  it("第二次退回同回合只有新包＋指令、漏寫 escalationDecision：仍視為 narrow 放行", () => {
+    let l = applyLedgerTurn(seeded(), { workPackage: pkgInput, instructions: [], reportRequests: [] }, NOW).ledger;
+    l = applyLedgerTurn(l, { verdict: "reject", instructions: [], reportRequests: [] }, NOW + 1).ledger;
+    const r = applyLedgerTurn(
+      l,
+      {
+        verdict: "reject",
+        workPackage: { ...pkgInput, id: "wp-4b-2", goal: "換做法重做" },
+        instructions: ["照 wp-4b-2 做完交報告"],
+        reportRequests: [],
+      },
+      NOW + 2,
+    );
+    assert.equal(r.escalated, false);
+    assert.equal(r.allowedInstructions.length, 1);
+    assert.equal(r.ledger.currentPackage?.id, "wp-4b-2");
+  });
+
   it("僵局處置 park：項目暫停、工作包清除、恢復派送", () => {
     let l = applyLedgerTurn(seeded(), { workPackage: pkgInput, instructions: [], reportRequests: [] }, NOW).ledger;
     l = applyLedgerTurn(l, { verdict: "reject", instructions: [], reportRequests: [] }, NOW).ledger;
