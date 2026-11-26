@@ -10,14 +10,12 @@ export function joinCodePoints(points: string[]): string {
   return points.join("");
 }
 
-/** 依積壓碼點數決定本幀取出量（含長內容追趕）。 */
+/** 依積壓碼點數決定本幀取出量。少量維持逐字，避免一小包一次倒完就停。 */
 export function adaptiveTakeCount(backlog: number): number {
   if (backlog <= 0) return 0;
-  if (backlog <= 12) return backlog;
-  if (backlog <= 48) return Math.max(3, Math.ceil(backlog / 4));
-  if (backlog <= 200) return Math.max(12, Math.ceil(backlog / 3));
-  // 長積壓：每幀至少 80、最多一半，加速追趕但不一次吐完超大塊
-  return Math.min(backlog, Math.max(80, Math.ceil(backlog / 2)));
+  if (backlog <= 48) return 1;
+  if (backlog <= 160) return 2;
+  return Math.min(8, Math.max(3, Math.ceil(backlog / 24)));
 }
 
 /** 遠端回覆用：一次一個字，積壓很多才加快，看起來像聊天吐字 */

@@ -635,7 +635,7 @@ async function handleJsonMode(opts: {
     const text = snapshot.trim();
     if (!text || text.startsWith("{") || text.startsWith("```")) return;
     const now = Date.now();
-    if (!force && now - lastCheckpointAt < 200 && text.length - lastCheckpointLen < 16) return;
+    if (!force && now - lastCheckpointAt < 80 && text.length - lastCheckpointLen < 6) return;
     lastCheckpointAt = now;
     lastCheckpointLen = text.length;
     checkpointChain = checkpointChain

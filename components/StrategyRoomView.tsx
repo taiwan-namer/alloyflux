@@ -621,7 +621,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
     syncPullRef.current = pull;
     void pull(true);
-    const timer = window.setInterval(() => void pull(false), 400);
+    const timer = window.setInterval(() => void pull(false), 120);
     const onVis = () => {
       if (document.visibilityState === "visible") void pull(true);
     };
