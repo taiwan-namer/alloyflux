@@ -782,7 +782,7 @@ export function ledgerProtocolBlock(): string {
 - 派工（要 Cursor 做事時必做）：可見回覆只准兩段，先「判定」最多 5 行，接著「交付命令」。交付命令必須原文寫進 instructions（至少一條）。Cursor 只執行 instructions；寫在回覆裡但 instructions 留空等於沒派工。禁止只給結語或方向，也禁止「請依下列／接續這項／先補證據」卻不寫出命令本身。
 - 交付命令一次寫完，讓 Cursor 做完就能交最終報告：交付物、範圍、這次明確不做的事、驗收。每條驗收都要能用報告裡的固定輸入、比對欄位、程序邊界、數字或狀態判定。禁止用「完整／正確／足夠／釐清／接續」當條件，那些詞會讓規格拖到下一輪才補。
 - 驗收通過（verdict "accept"）時必填 "conclusion"（放在判定段，3–5 行：做了什麼、驗收結果、數字、這次不代表什麼）。程式會結案並切到下一項；同一回合必須給下一項 workPackage 與對應交付命令。workPackage：{"id":"wp-…","itemId":"目前項目 id","goal":"…","scope":["允許改的檔案／模組"],"acceptance":["可用測試輸出判定的條件，不要形容詞"],"stopConditions":["遇到就停下回報的情況"]}。一個工作包要能一次做完再回報。
-- 不通過：verdict "reject"（附 verdictReason）＋一條修正命令，把要改的點和要重測的證據寫完，不要只解釋為什麼沒過。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局；僵局時 narrow／alternate 也要新 workPackage 加非空 instructions。
+- 還差一項：帳本用 verdict "reject"（附 verdictReason）＋一條修正命令，把要改的點和要重測的證據寫完。可見回覆禁止寫「不通過」「待改碼」「await_code」，改寫「還差：一句話」然後接交付命令；phase 必須填 reviewing。有 instructions 時禁止把 phase 設成 await_code，那個階段會讓 Cursor 停下來等使用者。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局；僵局時 narrow／alternate 也要新 workPackage 加非空 instructions。
 - 本回合訊息來自 Cursor 時必須派工（accept 接下一項、reject 一條修正、或 reportRequests 指名缺的證據）。不要只回覆使用者。
 - instructions 可寫字串或 {"itemId":"…","text":"…"}；itemId 與目前項目不同會被保留不派送。部署／git push／正式資料庫寫入一律保留給發起人。
 - 要看程式碼時，指名函式或行號範圍（每段 ≤150 行）；不要要求整份檔案。

@@ -116,7 +116,7 @@ function leanSopBlock(): string {
 1. 了解：依使用者描述與 Cursor 的架構報告理解專案。資訊不足時，用一個 reportRequests 請 Cursor 交架構摘要（不要原始碼）。
 2. 下指令：可見回覆先寫最多 5 行判定，接著寫交付命令；命令原文同時放進 instructions（至少一條，最多 5 條）。只寫在回覆、instructions 留空，Cursor 不會做。命令要含目標、範圍、這次不做的事、可用測試輸出判定的驗收；禁止只寫「請依下列／接續／先補證據」。同時輸出 workPackage（itemId、goal、scope、acceptance）。不指定逐行改法。
 3. 對齊：Cursor 回報「對齊有問題」時，只針對那個問題給一條交付命令，不重新規劃整個專案。
-4. 驗收：Cursor 交「最終報告」時對照驗收標準判定。通過 → verdict "accept"＋conclusion（放在判定段），同回合給下一項 workPackage 與交付命令；不通過 → verdict "reject"＋verdictReason，加一條把缺口和要重測的證據寫完的修正命令。不要只給結語或方向。
+4. 驗收：Cursor 交「最終報告」時對照驗收標準判定。通過 → verdict "accept"＋conclusion（放在判定段），同回合給下一項 workPackage 與交付命令。還差一項 → 帳本 verdict "reject"＋verdictReason，可見回覆寫「還差」加一條修正命令，phase 填 reviewing。禁止寫「不通過」或把 phase 設成 await_code，那會讓 Cursor 停下來等人。
 5. 使用者要求復盤時，再總結得失。
 禁止：要求原始碼或拆段上傳；擴大範圍（新點子寫在 reply 的「建議清單」，不要下成指令）；只為了確認而要求額外報告；部署、git push、正式資料庫寫入一律寫成「待發起人批准」。
 reply 控制在 800 字內。項目完成或要換下一項時，用 ledgerOps（setStatus／setCurrent）更新帳本。`;
@@ -159,7 +159,7 @@ async function buildContextBlock(
   const packageSince = pkg && pkg.status !== "accepted" ? pkg.createdAt : 0;
   const sourceBlock = fromWeb
     ? "## 發言來源\n本回合訊息來自：使用者（網頁）"
-    : "## 發言來源\n本回合訊息來自：Cursor。可見回覆只能是「判定」（最多 5 行）加「交付命令」。交付命令全文同時寫進 instructions；留空等於沒派工，Cursor 不會執行寫在回覆裡的句子。禁止只給結語、方向，或「請依下列／接續／先補證據」。通過就接下一項 workPackage 與命令；不通過就一條把缺口和證據寫完的修正命令。";
+    : "## 發言來源\n本回合訊息來自：Cursor。可見回覆只能是「判定」（最多 5 行）加「交付命令」。交付命令全文同時寫進 instructions；留空等於沒派工，Cursor 不會執行寫在回覆裡的句子。禁止只給結語、方向，或「請依下列／接續／先補證據」。通過就接下一項 workPackage 與命令。還差就寫「還差」加一條修正命令，phase 填 reviewing；禁止寫「不通過」或 phase=await_code，那會讓 Cursor 停下等人。";
 
   if (lean) {
     // 像一般聊天：只有專案錨點＋上一回合之後／本工作包期間上傳的報告，其餘全靠對話紀錄
@@ -362,6 +362,8 @@ function parseAssistantStructured(
       ? "ready_to_run"
       : "ready_next_run";
   }
+  // 有命令就要 Cursor 接著做。await_code 會讓它停下來等使用者。
+  if (nextStatus === "await_code" && instructions.length > 0) nextStatus = "reviewing";
 
   const nextDossier = mergeDossier(dossier, parsed.memoryUpdates);
   const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";

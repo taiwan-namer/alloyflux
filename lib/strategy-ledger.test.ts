@@ -336,6 +336,8 @@ describe("ledgerProtocolBlock", () => {
     assert.match(text, /交付命令必須原文寫進 instructions/);
     assert.match(text, /instructions 留空等於沒派工/);
     assert.match(text, /請依下列／接續這項／先補證據/);
+    assert.match(text, /禁止把 phase 設成 await_code/);
+    assert.match(text, /可見回覆禁止寫「不通過」/);
   });
 });
 
