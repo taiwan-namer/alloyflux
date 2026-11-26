@@ -1974,6 +1974,28 @@ export async function getSessionSyncMeta(
   };
 }
 
+/** 畫面只需要 source／kind。整包 structured_json 含 dossier，讀回來再丟掉會拖住「載入更早」。 */
+function sessionMessageSelect(display: boolean): string {
+  if (!display) {
+    return `id, session_id, user_id, role, content, structured_json, created_at,
+            speaker_model, speaker_role, speaker_label, turn_id, completion_status`;
+  }
+  return `id, session_id, user_id, role, content,
+          (structured_json::jsonb ->> 'source') AS msg_source,
+          (structured_json::jsonb ->> 'kind') AS msg_kind,
+          created_at, speaker_model, speaker_role, speaker_label, turn_id, completion_status`;
+}
+
+function structuredFromMessageRow(row: Record<string, unknown>): Record<string, unknown> {
+  if (row.structured_json != null && row.structured_json !== "") {
+    return safeJson(row.structured_json, {} as Record<string, unknown>);
+  }
+  const structured: Record<string, unknown> = {};
+  if (typeof row.msg_source === "string" && row.msg_source) structured.source = row.msg_source;
+  if (typeof row.msg_kind === "string" && row.msg_kind) structured.kind = row.msg_kind;
+  return structured;
+}
+
 function mapSessionMessageRow(row: Record<string, unknown>): StrategySessionMessageRow {
   const rawStatus = row.completion_status == null ? null : String(row.completion_status);
   const completionStatus =
@@ -1989,7 +2011,7 @@ function mapSessionMessageRow(row: Record<string, unknown>): StrategySessionMess
     sessionId: String(row.session_id),
     role: String(row.role) as "user" | "assistant" | "system",
     content: String(row.content ?? ""),
-    structured: safeJson(row.structured_json, {} as Record<string, unknown>),
+    structured: structuredFromMessageRow(row),
     createdAt: Number(row.created_at),
     speakerModel: row.speaker_model == null ? null : String(row.speaker_model),
     speakerRole: row.speaker_role == null ? null : String(row.speaker_role),
@@ -2154,6 +2176,8 @@ export async function listSessionMessagesPage(
     before?: string | null;
     /** 開房 lite：跳過 COUNT(*)，total 以本頁估算 */
     skipTotal?: boolean;
+    /** 畫面用：只取 source／kind，不把整包 structured_json 拉回 Node */
+    display?: boolean;
   },
 ): Promise<{
   messages: StrategySessionMessageRow[];
@@ -2169,9 +2193,7 @@ export async function listSessionMessagesPage(
   const before = decodeMessageCursor(opts?.before ?? null);
 
   // 先 DESC 取 limit+1，再翻成 ASC；多出的一則用來判斷 hasMore（更舊方向）
-  // 欄位不含超大 structured 以外必要者；開房仍需 content
-  const msgCols = `id, session_id, user_id, role, content, structured_json, created_at,
-                   speaker_model, speaker_role, speaker_label, turn_id, completion_status`;
+  const msgCols = sessionMessageSelect(Boolean(opts?.display));
   const rawDesc = (
     before
       ? ((await db()

@@ -175,8 +175,40 @@ function modelOptionTitle(opt: StrategyModelOption): string {
   return parts.join("｜");
 }
 
-/** 往上滑一次只補幾則，不把更早的歷史一次載完 */
-const STRATEGY_OLDER_PAGE = 5;
+/** 往上滑一次補一屏，不要 5 則一趟來回。下一頁在背景先抓好。 */
+const STRATEGY_OLDER_PAGE = 30;
+
+type OlderPage = {
+  messages: StrategySessionMessage[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  messageTotal: number;
+};
+
+function olderRequestKey(sessionId: string, cursor: string) {
+  return `${sessionId}\n${cursor}`;
+}
+
+async function requestOlderPage(sessionId: string, cursor: string): Promise<OlderPage | null> {
+  const res = await fetch(
+    `/api/strategy/sessions/${encodeURIComponent(sessionId)}?limit=${STRATEGY_OLDER_PAGE}&lite=1&part=thread&before=${encodeURIComponent(cursor)}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) return null;
+  const data = (await res.json()) as {
+    messages?: StrategySessionMessage[];
+    hasMore?: boolean;
+    nextCursor?: string | null;
+    messageTotal?: number;
+  };
+  if (!Array.isArray(data.messages) || !data.messages.length) return null;
+  return {
+    messages: data.messages,
+    hasMore: Boolean(data.hasMore),
+    nextCursor: data.nextCursor ?? null,
+    messageTotal: typeof data.messageTotal === "number" ? data.messageTotal : 0,
+  };
+}
 
 export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const {
@@ -240,6 +272,12 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const loadingOlderRef = useRef(false);
   /** 一次上滑只補一頁；離開頂端後才允許再補，避免連載整段歷史 */
   const olderArmedRef = useRef(true);
+  /** 下一頁更早訊息：游標沒變就共用同一個請求，點下去不用再等一趟 */
+  const olderPrefetchRef = useRef<{
+    key: string;
+    promise: Promise<OlderPage | null>;
+    ready: boolean;
+  } | null>(null);
   const syncAbortRef = useRef<AbortController | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
@@ -714,47 +752,58 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       });
   }
 
+  function prefetchOlder(sid: string, cursor: string) {
+    const key = olderRequestKey(sid, cursor);
+    const hit = olderPrefetchRef.current;
+    if (hit?.key === key) return hit.promise;
+    const entry = {
+      key,
+      ready: false,
+      promise: Promise.resolve(null as OlderPage | null),
+    };
+    entry.promise = requestOlderPage(sid, cursor).then((page) => {
+      entry.ready = true;
+      if (!page && olderPrefetchRef.current?.key === key) olderPrefetchRef.current = null;
+      return page;
+    });
+    olderPrefetchRef.current = entry;
+    return entry.promise;
+  }
+
+  useEffect(() => {
+    if (!detail.hasMore || !detail.nextCursor) return;
+    void prefetchOlder(detail.session.id, detail.nextCursor);
+  }, [detail.session.id, detail.hasMore, detail.nextCursor]);
+
   async function loadOlderMessages() {
-    if (
-      !onOlderMessages ||
-      loadingOlderRef.current ||
-      streamingRef.current ||
-      !detail.hasMore ||
-      !detail.nextCursor
-    ) {
+    if (!onOlderMessages || loadingOlderRef.current || !detail.hasMore || !detail.nextCursor) {
       return;
     }
+    const sid = sessionId;
+    const cursor = detail.nextCursor;
+    const key = olderRequestKey(sid, cursor);
+    const instant = olderPrefetchRef.current?.key === key && olderPrefetchRef.current.ready;
     loadingOlderRef.current = true;
-    setLoadingOlder(true);
+    if (!instant) setLoadingOlder(true);
     const el = roomScrollRef.current;
     const prevHeight = el?.scrollHeight ?? 0;
     const prevTop = el?.scrollTop ?? 0;
     try {
-      const sid = sessionId;
-      const res = await fetch(
-        `/api/strategy/sessions/${encodeURIComponent(sid)}?limit=${STRATEGY_OLDER_PAGE}&lite=1&part=thread&before=${encodeURIComponent(detail.nextCursor)}`,
-        { cache: "no-store" },
-      );
-      if (!res.ok) {
+      const page = await prefetchOlder(sid, cursor);
+      if (sid !== sessionIdRef.current) return;
+      if (!page) {
         olderArmedRef.current = true;
         return;
       }
-      const data = (await res.json()) as {
-        messages?: StrategySessionMessage[];
-        hasMore?: boolean;
-        nextCursor?: string | null;
-        messageTotal?: number;
-      };
-      if (!Array.isArray(data.messages) || !data.messages.length) {
-        olderArmedRef.current = true;
-        return;
+      if (olderPrefetchRef.current?.key === olderRequestKey(sid, cursor)) {
+        olderPrefetchRef.current = null;
       }
       olderScrollAdjustRef.current = { prevHeight, prevTop };
       onOlderMessages({
-        messages: data.messages,
-        hasMore: Boolean(data.hasMore),
-        nextCursor: data.nextCursor ?? null,
-        messageTotal: typeof data.messageTotal === "number" ? data.messageTotal : detail.messageTotal ?? 0,
+        messages: page.messages,
+        hasMore: page.hasMore,
+        nextCursor: page.nextCursor,
+        messageTotal: page.messageTotal || detail.messageTotal || 0,
       });
     } finally {
       loadingOlderRef.current = false;
@@ -1505,7 +1554,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                 <button
                   type="button"
                   className="ghost strategy-room-load-older"
-                  disabled={loadingOlder || streaming}
+                  disabled={loadingOlder}
                   onClick={() => void loadOlderMessages()}
                   title="訊息太短無法上滑時，請直接點此載入"
                 >

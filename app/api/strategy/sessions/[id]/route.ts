@@ -65,6 +65,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
           limit,
           before: pageMode ? before : null,
           skipTotal: lite,
+          display: threadOnly,
         })
       : Promise.resolve({
           messages: [] as Awaited<ReturnType<typeof listSessionMessagesPage>>["messages"],
