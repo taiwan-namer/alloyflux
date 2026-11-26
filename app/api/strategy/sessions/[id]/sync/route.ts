@@ -11,6 +11,7 @@ import {
   readDossier,
   STRATEGY_LIMITS,
 } from "@/lib/strategy-loop";
+import { readLedger, renderLedgerForHuman } from "@/lib/strategy-ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -94,6 +95,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     chars: r.chars,
     createdAt: r.createdAt,
   }));
+  const ledger = readLedger(session.meta);
+  const ledgerActive = Boolean(ledger.items.length || ledger.brief || ledger.currentPackage);
 
   return Response.json({
     changed: true,
@@ -107,6 +110,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     workspaceMemoryNotes: meta.workspaceMemoryNotes,
     session,
     dossier: readDossier(session.meta),
+    ledger: ledgerActive ? ledger : null,
+    ledgerText: ledgerActive ? renderLedgerForHuman(ledger) : "",
     messages,
     gap,
     runs,

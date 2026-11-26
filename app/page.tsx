@@ -216,6 +216,8 @@ function slimStrategyOpen(detail: StrategySessionDetail): StrategySessionDetail 
     reports: [],
     runs: [],
     dossier: { strategies: {}, findings: [], decisions: [], fPlan: null },
+    ledger: detail.ledger ?? null,
+    ledgerText: detail.ledgerText ?? "",
     messages: messages.map((m) => ({
       id: m.id,
       role: m.role,
@@ -2583,6 +2585,13 @@ export default function ChatPage() {
         runs: keepList(detail.runs, prev?.runs),
         reports: keepList(detail.reports, prev?.reports),
         dossier: dossierEmpty && same && prev ? prev.dossier : detail.dossier,
+        ledger: detail.ledger !== undefined ? detail.ledger : same ? prev?.ledger : null,
+        ledgerText:
+          detail.ledgerText !== undefined
+            ? detail.ledgerText
+            : same
+              ? prev?.ledgerText
+              : "",
       };
     });
     putStrategyCache(detail.session.id, detail);
@@ -2864,6 +2873,8 @@ export default function ChatPage() {
         ...prev,
         session: { ...prev.session, ...data.session },
         dossier: data.dossier ?? prev.dossier,
+        ledger: data.ledger !== undefined ? data.ledger : prev.ledger,
+        ledgerText: data.ledgerText !== undefined ? data.ledgerText : prev.ledgerText,
         messages: nextMessages,
         runs: Array.isArray(data.runs) ? data.runs : prev.runs,
         reports: Array.isArray(data.reports) ? data.reports : prev.reports,

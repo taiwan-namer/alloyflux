@@ -123,6 +123,55 @@ export interface StrategyDispatchItem {
   createdAt: number;
 }
 
+export type StrategyLedgerItemStatus = "todo" | "in_progress" | "done" | "parked" | "blocked";
+
+export interface StrategyLedgerItem {
+  id: string;
+  title: string;
+  status: StrategyLedgerItemStatus;
+  parentId?: string;
+  note?: string;
+  parkedReason?: string;
+  resumeTrigger?: string;
+  conclusion?: string;
+  updatedAt: number;
+}
+
+export interface StrategyLedgerBrief {
+  topic: string;
+  problems: string[];
+  requirements: string[];
+  constraints: string[];
+  updatedAt: number;
+}
+
+export interface StrategyLedgerPackage {
+  id: string;
+  itemId: string;
+  goal: string;
+  acceptance: string[];
+  rejectCount: number;
+  status: "executing" | "reviewing" | "accepted" | "escalated";
+  lastRejectReason?: string;
+}
+
+/** 主線帳本（資訊欄進度；打勾由主持人寫入，使用者只看） */
+export interface StrategyLedger {
+  brief: StrategyLedgerBrief | null;
+  items: StrategyLedgerItem[];
+  currentItemId: string | null;
+  currentPackage: StrategyLedgerPackage | null;
+  log?: string[];
+}
+
+export const LEDGER_STATUS_LABEL: Record<StrategyLedgerItemStatus, string> = {
+  todo: "未開始",
+  in_progress: "進行中",
+  done: "完成",
+  parked: "暫停",
+  blocked: "卡住",
+};
+
 export interface StrategySessionDetail {
   session: StrategySessionBrief & {
     profileId?: string;
@@ -138,6 +187,9 @@ export interface StrategySessionDetail {
     decisions: string[];
     fPlan: Record<string, unknown> | null;
   };
+  /** 主線帳本；舊快取可能沒有 */
+  ledger?: StrategyLedger | null;
+  ledgerText?: string;
   messages: StrategySessionMessage[];
   /** 4A：尚有更舊訊息（超過 hardCap／單頁） */
   hasMore?: boolean;
@@ -169,6 +221,8 @@ export type StrategySyncResponse =
       workspaceMemoryNotes?: string;
       session: StrategySessionDetail["session"];
       dossier: StrategySessionDetail["dossier"];
+      ledger?: StrategySessionDetail["ledger"];
+      ledgerText?: string;
       messages: StrategySessionDetail["messages"];
       runs: StrategySessionDetail["runs"];
       reports: StrategySessionDetail["reports"];

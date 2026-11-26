@@ -12,6 +12,7 @@ import {
 } from "react";
 import {
   DISPATCH_STATUS_LABEL,
+  LEDGER_STATUS_LABEL,
   MEMBER_ROLE_LABEL,
   PAUSE_STATE_LABEL,
   dispatchText,
@@ -19,6 +20,8 @@ import {
   strategyStatusLabel,
   type PauseAction,
   type StrategyDispatchItem,
+  type StrategyLedger,
+  type StrategyLedgerItem,
   type StrategyMemberConfig,
   type StrategyMemberRole,
   type StrategyModelOption,
@@ -1238,7 +1241,13 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
             className={`ghost${drawerOpen ? " is-active" : ""}`}
             onClick={() => setDrawerOpen((v) => !v)}
           >
-            資訊{pending.length ? `（${pending.length}）` : ""}
+            資訊
+            {(() => {
+              const items = detail.ledger?.items ?? [];
+              const done = items.filter((i) => i.status === "done").length;
+              if (items.length) return ` ${done}/${items.length}`;
+              return pending.length ? `（${pending.length}）` : "";
+            })()}
           </button>
           <button type="button" className="ghost" disabled={busy || streaming} onClick={onRefresh}>
             重新整理
@@ -1523,6 +1532,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               )}
             </div>
 
+            <LedgerRoadmapPanel ledger={detail.ledger ?? null} />
+
             <div className="modal-section">
               <label className="strategy-auto-toggle">
                 <input
@@ -1606,6 +1617,96 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         ) : null}
       </div>
     </section>
+  );
+}
+
+function LedgerRoadmapPanel({ ledger }: { ledger: StrategyLedger | null }) {
+  if (!ledger?.items?.length && !ledger?.brief && !ledger?.currentPackage) {
+    return (
+      <div className="modal-section">
+        <h3>路線圖進度</h3>
+        <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+          尚無路線圖。討論定案後由主持人排項目；完成時由主持人打勾，此處僅供查看。
+        </p>
+      </div>
+    );
+  }
+  const items = ledger.items ?? [];
+  const done = items.filter((i) => i.status === "done").length;
+  const children = new Map<string, StrategyLedgerItem[]>();
+  const roots: StrategyLedgerItem[] = [];
+  const ids = new Set(items.map((i) => i.id));
+  for (const it of items) {
+    if (it.parentId && ids.has(it.parentId)) {
+      const arr = children.get(it.parentId) ?? [];
+      arr.push(it);
+      children.set(it.parentId, arr);
+    } else {
+      roots.push(it);
+    }
+  }
+  const pkg = ledger.currentPackage;
+  const rows: { item: StrategyLedgerItem; depth: number }[] = [];
+  const walk = (it: StrategyLedgerItem, depth: number) => {
+    rows.push({ item: it, depth });
+    for (const c of children.get(it.id) ?? []) walk(c, depth + 1);
+  };
+  for (const r of roots) walk(r, 0);
+
+  return (
+    <div className="modal-section">
+      <h3>
+        路線圖進度
+        {items.length ? `（${done}/${items.length}）` : ""}
+      </h3>
+      <p className="muted strategy-ledger-hint">進度由主持人更新，此處不可點選。</p>
+      {ledger.brief?.topic ? (
+        <p className="strategy-ledger-topic">主題：{ledger.brief.topic}</p>
+      ) : null}
+      {pkg ? (
+        <p className="strategy-ledger-pkg">
+          目前工作包：{pkg.goal}
+          {pkg.status === "escalated" ? "（僵局）" : ""}
+          {pkg.rejectCount > 0 ? `｜退回 ${pkg.rejectCount}` : ""}
+        </p>
+      ) : null}
+      {rows.length ? (
+        <ul className="strategy-ledger-list" aria-label="路線圖項目">
+          {rows.map(({ item, depth }) => {
+            const current = ledger.currentItemId === item.id;
+            const checked = item.status === "done";
+            return (
+              <li
+                key={item.id}
+                className={`strategy-ledger-item status-${item.status}${current ? " is-current" : ""}`}
+                style={{ paddingLeft: depth * 14 }}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled
+                  readOnly
+                  tabIndex={-1}
+                  aria-label={`${item.title}（${LEDGER_STATUS_LABEL[item.status]}）`}
+                />
+                <div className="strategy-ledger-body">
+                  <div className="strategy-ledger-title">
+                    <span className="id">{item.id}</span>
+                    <span>{item.title}</span>
+                    {current ? <span className="strategy-ledger-now">目前</span> : null}
+                  </div>
+                  <div className="strategy-ledger-meta muted">
+                    {LEDGER_STATUS_LABEL[item.status]}
+                    {item.conclusion ? `｜${item.conclusion}` : item.note ? `｜${item.note}` : ""}
+                    {item.parkedReason ? `｜暫停：${item.parkedReason}` : ""}
+                  </div>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
