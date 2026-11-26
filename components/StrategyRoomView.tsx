@@ -265,6 +265,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const streaming = generating;
   const [pendingUser, setPendingUser] = useState<string | null>(null);
   const [streamBubbles, setStreamBubbles] = useState<StreamingMemberBubble[]>([]);
+  /** 上一輪串流氣泡尚未進歷史時又開新回合：暫留顯示，避免主持人回覆被清掉 */
+  const [parkedBubbles, setParkedBubbles] = useState<StreamingMemberBubble[]>([]);
   const [notices, setNotices] = useState<string[]>([]);
   const [degradedHint, setDegradedHint] = useState(false);
   const [memberDraft, setMemberDraft] = useState<StrategyMemberConfig[]>([]);
@@ -445,6 +447,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       setCommitting(false);
       setPendingUser(null);
       setStreamBubbles([]);
+      setParkedBubbles([]);
       setNotices([]);
       setDegradedHint(false);
       setSettingsOpen(false);
@@ -453,21 +456,29 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     }
     sessionIdRef.current = detail.session.id;
     // 切房重置；同房僅單調遞增，避免 session.updatedAt 覆寫掉較大的 sync watermark
+    // count 必須用總則數，不可用視窗長度，否則 sync 會誤判缺口並整頁重載把對話吃掉
+    const totalHint =
+      typeof detail.messageTotal === "number" && detail.messageTotal > 0
+        ? detail.messageTotal
+        : detail.messages.length || 0;
     if (prev !== detail.session.id) {
       lastUpdatedAtRef.current = detail.session.updatedAt || 0;
-      lastMessageCountRef.current = detail.messages.length || 0;
+      lastMessageCountRef.current = totalHint;
       olderArmedRef.current = true;
     } else {
       lastUpdatedAtRef.current = Math.max(
         lastUpdatedAtRef.current,
         detail.session.updatedAt || 0,
       );
-      lastMessageCountRef.current = Math.max(
-        lastMessageCountRef.current,
-        detail.messages.length || 0,
-      );
+      lastMessageCountRef.current = Math.max(lastMessageCountRef.current, totalHint);
     }
-  }, [detail.session.id, detail.session.updatedAt, detail.messages.length, invalidateStream]);
+  }, [
+    detail.session.id,
+    detail.session.updatedAt,
+    detail.messages.length,
+    detail.messageTotal,
+    invalidateStream,
+  ]);
 
   // 首次載入／切房：現有訊息全部標記為已看過（不重播）；同房外部新訊息才逐步顯示
   useLayoutEffect(() => {
@@ -486,13 +497,25 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
     const liveBubbles = bubblesRef.current.length > 0;
     const freshHasAssistant = fresh.some((m) => m.role === "assistant");
+    const freshUserTexts = new Set(
+      fresh.filter((m) => m.role === "user").map((m) => m.content.trim()),
+    );
     // 本輪串流氣泡還在時，等歷史裡的 AI 回覆到了再只留那一份，避免兩個對話窗
-    if (streamingRef.current || handoffPendingRef.current || liveBubbles) {
+    if (streamingRef.current || handoffPendingRef.current || liveBubbles || parkedBubbles.length) {
       if (freshHasAssistant) {
         handoffPendingRef.current = false;
-        setPendingUser(null);
-        setStreamBubbles([]);
-        clearDripAndBubbles();
+        setParkedBubbles([]);
+        // 新回合已在飛：不可因「上一則」assistant 進歷史而清掉本則 pending／氣泡
+        if (!generatingRef.current) {
+          setPendingUser(null);
+          setStreamBubbles([]);
+          clearDripAndBubbles();
+        } else {
+          setPendingUser((p) => (p && freshUserTexts.has(p.trim()) ? null : p));
+        }
+      } else if (freshUserTexts.size) {
+        // 僅 user 先落庫：對得上才清 pending，避免重複氣泡
+        setPendingUser((p) => (p && freshUserTexts.has(p.trim()) ? null : p));
       }
       // 自己這一輪不走 reveal：否則會先截斷再突然完整，還可能跟串流氣泡疊在一起
       return;
@@ -502,7 +525,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       for (const m of fresh) next.add(m.id);
       return next;
     });
-  }, [sessionId, detail.messages, clearDripAndBubbles]);
+  }, [sessionId, detail.messages, clearDripAndBubbles, parkedBubbles.length]);
 
   const modelsKey = JSON.stringify(detail.session.models ?? null);
 
@@ -540,7 +563,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   // 離散事件貼底（送出、新訊息、notice）；串流文字chunk 僅在 rAF flush 內貼底
   useEffect(() => {
     scrollIfSticky();
-  }, [detail.messages.length, pendingUser, notices, scrollIfSticky]);
+  }, [detail.messages.length, pendingUser, parkedBubbles.length, notices, scrollIfSticky]);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -724,6 +747,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     invalidateStream("user");
     handoffPendingRef.current = false;
     setStreamBubbles([]);
+    setParkedBubbles([]);
     setPendingUser(null);
     setNotices([]);
     setDegradedHint(false);
@@ -740,6 +764,20 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const sid = sessionId;
     const content = text.trim();
     if (!content || generating || committing || detail.session.status === "closed") return;
+
+    // 上一輪可見回覆尚未進歷史：先 sync；若仍未進，暫留氣泡再開新串流，避免吃掉主持人回覆
+    if (handoffPendingRef.current) {
+      try {
+        await syncPullRef.current(true);
+      } catch {
+        /* ignore */
+      }
+      if (sid !== sessionIdRef.current) return;
+      if (handoffPendingRef.current && bubblesRef.current.some((b) => b.content.trim())) {
+        setParkedBubbles(bubblesRef.current.map((b) => ({ ...b, done: true })));
+      }
+      handoffPendingRef.current = false;
+    }
 
     const runId = ++streamRunIdRef.current;
     const isCurrent = () => runId === streamRunIdRef.current && sid === sessionIdRef.current;
@@ -1423,13 +1461,28 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                 </button>
               </div>
             ) : null}
-            {detail.messages.length === 0 && !pendingUser && streamBubbles.length === 0 ? (
+            {detail.messages.length === 0 &&
+            !pendingUser &&
+            streamBubbles.length === 0 &&
+            parkedBubbles.length === 0 ? (
               <div className="muted strategy-room-loading-copy">
                 {busy ? "載入中…" : "尚無訊息"}
               </div>
             ) : (
               <HistoryMessages messages={detail.messages} revealIds={revealIds} onProgress={scrollIfSticky} />
             )}
+
+            {parkedBubbles.map((b) => (
+              <div key={`parked-${b.key}`} className="strategy-msg strategy-msg-assistant is-streaming is-done">
+                <div className="strategy-msg-role">
+                  <span className={`strategy-role-badge is-${b.role}`}>{b.label}</span>
+                  {b.modelId ? <span className="muted"> · {b.modelId}</span> : null}
+                </div>
+                <div className="strategy-msg-body strategy-md-body">
+                  <SafeLightMarkdown content={b.content || ""} streaming={false} />
+                </div>
+              </div>
+            ))}
 
             {pendingUser ? (
               <div className="strategy-msg strategy-msg-user is-pending">

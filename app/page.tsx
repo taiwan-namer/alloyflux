@@ -2828,11 +2828,15 @@ export default function ChatPage() {
     // 4A：串流中仍可接受 reconciliation（RoomView 以 force pull 觸發）；不再因 sending 永久吞掉
     if (!strategyDetail || strategyDetail.session.id !== data.session.id) return;
     if (data.gap) {
-      // 新增量超過補齊上限：merge 會留下中段缺口，直接換成最新一頁
+      // 新增量超過補齊上限：重抓最新一頁，但保留已載入的更早訊息，避免把對話「吃掉」
       const sid = data.session.id;
       void ensureStrategyFetch(sid).then((fresh) => {
         if (fresh && fresh.session.id === sid) {
-          applyStrategyDetail(fresh, { switching: false, refreshMemory: !wsMemoryDirty });
+          applyStrategyDetail(fresh, {
+            switching: false,
+            refreshMemory: !wsMemoryDirty,
+            keepOlder: true,
+          });
         }
       });
       return;
