@@ -6,6 +6,7 @@ import type { ModelInfo } from "./models";
 import {
   daysUntilSubscriptionExpiry,
   fetchSubscriptionQuota,
+  healOverdueQuotaWindows,
   isSubscriptionExpiringSoon,
   quotaWindowForModel,
   refreshOAuthCredentials,
@@ -188,6 +189,19 @@ function envSources(): (Source & { secret: string })[] {
   });
 }
 
+/** 讀取貨源時自動清掉「重置已過仍卡在 share_limit」的過期快取，並寫回 DB */
+async function withHealedQuota(source: Source): Promise<Source> {
+  if (!source.quota?.windows?.length) return source;
+  const { quota, healed } = healOverdueQuotaWindows(source.quota);
+  if (!healed) return source;
+  try {
+    await saveSourceQuota(source.id, quota);
+  } catch {
+    // 寫回失敗仍回傳已治癒的記憶體快照，讓本輪派發／後台顯示先恢復
+  }
+  return { ...source, quota, quotaUpdatedAt: quota.fetchedAt };
+}
+
 async function dbSources(opts?: { includeRemoved?: boolean }): Promise<(Source & { resolveSecret: () => string })[]> {
   await ensureSourcesOwnerColumn();
   const rows = (await db()
@@ -197,7 +211,12 @@ async function dbSources(opts?: { includeRemoved?: boolean }): Promise<(Source &
         : "SELECT * FROM sources WHERE removed_at IS NULL ORDER BY priority, created_at",
     )
     .all()) as unknown as SourceRow[];
-  return rows.map((r) => ({ ...rowToSource(r), resolveSecret: () => decrypt(r.encrypted_key) }));
+  return Promise.all(
+    rows.map(async (r) => {
+      const source = await withHealedQuota(rowToSource(r));
+      return { ...source, resolveSecret: () => decrypt(r.encrypted_key) };
+    }),
+  );
 }
 
 function monthStart(): number {
@@ -274,16 +293,18 @@ export async function listSourcesIncludingRemoved(): Promise<SourceStatus[]> {
     )
     .all(monthStart())) as { id: string; used: number }[];
   const usedMap = new Map(usageRows.map((r) => [String(r.id), Number(r.used)]));
-  return rows.map((r) => {
-    const s = rowToSource(r);
-    const h = health.get(s.id);
-    return {
-      ...s,
-      usedThisMonthPoints: usedMap.get(s.id) ?? 0,
-      cooldownUntil: h && h.cooldownUntil > now ? h.cooldownUntil : null,
-      lastError: h?.lastError ?? null,
-    };
-  });
+  return Promise.all(
+    rows.map(async (r) => {
+      const s = await withHealedQuota(rowToSource(r));
+      const h = health.get(s.id);
+      return {
+        ...s,
+        usedThisMonthPoints: usedMap.get(s.id) ?? 0,
+        cooldownUntil: h && h.cooldownUntil > now ? h.cooldownUntil : null,
+        lastError: h?.lastError ?? null,
+      };
+    }),
+  );
 }
 
 export async function assertSourceOwnedBy(
@@ -553,19 +574,53 @@ export async function syncSourceQuotaDetailed(sourceId: string): Promise<SyncQuo
   let creds = JSON.parse(decrypt(row.encrypted_key)) as OAuthCredentials;
   if (creds.delegatedToNode) {
     // Token 在節點；平台無法代查，保留上次 quota_json
+    // 但仍可對「已過重置時間」的快取做樂觀清零，避免節點離線時永久卡在 share_limit
+    if (prev?.windows?.length) {
+      const { quota: healed, healed: didHeal } = healOverdueQuotaWindows(prev);
+      if (didHeal) {
+        await saveSourceQuota(sourceId, healed);
+        return {
+          sourceId,
+          ok: true,
+          skipped: true,
+          reason: "delegated_to_node; healed_overdue_cache",
+          quota: healed,
+        };
+      }
+    }
     return { sourceId, ok: true, skipped: true, reason: "delegated_to_node", quota: prev };
   }
   let refreshError: string | null = null;
+  let didRefresh = false;
   try {
     if (creds.expiresAt && creds.expiresAt - Date.now() < 5 * 60_000 && creds.refreshToken) {
       creds = await refreshOAuthCredentials(creds);
       await saveUpdatedOAuthCreds(sourceId, creds);
+      didRefresh = true;
     }
   } catch (e) {
     // refresh 失敗先仍嘗試用現有 access token 查用量；兩邊都掛才標失效
     refreshError = e instanceof Error ? e.message : String(e);
   }
-  const quota = await fetchSubscriptionQuota(creds);
+  let quota = await fetchSubscriptionQuota(creds);
+
+  // access token 可能已失效但 expiresAt 仍在未來：強制 refresh 再查一次
+  if (
+    (quota.subscriptionStatus === "usage_unavailable" || (quota.windows?.length ?? 0) === 0) &&
+    quota.subscriptionStatus !== "auth_failed" &&
+    !didRefresh &&
+    creds.refreshToken
+  ) {
+    try {
+      creds = await refreshOAuthCredentials(creds);
+      await saveUpdatedOAuthCreds(sourceId, creds);
+      didRefresh = true;
+      refreshError = null;
+      quota = await fetchSubscriptionQuota(creds);
+    } catch (e) {
+      refreshError = e instanceof Error ? e.message : String(e);
+    }
+  }
 
   // 查不到真實視窗：保留舊值，避免把後台洗成假 0%／假 100%
   if (quota.subscriptionStatus === "usage_unavailable" || (quota.windows?.length ?? 0) === 0) {
@@ -580,6 +635,22 @@ export async function syncSourceQuotaDetailed(sourceId: string): Promise<SyncQuo
         reason: refreshError ? `auth_failed; refresh: ${refreshError}` : "auth_failed",
         quota,
       };
+    }
+    // 同步失敗但重置時間已過：樂觀清零過期窗，打破「達額度上限後永久卡住」
+    if (prev?.windows?.length) {
+      const { quota: healed, healed: didHeal } = healOverdueQuotaWindows(prev);
+      if (didHeal) {
+        await saveSourceQuota(sourceId, healed);
+        return {
+          sourceId,
+          ok: true,
+          skipped: true,
+          reason: refreshError
+            ? `usage_unavailable_healed_overdue; refresh: ${refreshError}`
+            : "usage_unavailable_healed_overdue",
+          quota: healed,
+        };
+      }
     }
     return {
       sourceId,

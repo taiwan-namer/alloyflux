@@ -1254,12 +1254,38 @@ export default function AdminPage() {
                           </div>
                         </dl>
 
-                        {(cooling || s.lastError) && (
-                          <div className="adm-alert">
-                            {cooling && <div>冷卻中，至 {fmtTime(s.cooldownUntil)}</div>}
-                            {s.lastError && <div>最近錯誤：{s.lastError}</div>}
-                          </div>
-                        )}
+                        {(() => {
+                          const overdueStuck = windows.some((w) => {
+                            if (!w.resetAt) return false;
+                            const t = Date.parse(w.resetAt);
+                            return Number.isFinite(t) && t <= Date.now() && w.usedPercent >= s.shareLimitPct;
+                          });
+                          if (!cooling && !s.lastError && !overdueStuck && s.enabled) return null;
+                          return (
+                            <div className="adm-alert">
+                              {cooling && <div>冷卻中，至 {fmtTime(s.cooldownUntil)}</div>}
+                              {s.lastError && <div>最近錯誤：{s.lastError}</div>}
+                              {overdueStuck && (
+                                <div>
+                                  重置時間已過仍達分享上限（快取可能卡住）。請按上方「同步各水庫容量」；
+                                  {!s.enabled ? "此水庫目前停用，同步後請一併啟用。" : "若仍異常可先停用再啟用觸發刷新。"}
+                                </div>
+                              )}
+                              {!s.enabled && (
+                                <div style={{ marginTop: 8 }}>
+                                  <button
+                                    type="button"
+                                    className="adm-btn adm-btn-primary"
+                                    disabled={busyId === s.id}
+                                    onClick={() => void toggleSource(s)}
+                                  >
+                                    {busyId === s.id ? "處理中…" : "啟用此水庫"}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </article>
                     );
                   })}

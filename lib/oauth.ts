@@ -150,14 +150,22 @@ export function quotaWindowForModel(quota: SubscriptionQuota, modelId: string): 
               ? "grok"
               : /claude|gpt-oss|agy-claude|agy-gpt/.test(id)
                 ? "third_party"
-                : /flash-lite|3\.5-flash-lite/.test(id)
-                  ? "flash-lite"
-                  : /3\.8-flash/.test(id)
-                    ? "3.8-flash"
-                    : /3\.1-pro|2\.5-pro/.test(id)
-                      ? "3.1-pro"
-                      : "shared";
-  const matched = quota.windows.filter((w) => w.modelKey === prefer);
+                : /^gpt-|chatgpt|o[1-4]/.test(id)
+                  ? "chatgpt"
+                  : /flash-lite|3\.5-flash-lite/.test(id)
+                    ? "flash-lite"
+                    : /3\.8-flash/.test(id)
+                      ? "3.8-flash"
+                      : /3\.1-pro|2\.5-pro/.test(id)
+                        ? "3.1-pro"
+                        : "shared";
+  let matched = quota.windows.filter((w) => w.modelKey === prefer);
+  // ChatGPT 舊快取可能缺 modelKey：用標籤／空 key 辨識，勿誤退回 Gemini 總額
+  if (!matched.length && prefer === "chatgpt") {
+    matched = quota.windows.filter(
+      (w) => w.modelKey == null || /chatgpt|小時|週視窗|用量視窗/i.test(w.label),
+    );
+  }
   // 第三方／Gemini 4 專池／Grok 沒對應窗就不要退回 Gemini 總額，避免誤熔斷
   if (
     !matched.length &&
@@ -173,6 +181,60 @@ export function quotaWindowForModel(quota: SubscriptionQuota, modelId: string): 
   const pool = matched.length ? matched : quota.windows.filter((w) => w.modelKey === "shared" || !w.modelKey);
   const use = pool.length ? pool : quota.windows;
   return use.reduce((a, b) => (a.remainingPercent <= b.remainingPercent ? a : b));
+}
+
+function isQuotaWindowOverdue(w: QuotaWindow, quotaFetchedAt: number, nowMs: number): boolean {
+  if (w.resetAt) {
+    const t = Date.parse(w.resetAt);
+    return Number.isFinite(t) && t < nowMs;
+  }
+  // 無 resetAt：若快取已超過該視窗長度（如 5h），視為過期
+  if (
+    typeof w.limitWindowSeconds === "number" &&
+    w.limitWindowSeconds > 0 &&
+    quotaFetchedAt > 0 &&
+    nowMs - quotaFetchedAt > w.limitWindowSeconds * 1000
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 供給者達 share_limit 後平台不再派發，用量快取容易停在「已滿」。
+ * 若重置時間已過（或快取超過視窗長度），樂觀清零，讓水庫自動恢復可派。
+ */
+export function healOverdueQuotaWindows(
+  quota: SubscriptionQuota,
+  nowMs = Date.now(),
+): { quota: SubscriptionQuota; healed: boolean } {
+  let healed = false;
+  const windows = quota.windows.map((w) => {
+    if (!isQuotaWindowOverdue(w, quota.fetchedAt, nowMs)) return w;
+    if (w.usedPercent <= 0 && w.remainingPercent >= 99.5) return w;
+    healed = true;
+    return {
+      ...w,
+      usedPercent: 0,
+      remainingPercent: 100,
+      uiUsedPercent: 0,
+      uiRemainingPercent: 100,
+      // 清掉過期 reset，避免後台一直顯示「已過重置時間」
+      resetAt: null,
+    };
+  });
+  if (!healed) return { quota, healed: false };
+  const tightest = windows.reduce((a, b) => (a.remainingPercent <= b.remainingPercent ? a : b));
+  return {
+    healed: true,
+    quota: {
+      ...quota,
+      windows,
+      primaryUsedPercent: tightest.uiUsedPercent,
+      primaryRemainingPercent: tightest.uiRemainingPercent,
+      fetchedAt: nowMs,
+    },
+  };
 }
 
 export interface SubscriptionQuota {
