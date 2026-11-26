@@ -35,7 +35,7 @@ import {
   type ViewMode,
 } from "@/components/strategy-types";
 import SafeLightMarkdown from "@/components/SafeLightMarkdown";
-import { createAdaptiveDripDriver, typewriterTakeCount } from "@/lib/adaptive-drip";
+import { createAdaptiveDripDriver } from "@/lib/adaptive-drip";
 import {
   applyServerTemplateId,
   beginTemplateSave,
@@ -290,9 +290,14 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   /** 已接收串流緩衝（權威內容；動畫不得改寫） */
   const bubblesRef = useRef<StreamingMemberBubble[]>([]);
   const dripDriverRef = useRef(createAdaptiveDripDriver());
-  const remoteDripRef = useRef(createAdaptiveDripDriver(undefined, undefined, typewriterTakeCount));
-  const remoteSeededRef = useRef<Set<string>>(new Set());
-  const [remoteBubble, setRemoteBubble] = useState<StreamingMemberBubble | null>(null);
+  const [hostTail, setHostTail] = useState<{
+    id: string;
+    content: string;
+    speakerModel: string | null;
+    speakerRole: string | null;
+    speakerLabel: string | null;
+    completionStatus: string | null;
+  } | null>(null);
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const seenSessionIdRef = useRef<string | null>(null);
   const toastTimerRef = useRef<number | null>(null);
@@ -447,6 +452,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       setPendingUser(null);
       setStreamBubbles([]);
       setParkedBubbles([]);
+      setHostTail(null);
       setNotices([]);
       setDegradedHint(false);
       setSettingsOpen(false);
@@ -634,25 +640,59 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     };
   }, [sessionId]);
 
-  const remotePartial = useMemo(() => {
-    const live =
-      generating ||
-      streamBubbles.some((b) => b.content.trim()) ||
-      parkedBubbles.some((b) => b.content.trim());
-    if (live) return null;
-    for (let i = detail.messages.length - 1; i >= 0; i--) {
-      const m = detail.messages[i]!;
-      if (
-        m.role === "assistant" &&
-        m.completionStatus === "partial" &&
-        m.speakerRole !== "advisor" &&
-        Date.now() - (m.createdAt || 0) < 5 * 60 * 1000
-      ) {
-        return m;
+  useEffect(() => {
+    let cancelled = false;
+    let flying = false;
+    const sid = sessionId;
+    async function pullTail() {
+      if (cancelled || flying || document.visibilityState === "hidden") return;
+      flying = true;
+      try {
+        const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sid)}/tail`, { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const data = (await res.json()) as { tail?: typeof hostTail };
+        if (cancelled) return;
+        const next = data.tail ?? null;
+        setHostTail((cur) => {
+          if (!next) return cur;
+          if (next.completionStatus !== "partial" && cur?.id !== next.id) return cur;
+          if (
+            cur &&
+            cur.id === next.id &&
+            cur.content === next.content &&
+            cur.completionStatus === next.completionStatus
+          ) {
+            return cur;
+          }
+          return next;
+        });
+      } catch {
+        /* 下一輪再問 */
+      } finally {
+        flying = false;
       }
     }
-    return null;
-  }, [detail.messages, generating, streamBubbles, parkedBubbles]);
+    void pullTail();
+    const timer = window.setInterval(() => void pullTail(), 80);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [sessionId]);
+
+  const localStreamLive =
+    generating ||
+    streamBubbles.some((b) => b.content.trim()) ||
+    parkedBubbles.some((b) => b.content.trim());
+  const remotePartial = localStreamLive ? null : hostTail;
+
+  useEffect(() => {
+    if (!hostTail || hostTail.completionStatus === "partial") return;
+    const hist = detail.messages.find((m) => m.id === hostTail.id);
+    if (hist && hist.content.length >= hostTail.content.length && hist.completionStatus !== "partial") {
+      setHostTail(null);
+    }
+  }, [detail.messages, hostTail]);
 
   const historyMessages = useMemo(() => {
     const live =
@@ -665,48 +705,15 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     });
   }, [detail.messages, streamBubbles, parkedBubbles, remotePartial]);
 
-  const remoteTyping = Boolean(
-    remoteBubble && remotePartial && remoteBubble.content.length < remotePartial.content.length,
-  );
+  const remoteTyping = remotePartial?.completionStatus === "partial";
   const remoteIndex = remotePartial ? detail.messages.findIndex((m) => m.id === remotePartial.id) : -1;
   const historyBefore = remoteIndex >= 0 ? detail.messages.slice(0, remoteIndex) : historyMessages;
   const historyAfter = remoteIndex >= 0 ? detail.messages.slice(remoteIndex + 1) : [];
 
   useEffect(() => {
-    const driver = remoteDripRef.current;
-    if (!remotePartial) {
-      driver.stopAndClear();
-      setRemoteBubble(null);
-      return;
-    }
-    const current = driver.snapshot()[0];
-    if (current && current.key !== remotePartial.id) driver.stopAndClear();
-    const first = !remoteSeededRef.current.has(remotePartial.id);
-    if (first) remoteSeededRef.current.add(remotePartial.id);
-    driver.upsert({
-      key: remotePartial.id,
-      role: remotePartial.speakerRole || "lead",
-      modelId: remotePartial.speakerModel || "",
-      label: remotePartial.speakerLabel || "主導",
-      received: remotePartial.content,
-      done: false,
-      ...(first && remotePartial.content.length > 24 ? { displayed: remotePartial.content } : {}),
-    });
-    driver.schedule((snap) => {
-      const b = snap.find((x) => x.key === remotePartial.id) ?? snap[0];
-      if (!b) return;
-      setRemoteBubble({
-        key: b.key,
-        role: b.role,
-        modelId: b.modelId,
-        label: b.label,
-        content: b.displayed,
-        done: false,
-      });
-      const el = roomScrollRef.current;
-      if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
-    });
-  }, [remotePartial]);
+    const el = roomScrollRef.current;
+    if (el && stickToBottomRef.current) el.scrollTop = el.scrollHeight;
+  }, [hostTail?.content]);
 
   function onScroll() {
     const el = roomScrollRef.current;
@@ -1577,14 +1584,18 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
             ) : (
               <>
                 <HistoryMessages messages={historyBefore} />
-                {remoteBubble ? (
+                {remotePartial ? (
                   <div className={`strategy-msg strategy-msg-assistant${remoteTyping ? " is-streaming" : ""}`}>
                     <div className="strategy-msg-role">
-                      <span className={`strategy-role-badge is-${remoteBubble.role}`}>{remoteBubble.label}</span>
-                      {remoteBubble.modelId ? <span className="muted"> · {remoteBubble.modelId}</span> : null}
+                      <span className={`strategy-role-badge is-${remotePartial.speakerRole || "lead"}`}>
+                        {remotePartial.speakerLabel || "主導"}
+                      </span>
+                      {remotePartial.speakerModel ? (
+                        <span className="muted"> · {remotePartial.speakerModel}</span>
+                      ) : null}
                     </div>
                     <div className="strategy-msg-body strategy-md-body">
-                      <SafeLightMarkdown content={remoteBubble.content || ""} streaming={remoteTyping} />
+                      <SafeLightMarkdown content={remotePartial.content || ""} streaming={remoteTyping} />
                       {remoteTyping ? <span className="stream-caret" aria-hidden /> : null}
                     </div>
                   </div>

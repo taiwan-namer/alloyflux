@@ -1936,6 +1936,55 @@ export async function countSessionMessages(userId: string, sessionId: string): P
   return Number(row?.c ?? 0);
 }
 
+export type LiveHostTail = {
+  id: string;
+  content: string;
+  createdAt: number;
+  speakerModel: string | null;
+  speakerRole: string | null;
+  speakerLabel: string | null;
+  completionStatus: "ok" | "degraded" | "partial" | "aborted" | "failed" | null;
+};
+
+/** 只讀最新一則主持人回覆。給畫面跟上 Cursor 回合，不走整包同步。 */
+export async function readLiveHostTail(userId: string, sessionId: string): Promise<LiveHostTail | null> {
+  await ensureTables();
+  const row = (await db()
+    .prepare(
+      `SELECT id, content, created_at, speaker_model, speaker_role, speaker_label, completion_status
+       FROM strategy_session_messages
+       WHERE session_id = ? AND user_id = ? AND role = 'assistant'
+         AND (speaker_role IS NULL OR speaker_role <> 'advisor')
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+    )
+    .get(sessionId, userId)) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  const createdAt = Number(row.created_at);
+  if (!Number.isFinite(createdAt) || Date.now() - createdAt > 5 * 60 * 1000) return null;
+  const rawStatus = row.completion_status == null ? null : String(row.completion_status);
+  const completionStatus =
+    rawStatus === "ok" ||
+    rawStatus === "degraded" ||
+    rawStatus === "partial" ||
+    rawStatus === "aborted" ||
+    rawStatus === "failed"
+      ? rawStatus
+      : null;
+  const freshDone =
+    (completionStatus === "ok" || completionStatus === "degraded") && Date.now() - createdAt < 30_000;
+  if (completionStatus !== "partial" && !freshDone) return null;
+  return {
+    id: String(row.id),
+    content: String(row.content ?? ""),
+    createdAt,
+    speakerModel: row.speaker_model == null ? null : String(row.speaker_model),
+    speakerRole: row.speaker_role == null ? null : String(row.speaker_role),
+    speakerLabel: row.speaker_label == null ? null : String(row.speaker_label),
+    completionStatus,
+  };
+}
+
 export async function getSessionSyncMeta(
   userId: string,
   sessionId: string,

@@ -629,35 +629,52 @@ async function handleJsonMode(opts: {
   const tail = new StrategyJsonTailBuffer(STRATEGY_STATE_DELIMITER);
   let checkpointChain: Promise<void> = Promise.resolve();
   let checkpointsClosed = false;
-  let lastCheckpointAt = 0;
-  let lastCheckpointLen = 0;
-  const queueCheckpoint = (snapshot: string, force = false, status: "partial" | "ok" = "partial") => {
+  let pendingSnap: { text: string; status: "partial" | "ok" } | null = null;
+  let checkpointFlying = false;
+  const pumpCheckpoints = () => {
+    if (checkpointFlying) return checkpointChain;
+    checkpointFlying = true;
+    checkpointChain = (async () => {
+      try {
+        while (pendingSnap) {
+          const job = pendingSnap;
+          pendingSnap = null;
+          await addSessionMessage({
+            sessionId,
+            userId: authUserId,
+            role: "assistant",
+            content: job.text,
+            structured: { kind: "lead", turnId, completionStatus: job.status, reply: job.text },
+            createdAt: startedAt + 1,
+            speakerModel: model.id,
+            speakerRole: "lead",
+            speakerLabel: lead.label || "主導",
+            turnId,
+            completionStatus: job.status,
+            idempotent: true,
+          });
+        }
+      } catch {
+        /* 下一則快照會再寫 */
+      } finally {
+        checkpointFlying = false;
+        if (pendingSnap) void pumpCheckpoints();
+      }
+    })();
+    return checkpointChain;
+  };
+  const queueCheckpoint = (snapshot: string, _force = false, status: "partial" | "ok" = "partial") => {
     if (checkpointsClosed) return;
     const text = snapshot.trim();
     if (!text || text.startsWith("{") || text.startsWith("```")) return;
-    const now = Date.now();
-    if (!force && now - lastCheckpointAt < 80 && text.length - lastCheckpointLen < 6) return;
-    lastCheckpointAt = now;
-    lastCheckpointLen = text.length;
-    checkpointChain = checkpointChain
-      .then(() =>
-        addSessionMessage({
-          sessionId,
-          userId: authUserId,
-          role: "assistant",
-          content: text,
-          structured: { kind: "lead", turnId, completionStatus: status, reply: text },
-          createdAt: startedAt + 1,
-          speakerModel: model.id,
-          speakerRole: "lead",
-          speakerLabel: lead.label || "主導",
-          turnId,
-          completionStatus: status,
-          idempotent: true,
-        }),
-      )
-      .then(() => undefined)
-      .catch(() => undefined);
+    pendingSnap = { text, status };
+    void pumpCheckpoints();
+  };
+  const drainCheckpoints = async () => {
+    do {
+      if (pendingSnap && !checkpointFlying) void pumpCheckpoints();
+      await checkpointChain;
+    } while (checkpointFlying || pendingSnap);
   };
   const shownNow = () => {
     const prose = tail.getVisibleText();
@@ -725,7 +742,7 @@ async function handleJsonMode(opts: {
         }
         if (crossed) {
           if (shown) queueCheckpoint(shown, true, "ok");
-          await checkpointChain;
+          await drainCheckpoints();
         } else if (shown) {
           queueCheckpoint(shown, false);
         }
@@ -748,7 +765,7 @@ async function handleJsonMode(opts: {
     } else {
       queueCheckpoint(shownNow(), true);
       checkpointsClosed = true;
-      await checkpointChain;
+      await drainCheckpoints();
       const status = e instanceof NoSourceError ? 503 : 500;
       return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status });
     }
@@ -759,12 +776,12 @@ async function handleJsonMode(opts: {
   if (clientAbort) {
     queueCheckpoint(shownNow(), true);
     checkpointsClosed = true;
-    await checkpointChain;
+    await drainCheckpoints();
     return Response.json({ error: "aborted", aborted: true }, { status: 499 });
   }
   queueCheckpoint(shownNow(), true);
   checkpointsClosed = true;
-  await checkpointChain;
+  await drainCheckpoints();
 
   if (doneEv) {
     await settleAssistantMessage({
