@@ -14,6 +14,7 @@ import {
   STRATEGY_STREAM_HEADERS,
   StrategyJsonTailBuffer,
   encodeNdjson,
+  readPartialJsonStringField,
 } from "@/lib/strategy-stream";
 import {
   STRATEGY_STATE_DELIMITER,
@@ -123,9 +124,9 @@ reply 控制在 800 字內。項目完成或要換下一項時，用 ledgerOps�
 
 function jsonOnlySystem(template: StrategyTemplate, lean: boolean): string {
   if (lean) {
-    return `${template.systemPrompt}\n\n${leanSopBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision。`;
+    return `${template.systemPrompt}\n\n${leanSopBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision。\n先寫給會議室看的繁體中文回覆，寫完後單獨一行輸出 ${STRATEGY_STATE_DELIMITER}，再輸出 JSON。\n${STREAM_REPLY_EMPTY_RULE}`;
   }
-  return `${template.systemPrompt}\n\n${limitsBlock()}\n\n${ledgerProtocolBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision, reportFocus。`;
+  return `${template.systemPrompt}\n\n${limitsBlock()}\n\n${ledgerProtocolBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision, reportFocus。\n先寫給會議室看的繁體中文回覆，寫完後單獨一行輸出 ${STRATEGY_STATE_DELIMITER}，再輸出 JSON。\n${STREAM_REPLY_EMPTY_RULE}`;
 }
 
 function streamLeadSystem(template: StrategyTemplate, lean: boolean): string {
@@ -574,12 +575,17 @@ async function handleJsonMode(opts: {
   const model = findModel(lead.modelId) || findModel("gemini-4-neon-high");
   if (!model) return Response.json({ error: `Unknown model: ${lead.modelId}` }, { status: 400 });
 
+  const startedAt = Date.now();
+  const turnId = `turn_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
   await addSessionMessage({
     sessionId,
     userId: authUserId,
     role: "user",
     content,
-    structured: { source: fromWeb ? "web" : "cursor", ...(turnType ? { turnType } : {}) },
+    structured: { source: fromWeb ? "web" : "cursor", turnId, ...(turnType ? { turnType } : {}) },
+    createdAt: startedAt,
+    turnId,
+    idempotent: true,
   });
 
   const { contextBlock, dossier } = await buildContextBlock(authUserId, session, fromWeb, lean);
@@ -593,6 +599,45 @@ async function handleJsonMode(opts: {
 
   let answer = "";
   let doneEv: DoneBill | null = null;
+  const tail = new StrategyJsonTailBuffer(STRATEGY_STATE_DELIMITER);
+  let checkpointChain: Promise<void> = Promise.resolve();
+  let checkpointsClosed = false;
+  let lastCheckpointAt = 0;
+  let lastCheckpointLen = 0;
+  const queueCheckpoint = (snapshot: string, force = false) => {
+    if (checkpointsClosed) return;
+    const text = snapshot.trim();
+    if (!text || text.startsWith("{") || text.startsWith("```")) return;
+    const now = Date.now();
+    if (!force && now - lastCheckpointAt < 800 && text.length - lastCheckpointLen < 80) return;
+    lastCheckpointAt = now;
+    lastCheckpointLen = text.length;
+    checkpointChain = checkpointChain
+      .then(() =>
+        addSessionMessage({
+          sessionId,
+          userId: authUserId,
+          role: "assistant",
+          content: text,
+          structured: { kind: "lead", turnId, completionStatus: "partial", reply: text },
+          createdAt: startedAt + 1,
+          speakerModel: model.id,
+          speakerRole: "lead",
+          speakerLabel: lead.label || "主導",
+          turnId,
+          completionStatus: "partial",
+          idempotent: true,
+        }),
+      )
+      .then(() => undefined)
+      .catch(() => undefined);
+  };
+  const shownNow = () => {
+    const prose = tail.getVisibleText();
+    if (prose.trim()) return prose;
+    return readPartialJsonStringField(answer, "reply") ?? "";
+  };
+  let flushedDelim = false;
   try {
     for await (const ev of routeChat(
       model,
@@ -604,7 +649,14 @@ async function handleJsonMode(opts: {
       undefined,
       { researchQuery: fromWeb ? content : "", cacheAffinityId: sessionId },
     )) {
-      if (ev.type === "text") answer += ev.text;
+      if (ev.type === "text") {
+        answer += ev.text;
+        tail.push(ev.text);
+        const shown = shownNow();
+        const crossed = tail.getMode() === "after_delim" && !flushedDelim;
+        if (crossed) flushedDelim = true;
+        if (shown) queueCheckpoint(shown, crossed);
+      }
       if (ev.type === "done") {
         doneEv = {
           usage: ev.usage,
@@ -616,12 +668,18 @@ async function handleJsonMode(opts: {
       }
     }
   } catch (e) {
+    queueCheckpoint(shownNow(), true);
+    checkpointsClosed = true;
+    await checkpointChain;
     if (isAbortError(e) || req.signal.aborted) {
       return Response.json({ error: "aborted", aborted: true }, { status: 499 });
     }
     const status = e instanceof NoSourceError ? 503 : 500;
     return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status });
   }
+  queueCheckpoint(shownNow(), true);
+  checkpointsClosed = true;
+  await checkpointChain;
 
   if (doneEv) {
     await settleAssistantMessage({
@@ -651,6 +709,8 @@ async function handleJsonMode(opts: {
     content,
     fromWeb,
     advisorTexts: [],
+    visibleText: shownNow(),
+    turnId,
   });
 
   const updated = await getStrategySession(authUserId, sessionId);

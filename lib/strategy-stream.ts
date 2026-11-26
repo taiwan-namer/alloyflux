@@ -114,3 +114,31 @@ export class StrategyJsonTailBuffer {
     return this.mode;
   }
 }
+
+/** 從尚未寫完的 JSON 裡取出某個字串欄位。回覆先出現時，不必等後面的欄位寫完 */
+export function readPartialJsonStringField(raw: string, field: string): string | null {
+  const key = `"${field}"`;
+  const at = raw.indexOf(key);
+  if (at < 0) return null;
+  let i = raw.indexOf(":", at + key.length);
+  if (i < 0) return null;
+  i += 1;
+  while (i < raw.length && raw[i] !== undefined && /\s/.test(raw[i]!)) i += 1;
+  if (raw[i] !== '"') return null;
+  i += 1;
+  let out = "";
+  while (i < raw.length) {
+    const c = raw[i]!;
+    if (c === "\\") {
+      if (i + 1 >= raw.length) return out || null;
+      const n = raw[i + 1];
+      out += n === "n" ? "\n" : n === "t" ? "\t" : n === "r" ? "\r" : n ?? "";
+      i += 2;
+      continue;
+    }
+    if (c === '"') return out;
+    out += c;
+    i += 1;
+  }
+  return out || null;
+}

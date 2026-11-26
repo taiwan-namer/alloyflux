@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type FormEvent,
@@ -529,7 +530,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     async function pull(force = false) {
       if (cancelled) return;
       // 串流中預設跳過；force=true 用於結束／abort／commit 後的 reconciliation
-      if (!force && (document.visibilityState === "hidden" || streamingRef.current)) return;
+      if (!force && document.visibilityState === "hidden") return;
       // 上一輪還沒回來就不要中止。每 3 秒中止會讓較慢的同步永遠完不成，資訊抽屜的路線圖就出不來。
       if (syncInFlightRef.current) {
         if (!force) return;
@@ -560,8 +561,6 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
           return;
         }
         if (sid !== sessionIdRef.current) return;
-        // 非 force 且仍在吐字：丟棄，避免與本地 stream 重疊
-        if (!force && streamingRef.current) return;
         lastUpdatedAtRef.current = Math.max(lastUpdatedAtRef.current, data.updatedAt || 0);
         if (typeof data.messageCount === "number") {
           lastMessageCountRef.current = Math.max(lastMessageCountRef.current, data.messageCount);
@@ -578,7 +577,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
     syncPullRef.current = pull;
     void pull(true);
-    const timer = window.setInterval(() => void pull(false), 3000);
+    const timer = window.setInterval(() => void pull(false), 1000);
     const onVis = () => {
       if (document.visibilityState === "visible") void pull(true);
     };
@@ -590,6 +589,13 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       syncAbortRef.current?.abort();
     };
   }, [sessionId]);
+
+  const historyMessages = useMemo(() => {
+    const live =
+      streamBubbles.some((b) => b.content.trim()) || parkedBubbles.some((b) => b.content.trim());
+    if (!live) return detail.messages;
+    return detail.messages.filter((m) => !(m.role === "assistant" && m.completionStatus === "partial"));
+  }, [detail.messages, streamBubbles, parkedBubbles]);
 
   function onScroll() {
     const el = roomScrollRef.current;
@@ -1448,7 +1454,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                 {busy ? "載入中…" : "尚無訊息"}
               </div>
             ) : (
-              <HistoryMessages messages={detail.messages} />
+              <HistoryMessages messages={historyMessages} />
             )}
 
             {parkedBubbles.map((b) => (
