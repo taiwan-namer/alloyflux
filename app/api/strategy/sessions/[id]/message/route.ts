@@ -488,15 +488,25 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       { status: 409 },
     );
   }
-  let releasing: Promise<void> | null = null;
+  let lockDropped = false;
+  /** 正文已經在畫面上：先放鎖，讓下一則能送。帳本等 JSON 收完，而且鎖還空著，才寫。 */
+  const onReplyVisible = async () => {
+    if (lockDropped) return;
+    lockDropped = true;
+    await release();
+  };
+  const regainLock = async () => {
+    if (!lockDropped) return true;
+    return acquireTurnLock(auth.user.id, sessionId, lockToken);
+  };
   const heartbeat = setInterval(() => {
     void refreshTurnLock(auth.user.id, sessionId, lockToken).catch(() => {});
   }, 20_000);
   const release = () => {
     clearInterval(heartbeat);
-    return (releasing ??= releaseTurnLock(auth.user.id, sessionId, lockToken).catch((e) => {
+    return releaseTurnLock(auth.user.id, sessionId, lockToken).catch((e) => {
       console.warn("[strategy-turn-lock] release failed", e instanceof Error ? e.message : e);
-    }));
+    });
   };
 
   try {
@@ -522,6 +532,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
         members,
         lean,
         turnType,
+        onReplyVisible,
+        regainLock,
       });
     }
 
@@ -538,6 +550,8 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       members,
       lean,
       turnType,
+      onReplyVisible,
+      regainLock,
       onSettled: async () => {
         await release();
         streamSettled();
@@ -570,6 +584,8 @@ async function handleJsonMode(opts: {
   members: SessionMember[];
   lean: boolean;
   turnType: LeanTurnType | null;
+  onReplyVisible?: () => Promise<void>;
+  regainLock?: () => Promise<boolean>;
 }) {
   const { req, authUserId, fromWeb, session, sessionId, content, template, members, lean, turnType } = opts;
   const lead = members.find((m) => m.role === "lead") ?? members[0]!;
@@ -605,7 +621,7 @@ async function handleJsonMode(opts: {
   let checkpointsClosed = false;
   let lastCheckpointAt = 0;
   let lastCheckpointLen = 0;
-  const queueCheckpoint = (snapshot: string, force = false) => {
+  const queueCheckpoint = (snapshot: string, force = false, status: "partial" | "ok" = "partial") => {
     if (checkpointsClosed) return;
     const text = snapshot.trim();
     if (!text || text.startsWith("{") || text.startsWith("```")) return;
@@ -620,13 +636,13 @@ async function handleJsonMode(opts: {
           userId: authUserId,
           role: "assistant",
           content: text,
-          structured: { kind: "lead", turnId, completionStatus: "partial", reply: text },
+          structured: { kind: "lead", turnId, completionStatus: status, reply: text },
           createdAt: startedAt + 1,
           speakerModel: model.id,
           speakerRole: "lead",
           speakerLabel: lead.label || "主導",
           turnId,
-          completionStatus: "partial",
+          completionStatus: status,
           idempotent: true,
         }),
       )
@@ -639,24 +655,71 @@ async function handleJsonMode(opts: {
     return readPartialJsonStringField(answer, "reply") ?? "";
   };
   let flushedDelim = false;
+  const upstreamAbort = new AbortController();
+  const relayClientAbort = () => upstreamAbort.abort();
+  if (req.signal.aborted) upstreamAbort.abort();
+  else req.signal.addEventListener("abort", relayClientAbort, { once: true });
+  let lastEventAt = Date.now();
+  let inputReleased = false;
+  let cutoff: "idle" | "deadline" | null = null;
+  const stopUpstream = (reason: "idle" | "deadline") => {
+    if (cutoff || req.signal.aborted) return;
+    cutoff = reason;
+    upstreamAbort.abort();
+  };
+  // 正文寫完後 JSON 還在吐時，若上游停住就收尾放鎖，不要讓游標和回合鎖一直掛著
+  const watchdog = setInterval(() => {
+    const action = leadStreamWatchdog({
+      now: Date.now(),
+      startedAt,
+      lastEventAt,
+      inputReleased,
+    });
+    if (action === "continue") return;
+    stopUpstream(action);
+  }, 1000);
+  let clientAbort = false;
   try {
     for await (const ev of routeChat(
       model,
       upstream,
       authUserId,
-      req.signal,
+      upstreamAbort.signal,
       undefined,
       jsonOnlySystem(template, lean),
       undefined,
       { researchQuery: fromWeb ? content : "", cacheAffinityId: sessionId },
     )) {
+      lastEventAt = Date.now();
+      const action = leadStreamWatchdog({
+        now: lastEventAt,
+        startedAt,
+        lastEventAt,
+        inputReleased,
+      });
+      if (action !== "continue") {
+        stopUpstream(action);
+        break;
+      }
       if (ev.type === "text") {
         answer += ev.text;
         tail.push(ev.text);
         const shown = shownNow();
         const crossed = tail.getMode() === "after_delim" && !flushedDelim;
         if (crossed) flushedDelim = true;
-        if (shown) queueCheckpoint(shown, crossed);
+        if (tail.getMode() === "after_delim") inputReleased = true;
+        const jsonReady = inputReleased && Boolean(extractJsonObject(tail.getJsonRaw()));
+        if (jsonReady) {
+          if (shown) queueCheckpoint(shown, true, "ok");
+          break;
+        }
+        if (crossed) {
+          if (shown) queueCheckpoint(shown, true, "ok");
+          await checkpointChain;
+          await opts.onReplyVisible?.();
+        } else if (shown) {
+          queueCheckpoint(shown, false);
+        }
       }
       if (ev.type === "done") {
         doneEv = {
@@ -669,14 +732,26 @@ async function handleJsonMode(opts: {
       }
     }
   } catch (e) {
+    if (cutoff && !req.signal.aborted) {
+      // 自己切斷的上游：用已經寫出的正文收尾，不要當成使用者中止
+    } else if (isAbortError(e) || req.signal.aborted) {
+      clientAbort = true;
+    } else {
+      queueCheckpoint(shownNow(), true);
+      checkpointsClosed = true;
+      await checkpointChain;
+      const status = e instanceof NoSourceError ? 503 : 500;
+      return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status });
+    }
+  } finally {
+    clearInterval(watchdog);
+    req.signal.removeEventListener("abort", relayClientAbort);
+  }
+  if (clientAbort) {
     queueCheckpoint(shownNow(), true);
     checkpointsClosed = true;
     await checkpointChain;
-    if (isAbortError(e) || req.signal.aborted) {
-      return Response.json({ error: "aborted", aborted: true }, { status: 499 });
-    }
-    const status = e instanceof NoSourceError ? 503 : 500;
-    return Response.json({ error: e instanceof Error ? e.message : String(e) }, { status });
+    return Response.json({ error: "aborted", aborted: true }, { status: 499 });
   }
   queueCheckpoint(shownNow(), true);
   checkpointsClosed = true;
@@ -698,6 +773,8 @@ async function handleJsonMode(opts: {
     });
   }
 
+  const stalledWithoutJson = Boolean(cutoff) && !extractJsonObject(tail.getJsonRaw() || answer);
+  const stillOurs = (await opts.regainLock?.()) !== false;
   const structured = await finalizeTurn({
     authUserId,
     session,
@@ -712,6 +789,8 @@ async function handleJsonMode(opts: {
     advisorTexts: [],
     visibleText: shownNow(),
     turnId,
+    skipMemoryAndDispatch: stalledWithoutJson || !stillOurs,
+    completionStatus: stalledWithoutJson ? "degraded" : "ok",
   });
 
   const updated = await getStrategySession(authUserId, sessionId);
@@ -1003,6 +1082,9 @@ async function handleStreamMode(opts: {
   turnType: LeanTurnType | null;
   /** 串流主體結束（含中斷、錯誤）時呼叫一次 */
   onSettled?: () => Promise<void>;
+  /** 可見正文已結束：放開回合鎖，不要等後面的 JSON */
+  onReplyVisible?: () => Promise<void>;
+  regainLock?: () => Promise<boolean>;
 }) {
   const { req, authUserId, fromWeb, session, sessionId, content, template, members, lean, turnType } = opts;
   const leadMember = members.find((m) => m.role === "lead") ?? members[0]!;
@@ -1323,8 +1405,8 @@ async function handleStreamMode(opts: {
           queueCheckpoint(true);
         };
         req.signal.addEventListener("abort", onClientGone, { once: true });
-        // 可見文字一結束就解鎖。分隔線後的 JSON 不顯示，但不能繼續擋住輸入框。
-        const releaseInput = () => {
+        // 可見文字一結束就解鎖輸入，並放開伺服器回合鎖。後面的 JSON 不再擋住下一則。
+        const releaseInput = async () => {
           if (inputReleased) return;
           inputReleased = true;
           send({
@@ -1334,6 +1416,7 @@ async function handleStreamMode(opts: {
             label: leadMember.label,
           });
           send({ type: "input_ready" });
+          await opts.onReplyVisible?.();
         };
 
         const upstream = new AbortController();
@@ -1392,7 +1475,18 @@ async function handleStreamMode(opts: {
               }
               if (tail.getMode() === "after_delim") {
                 queueCheckpoint(true);
-                releaseInput();
+                if (extractJsonObject(tail.getJsonRaw())) {
+                  inputReleased = true;
+                  send({
+                    type: "member_done",
+                    role: "lead",
+                    modelId: leadModel.id,
+                    label: leadMember.label,
+                  });
+                  send({ type: "input_ready" });
+                  break;
+                }
+                await releaseInput();
               }
             }
             if (ev.type === "done") {
@@ -1456,8 +1550,17 @@ async function handleStreamMode(opts: {
           leadAnswer = visibleText;
         }
 
-        // 沒有分隔線的回覆：串流結束、落庫前就解鎖。有分隔線的在看到分隔線時已解鎖。
-        releaseInput();
+        // 沒有分隔線的回覆：文字到這裡就是全文，先讓輸入框解鎖。鎖留到落庫再放，避免空窗。
+        if (!inputReleased) {
+          inputReleased = true;
+          send({
+            type: "member_done",
+            role: "lead",
+            modelId: leadModel.id,
+            label: leadMember.label,
+          });
+          send({ type: "input_ready" });
+        }
 
         if (doneEv && (visibleText || jsonRaw)) {
           await settle(leadModel, visibleText || jsonRaw, doneEv);
@@ -1466,7 +1569,9 @@ async function handleStreamMode(opts: {
         await finishCheckpoints();
         req.signal.removeEventListener("abort", onClientGone);
 
-        const skipMemory = (softTimeout || visibleStall) && !extractJsonObject(leadAnswer);
+        const skipMemory =
+          ((softTimeout || visibleStall) && !extractJsonObject(leadAnswer)) ||
+          (await opts.regainLock?.()) === false;
         if (softTimeout) {
           send({
             type: "notice",

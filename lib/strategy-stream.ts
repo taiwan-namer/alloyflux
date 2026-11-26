@@ -51,7 +51,7 @@ export class StrategyJsonTailBuffer {
     }
 
     if (this.mode === "after_delim") {
-      this.jsonPart = this.buf;
+      this.jsonPart += chunk;
       return "";
     }
 

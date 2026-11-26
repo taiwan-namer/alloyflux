@@ -662,6 +662,9 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     });
   }, [detail.messages, streamBubbles, parkedBubbles, remotePartial]);
 
+  const remoteTyping = Boolean(
+    remoteBubble && remotePartial && remoteBubble.content.length < remotePartial.content.length,
+  );
   const remoteIndex = remotePartial ? detail.messages.findIndex((m) => m.id === remotePartial.id) : -1;
   const historyBefore = remoteIndex >= 0 ? detail.messages.slice(0, remoteIndex) : historyMessages;
   const historyAfter = remoteIndex >= 0 ? detail.messages.slice(remoteIndex + 1) : [];
@@ -1573,14 +1576,14 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               <>
                 <HistoryMessages messages={historyBefore} />
                 {remoteBubble ? (
-                  <div className="strategy-msg strategy-msg-assistant is-streaming">
+                  <div className={`strategy-msg strategy-msg-assistant${remoteTyping ? " is-streaming" : ""}`}>
                     <div className="strategy-msg-role">
                       <span className={`strategy-role-badge is-${remoteBubble.role}`}>{remoteBubble.label}</span>
                       {remoteBubble.modelId ? <span className="muted"> · {remoteBubble.modelId}</span> : null}
                     </div>
                     <div className="strategy-msg-body strategy-md-body">
-                      <SafeLightMarkdown content={remoteBubble.content || ""} streaming />
-                      <span className="stream-caret" aria-hidden />
+                      <SafeLightMarkdown content={remoteBubble.content || ""} streaming={remoteTyping} />
+                      {remoteTyping ? <span className="stream-caret" aria-hidden /> : null}
                     </div>
                   </div>
                 ) : null}
