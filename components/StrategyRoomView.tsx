@@ -614,8 +614,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     const el = roomScrollRef.current;
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const overflows = el.scrollHeight > el.clientHeight + 8;
     // 使用者明顯上捲時立刻關閉貼底，避免 sync／reveal 把捲動拉回底部
-    stickToBottomRef.current = dist < 80;
+    // 內容不夠長無法上滑時：不當成貼底鎖定，改靠頂部按鈕載入更早訊息
+    stickToBottomRef.current = overflows ? dist < 80 : false;
     if (el.scrollTop > 120) olderArmedRef.current = true;
     // 貼底時 scrollTop 可能暫時是 0，不要因此把更早的訊息一次補進來
     if (el.scrollTop < 72 && olderArmedRef.current && !stickToBottomRef.current) {
@@ -1401,9 +1403,15 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
             <div className="strategy-room-msg-spacer" aria-hidden />
             {detail.hasMore && detail.nextCursor ? (
               <div className="row" style={{ justifyContent: "center", padding: "8px 0" }}>
-                <span className="muted" style={{ fontSize: 13 }}>
-                  {loadingOlder ? "載入更早的訊息…" : "上滑載入更早的訊息"}
-                </span>
+                <button
+                  type="button"
+                  className="ghost strategy-room-load-older"
+                  disabled={loadingOlder || streaming}
+                  onClick={() => void loadOlderMessages()}
+                  title="訊息太短無法上滑時，請直接點此載入"
+                >
+                  {loadingOlder ? "載入更早的訊息…" : "載入更早的訊息"}
+                </button>
               </div>
             ) : null}
             {detail.messages.length === 0 && !pendingUser && streamBubbles.length === 0 ? (

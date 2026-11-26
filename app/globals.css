@@ -1621,6 +1621,20 @@ a {
   user-select: none;
 }
 
+.msg-history-loader-btn,
+.strategy-room-load-older {
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.msg-history-loader-btn:disabled,
+.strategy-room-load-older:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .messages {
   flex: 1;
   min-width: 0;

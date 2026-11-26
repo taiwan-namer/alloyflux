@@ -4121,7 +4121,15 @@ export default function ChatPage() {
           <div className="messages" ref={messagesRef} onScroll={updateStickFromScroll}>
             {messages.length > 0 && (hasOlderMessages || loadingOlder) && (
               <div className="msg-history-loader" aria-live="polite">
-                {loadingOlder ? "載入更早的對話…" : "上滑載入更早的對話"}
+                <button
+                  type="button"
+                  className="ghost msg-history-loader-btn"
+                  disabled={loadingOlder || busy}
+                  onClick={() => void loadOlderMessages()}
+                  title="對話太短無法上滑時，請直接點此載入"
+                >
+                  {loadingOlder ? "載入更早的對話…" : "載入更早的對話"}
+                </button>
               </div>
             )}
             {messages.length === 0 && chatOpening ? (
