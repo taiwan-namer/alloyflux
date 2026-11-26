@@ -4,6 +4,7 @@ import {
   applyLedgerTurn,
   emptyLedger,
   fillInstructionsFromDelivery,
+  isIrreversibleInstruction,
   ledgerProtocolBlock,
   readLedger,
   renderLedgerAnchor,
@@ -86,6 +87,28 @@ describe("strategy ledger", () => {
     assert.equal(r.allowedInstructions.length, 2);
     assert.equal(r.held.length, 1);
     assert.match(r.held[0]!.text, /完成後部署/);
+  });
+
+  it("本機改碼／持久化寫入例外不要誤標不可逆", () => {
+    assert.equal(
+      isIrreversibleInstruction(
+        "四模式注入可確認的持久化寫入例外；把 decide／arm_stop 改成既有函式真正副本掛接",
+      ),
+      false,
+    );
+    assert.equal(isIrreversibleInstruction("在 output/e_data_foundation_06_dev 內改觀測模組並跑測試"), false);
+    const r = applyLedgerTurn(
+      seeded(),
+      {
+        instructions: [
+          "執行 wp-e-data-exec-07-hooks-accounting：副本掛接與持久化寫入例外，本機測試通過後交報告。不要 git push。",
+        ],
+        reportRequests: [],
+      },
+      NOW,
+    );
+    assert.equal(r.held.length, 0);
+    assert.equal(r.allowedInstructions.length, 1);
   });
 
   it("同 ID 工作包重新下發沿用退回次數，第二次退回仍進僵局", () => {
@@ -341,6 +364,13 @@ describe("fillInstructionsFromDelivery", () => {
     assert.deepEqual(out, ["執行 wp-e-data-exec-07-recording"]);
   });
 
+  it("instructions 過短時用較完整的交付命令取代", () => {
+    const delivery =
+      "Cursor：執行 wp-07，範圍 output/foo，跑 pytest test_x.py，驗收：殘差為 0；這次不做 git push。";
+    const out = fillInstructionsFromDelivery(`判定：還差\n交付命令：${delivery}`, ["做 07"]);
+    assert.deepEqual(out, [delivery]);
+  });
+
   it("沒有交付命令時用下一項工作包", () => {
     const out = fillInstructionsFromDelivery("只有判定", [], {
       id: "wp-07",
@@ -362,10 +392,12 @@ describe("ledgerProtocolBlock", () => {
   it("要求主持人把交付命令寫進 instructions，不能只給結語", () => {
     const text = ledgerProtocolBlock();
     assert.match(text, /交付命令必須原文寫進 instructions/);
-    assert.match(text, /平台會用可見的交付命令，或本回合的下一項 workPackage，補成派工/);
+    assert.match(text, /平台會用可見交付命令／工作包補派/);
     assert.match(text, /請依下列／接續這項／先補證據/);
     assert.match(text, /禁止把 phase 設成 await_code/);
     assert.match(text, /可見回覆禁止寫「不通過」/);
+    assert.match(text, /具體路徑或模組、要跑的指令/);
+    assert.match(text, /本機改碼、測試、持久化例外/);
   });
 });
 

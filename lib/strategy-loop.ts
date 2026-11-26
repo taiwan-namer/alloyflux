@@ -171,8 +171,10 @@ export function shouldUpgradeTurnCompletion(
   prev: StrategyMessageCompletionStatus | null | undefined,
   next: StrategyMessageCompletionStatus | null | undefined,
 ): boolean {
-  if (prev === "ok" || prev === "degraded") return false;
+  // 收尾（ok／degraded）永遠可寫入：分隔線曾標 ok 後，仍要補上 instructions
   if (next === "ok" || next === "degraded") return true;
+  // 已收尾的不降回 partial／aborted／failed
+  if (prev === "ok" || prev === "degraded") return false;
   // 未完成的快照可越寫越長，並可收成 aborted／failed；已中斷的不再退回 partial
   if (prev == null || prev === "partial") {
     return next === "partial" || next === "aborted" || next === "failed";
@@ -2125,7 +2127,14 @@ export async function addSessionMessage(input: {
       const prev = existing.completionStatus;
       const next = input.completionStatus ?? null;
       const canUpgrade = shouldUpgradeTurnCompletion(prev, next);
-      if (canUpgrade && (input.content !== existing.content || next !== prev)) {
+      const nextStructured = input.structured ?? existing.structured;
+      const structuredChanged =
+        input.structured != null &&
+        JSON.stringify(input.structured) !== JSON.stringify(existing.structured);
+      if (
+        canUpgrade &&
+        (input.content !== existing.content || next !== prev || structuredChanged)
+      ) {
         await db()
           .prepare(
             `UPDATE strategy_session_messages
@@ -2138,7 +2147,7 @@ export async function addSessionMessage(input: {
           )
           .run(
             input.content,
-            JSON.stringify(input.structured ?? existing.structured),
+            JSON.stringify(nextStructured),
             next,
             input.createdAt ?? null,
             input.speakerModel ?? null,

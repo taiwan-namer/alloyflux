@@ -104,7 +104,8 @@ describe("4A partial／idempotent 契約（純函式／記憶體模擬）", () =
     assert.equal(shouldUpgradeTurnCompletion("aborted", "ok"), true);
     assert.equal(shouldUpgradeTurnCompletion("failed", "degraded"), true);
     assert.equal(shouldUpgradeTurnCompletion("ok", "aborted"), false);
-    assert.equal(shouldUpgradeTurnCompletion("ok", "ok"), false);
+    assert.equal(shouldUpgradeTurnCompletion("ok", "ok"), true);
+    assert.equal(shouldUpgradeTurnCompletion("degraded", "ok"), true);
     assert.equal(shouldUpgradeTurnCompletion("partial", "partial"), true);
     assert.equal(shouldUpgradeTurnCompletion("partial", "aborted"), true);
     assert.equal(shouldUpgradeTurnCompletion("aborted", "partial"), false);

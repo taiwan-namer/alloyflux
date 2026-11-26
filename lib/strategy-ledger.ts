@@ -74,7 +74,7 @@ export const LEDGER_LIMITS = {
   packageFieldMaxChars: 400,
   packageListMax: 8,
   logMax: 12,
-  lastTurnEachMaxChars: 300,
+  lastTurnEachMaxChars: 900,
   lastTurnMaxItems: 8,
   /** 同一工作包被退回幾次就進入僵局處置 */
   rejectEscalateAt: 2,
@@ -82,9 +82,9 @@ export const LEDGER_LIMITS = {
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.\-/]{0,47}$/;
 
-/** 不可逆動作：一律保留給發起人批准，不自動派送 */
+/** 不可逆動作：只有真的上正式／push 才暫扣。本機改碼、測試寫入、持久化例外不要誤攔。 */
 const IRREVERSIBLE_RE =
-  /git\s+push|vercel\s+(deploy|--prod)|\bdeploy\b|部署|上線正式|DROP\s+TABLE|TRUNCATE|DELETE\s+FROM|正式(資料庫|DB)\s*(寫入|刪除|修改|migrat)/i;
+  /git\s+push|vercel\s+(--prod|deploy\s+--prod)|部署到正式|上線正式|正式環境\s*(部署|上線)|DROP\s+TABLE|TRUNCATE|DELETE\s+FROM|正式(資料庫|DB)\s*(寫入|刪除|修改|migrat)/i;
 
 /** 禁令子句（「不包含部署」「禁止 push」）不是要執行的動作 */
 const PROHIBITION_RE = /不包含|不包括|不含|不得|禁止|嚴禁|不要|不可|不准|不能|勿|未經.{0,12}(批准|驗收|同意)/;
@@ -322,16 +322,28 @@ function instructionText(x: unknown): string {
   return String(x ?? "").trim();
 }
 
-/** instructions 空了，但回覆裡有交付命令或下一項工作包：補成派工，路線圖才能接著做。 */
+/** 從可見回覆抽出「交付命令」正文。 */
+export function extractDeliveryCommand(reply: string): string {
+  const marked = reply.split(/交付命令\s*[：:／/]?/);
+  if (marked.length < 2) return "";
+  return marked[marked.length - 1]!.trim().slice(0, 4000);
+}
+
+/** instructions 空了或太短，用交付命令／工作包補成可派送清單。 */
 export function fillInstructionsFromDelivery(
   reply: string,
   instructions: unknown[],
   workPackage?: unknown,
 ): unknown[] {
-  if (instructions.some((x) => instructionText(x).length > 0)) return instructions;
-  const marked = reply.split(/交付命令\s*[：:]?/);
-  const command = (marked.length > 1 ? marked[marked.length - 1] : "").trim();
-  if (command.length >= 8) return [command.slice(0, 4000)];
+  const existing = instructions.filter((x) => instructionText(x).length > 0);
+  const existingChars = existing.reduce((n, x) => n + instructionText(x).length, 0);
+  const command = extractDeliveryCommand(reply);
+  // 已有夠完整的指令就保留；只有空／過短時才用可見交付命令補上
+  if (existing.length > 0 && (existingChars >= 80 || command.length <= existingChars)) {
+    return existing;
+  }
+  if (command.length >= 8) return [command];
+  if (existing.length > 0) return existing;
   if (!workPackage || typeof workPackage !== "object") return instructions;
   const pkg = workPackage as Record<string, unknown>;
   const id = str(pkg.id);
@@ -341,9 +353,13 @@ export function fillInstructionsFromDelivery(
   const acceptance = Array.isArray(pkg.acceptance)
     ? pkg.acceptance.map((x) => str(x)).filter(Boolean).slice(0, 8)
     : [];
+  const scope = Array.isArray(pkg.scope)
+    ? pkg.scope.map((x) => str(x)).filter(Boolean).slice(0, 8)
+    : [];
   const text = [
     `執行工作包 ${id || "下一項"}${itemId ? `（路線圖 ${itemId}）` : ""}`,
     goal ? `目標：${goal}` : "",
+    scope.length ? `範圍：${scope.join("、")}` : "",
     acceptance.length ? `驗收：${acceptance.join("；")}` : "",
   ]
     .filter(Boolean)
@@ -808,12 +824,13 @@ export function ledgerProtocolBlock(): string {
    {"op":"complete","id":"…","conclusion":"…"},
    {"op":"setStatus","id":"4A","status":"todo|in_progress|parked|blocked","note":"…"},
    {"op":"park","id":"…","reason":"…","resumeTrigger":"…"},{"op":"resume","id":"…"}]
-- 派工（要 Cursor 做事時必做）：可見回覆只准兩段，先「判定」最多 5 行，接著「交付命令」。交付命令必須原文寫進 instructions（至少一條）。Cursor 只執行 instructions。若 instructions 留空，平台會用可見的交付命令，或本回合的下一項 workPackage，補成派工，路線圖繼續做到下一項；兩者都沒有才是沒派工。禁止只給結語或方向，也禁止「請依下列／接續這項／先補證據」卻不寫出命令本身。
-- 交付命令一次寫完，讓 Cursor 做完就能交最終報告：交付物、範圍、這次明確不做的事、驗收。每條驗收都要能用報告裡的固定輸入、比對欄位、程序邊界、數字或狀態判定。禁止用「完整／正確／足夠／釐清／接續」當條件，那些詞會讓規格拖到下一輪才補。
+- 派工（要 Cursor 做事時必做）：可見回覆只准兩段——短「判定」（最多 5 行）＋「交付命令」。同一條交付命令必須原文寫進 instructions（至少一條）。Cursor 只執行 instructions。若 instructions 留空或過短，平台會用可見交付命令／工作包補派，路線圖才能繼續。禁止只給結語或方向，也禁止「請依下列／接續這項／先補證據」卻不寫出命令本身。
+- 交付命令／instructions 一次寫完整，讓 Cursor 不用再問就能做完交報告：具體路徑或模組、要跑的指令、這次不做的事、可用輸出判定的驗收。每條驗收要有固定輸入、比對欄位、程序邊界、數字或狀態。禁止用「完整／正確／足夠／釐清／接續」當條件。
+- 暫扣只給真的 git push／vercel --prod／部署到正式／正式資料庫寫入。本機改碼、測試、持久化例外、副本掛接不要標成不可逆。
 - 驗收通過（verdict "accept"）時必填 "conclusion"（放在判定段，3–5 行：做了什麼、驗收結果、數字、這次不代表什麼）。程式會結案並切到下一項；同一回合必須給下一項 workPackage 與對應交付命令。workPackage：{"id":"wp-…","itemId":"目前項目 id","goal":"…","scope":["允許改的檔案／模組"],"acceptance":["可用測試輸出判定的條件，不要形容詞"],"stopConditions":["遇到就停下回報的情況"]}。一個工作包要能一次做完再回報。
 - 還差一項：帳本用 verdict "reject"（附 verdictReason）＋一條修正命令，把要改的點和要重測的證據寫完。可見回覆禁止寫「不通過」「待改碼」「await_code」，改寫「還差：一句話」然後接交付命令；phase 必須填 reviewing。有 instructions 時禁止把 phase 設成 await_code，那個階段會讓 Cursor 停下來等使用者。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局；僵局時 narrow／alternate 也要新 workPackage 加非空 instructions。
 - 本回合訊息來自 Cursor 時必須派工（accept 接下一項、reject 一條修正、或 reportRequests 指名缺的證據）。不要只回覆使用者。
-- instructions 可寫字串或 {"itemId":"…","text":"…"}；itemId 與目前項目不同會被保留不派送。部署／git push／正式資料庫寫入一律保留給發起人。
+- instructions 可寫字串或 {"itemId":"…","text":"…"}；itemId 與目前項目不同會被保留不派送。只有 git push／vercel --prod／部署到正式／正式資料庫寫入保留給發起人。
 - 要看程式碼時，指名函式或行號範圍（每段 ≤150 行）；不要要求整份檔案。
 - 「做到哪裡」直接引用帳本；帳本沒寫的就說不知道，請 Cursor 用 git／報告查證。`;
 }
