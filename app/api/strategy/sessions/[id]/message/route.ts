@@ -22,8 +22,6 @@ import {
   type StrategyTemplate,
 } from "@/lib/strategy-templates";
 import {
-  acquireTurnLock,
-  refreshTurnLock,
   addDispatchItems,
   addSessionMessage,
   buildReportInjection,
@@ -45,7 +43,6 @@ import {
   mergeDossier,
   queryRoomContent,
   readDossier,
-  releaseTurnLock,
   leadStreamWatchdog,
   resolveSessionMembers,
   selectStrategyHistory,
@@ -66,7 +63,6 @@ import {
   type HeldInstruction,
 } from "@/lib/strategy-ledger";
 import { randomUUID } from "crypto";
-import { after } from "next/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -479,67 +475,17 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return Response.json({ error: "Insufficient credits" }, { status: 402 });
   }
 
-  // 同房一次一個回合：兩個回合平行會各自讀同一份帳本再寫回，造成重複建項、退回重複計數
-  const lockToken = `lock_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
-  if (!(await acquireTurnLock(auth.user.id, sessionId, lockToken))) {
-    if (!fromWeb) return saveNote("turn_busy");
-    return Response.json(
-      { error: "主持人正在回覆上一則訊息，請等回覆出來再送", busy: true },
-      { status: 409 },
-    );
+  session = (await getStrategySession(auth.user.id, sessionId)) ?? session;
+  const wantStream = body.stream === true;
+  const template = await resolveTemplateForSession(auth.user.id, session);
+  const members = resolveSessionMembers(session).map((m) => ({ ...m }));
+  if (body.model?.trim()) {
+    const lead = members.find((m) => m.role === "lead");
+    if (lead) lead.modelId = body.model.trim();
   }
-  let lockDropped = false;
-  /** 正文已經在畫面上：先放鎖，讓下一則能送。帳本等 JSON 收完，而且鎖還空著，才寫。 */
-  const onReplyVisible = async () => {
-    if (lockDropped) return;
-    lockDropped = true;
-    await release();
-  };
-  const regainLock = async () => {
-    if (!lockDropped) return true;
-    return acquireTurnLock(auth.user.id, sessionId, lockToken);
-  };
-  const heartbeat = setInterval(() => {
-    void refreshTurnLock(auth.user.id, sessionId, lockToken).catch(() => {});
-  }, 20_000);
-  const release = () => {
-    clearInterval(heartbeat);
-    return releaseTurnLock(auth.user.id, sessionId, lockToken).catch((e) => {
-      console.warn("[strategy-turn-lock] release failed", e instanceof Error ? e.message : e);
-    });
-  };
 
-  try {
-    // 等鎖期間前一回合可能剛寫完帳本，用拿到鎖之後的最新狀態組 context
-    session = (await getStrategySession(auth.user.id, sessionId)) ?? session;
-    const wantStream = body.stream === true;
-    const template = await resolveTemplateForSession(auth.user.id, session);
-    const members = resolveSessionMembers(session).map((m) => ({ ...m }));
-    if (body.model?.trim()) {
-      const lead = members.find((m) => m.role === "lead");
-      if (lead) lead.modelId = body.model.trim();
-    }
-
-    if (!wantStream) {
-      return await handleJsonMode({
-        req,
-        authUserId: auth.user.id,
-        fromWeb,
-        session,
-        sessionId,
-        content,
-        template,
-        members,
-        lean,
-        turnType,
-        onReplyVisible,
-        regainLock,
-      });
-    }
-
-    let streamSettled!: () => void;
-    const settled = new Promise<void>((resolve) => (streamSettled = resolve));
-    const res = await handleStreamMode({
+  if (!wantStream) {
+    return await handleJsonMode({
       req,
       authUserId: auth.user.id,
       fromWeb,
@@ -550,27 +496,21 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       members,
       lean,
       turnType,
-      onReplyVisible,
-      regainLock,
-      onSettled: async () => {
-        await release();
-        streamSettled();
-      },
     });
-    // 沒進到串流（例如模型不存在）就不會有 onSettled，在這裡放掉
-    if (!res.headers.get("content-type")?.includes("ndjson")) {
-      await release();
-      return res;
-    }
-    // 回應結束後 serverless 可能凍結；用 after 撐到鎖確實釋放
-    after(() => settled);
-    return res;
-  } catch (e) {
-    await release();
-    throw e;
-  } finally {
-    if (body.stream !== true) await release();
   }
+
+  return await handleStreamMode({
+    req,
+    authUserId: auth.user.id,
+    fromWeb,
+    session,
+    sessionId,
+    content,
+    template,
+    members,
+    lean,
+    turnType,
+  });
 }
 
 async function handleJsonMode(opts: {
@@ -584,8 +524,6 @@ async function handleJsonMode(opts: {
   members: SessionMember[];
   lean: boolean;
   turnType: LeanTurnType | null;
-  onReplyVisible?: () => Promise<void>;
-  regainLock?: () => Promise<boolean>;
 }) {
   const { req, authUserId, fromWeb, session, sessionId, content, template, members, lean, turnType } = opts;
   const lead = members.find((m) => m.role === "lead") ?? members[0]!;
@@ -716,7 +654,6 @@ async function handleJsonMode(opts: {
         if (crossed) {
           if (shown) queueCheckpoint(shown, true, "ok");
           await checkpointChain;
-          await opts.onReplyVisible?.();
         } else if (shown) {
           queueCheckpoint(shown, false);
         }
@@ -774,7 +711,6 @@ async function handleJsonMode(opts: {
   }
 
   const stalledWithoutJson = Boolean(cutoff) && !extractJsonObject(tail.getJsonRaw() || answer);
-  const stillOurs = (await opts.regainLock?.()) !== false;
   const structured = await finalizeTurn({
     authUserId,
     session,
@@ -789,7 +725,7 @@ async function handleJsonMode(opts: {
     advisorTexts: [],
     visibleText: shownNow(),
     turnId,
-    skipMemoryAndDispatch: stalledWithoutJson || !stillOurs,
+    skipMemoryAndDispatch: stalledWithoutJson,
     completionStatus: stalledWithoutJson ? "degraded" : "ok",
   });
 
@@ -1082,9 +1018,6 @@ async function handleStreamMode(opts: {
   turnType: LeanTurnType | null;
   /** 串流主體結束（含中斷、錯誤）時呼叫一次 */
   onSettled?: () => Promise<void>;
-  /** 可見正文已結束：放開回合鎖，不要等後面的 JSON */
-  onReplyVisible?: () => Promise<void>;
-  regainLock?: () => Promise<boolean>;
 }) {
   const { req, authUserId, fromWeb, session, sessionId, content, template, members, lean, turnType } = opts;
   const leadMember = members.find((m) => m.role === "lead") ?? members[0]!;
@@ -1416,7 +1349,6 @@ async function handleStreamMode(opts: {
             label: leadMember.label,
           });
           send({ type: "input_ready" });
-          await opts.onReplyVisible?.();
         };
 
         const upstream = new AbortController();
@@ -1569,9 +1501,7 @@ async function handleStreamMode(opts: {
         await finishCheckpoints();
         req.signal.removeEventListener("abort", onClientGone);
 
-        const skipMemory =
-          ((softTimeout || visibleStall) && !extractJsonObject(leadAnswer)) ||
-          (await opts.regainLock?.()) === false;
+        const skipMemory = (softTimeout || visibleStall) && !extractJsonObject(leadAnswer);
         if (softTimeout) {
           send({
             type: "notice",
