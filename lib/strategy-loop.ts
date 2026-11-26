@@ -166,15 +166,18 @@ export function shouldPersistPartialAssistant(visibleText: string): boolean {
   return Boolean(visibleText?.trim());
 }
 
-/** idempotent 命中時是否允許以較完整狀態覆寫（done-after-abort／retry） */
+/** idempotent 命中時是否允許以較完整狀態覆寫（串流快照／done-after-abort／retry） */
 export function shouldUpgradeTurnCompletion(
   prev: StrategyMessageCompletionStatus | null | undefined,
   next: StrategyMessageCompletionStatus | null | undefined,
 ): boolean {
-  return (
-    (prev === "aborted" || prev === "failed" || prev === "partial" || prev == null) &&
-    (next === "ok" || next === "degraded" || next === "partial")
-  );
+  if (prev === "ok" || prev === "degraded") return false;
+  if (next === "ok" || next === "degraded") return true;
+  // 未完成的快照可越寫越長，並可收成 aborted／failed；已中斷的不再退回 partial
+  if (prev == null || prev === "partial") {
+    return next === "partial" || next === "aborted" || next === "failed";
+  }
+  return false;
 }
 
 /**
@@ -1987,6 +1990,7 @@ export async function addSessionMessage(input: {
           .prepare(
             `UPDATE strategy_session_messages
              SET content = ?, structured_json = ?, completion_status = ?,
+                 created_at = COALESCE(?, created_at),
                  speaker_model = COALESCE(?, speaker_model),
                  speaker_role = COALESCE(?, speaker_role),
                  speaker_label = COALESCE(?, speaker_label)
@@ -1996,6 +2000,7 @@ export async function addSessionMessage(input: {
             input.content,
             JSON.stringify(input.structured ?? existing.structured),
             next,
+            input.createdAt ?? null,
             input.speakerModel ?? null,
             input.speakerRole ?? null,
             input.speakerLabel ?? null,

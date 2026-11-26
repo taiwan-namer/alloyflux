@@ -1203,6 +1203,58 @@ async function handleStreamMode(opts: {
         const tail = new StrategyJsonTailBuffer(STRATEGY_STATE_DELIMITER);
         let doneEv: DoneBill | null = null;
         let inputReleased = false;
+        // 可見文字先分段落庫。重新整理會切斷連線，收尾的 abort 存檔常常來不及，已寫出的字要先在庫裡。
+        let checkpointChain: Promise<void> = Promise.resolve();
+        let checkpointsClosed = false;
+        let lastCheckpointAt = 0;
+        let lastCheckpointLen = 0;
+        const queueCheckpoint = (force = false) => {
+          if (checkpointsClosed) return;
+          const snapshot = tail.getVisibleText();
+          if (!snapshot.trim()) return;
+          const now = Date.now();
+          if (
+            !force &&
+            now - lastCheckpointAt < 1200 &&
+            snapshot.length - lastCheckpointLen < 240
+          ) {
+            return;
+          }
+          lastCheckpointAt = now;
+          lastCheckpointLen = snapshot.length;
+          checkpointChain = checkpointChain
+            .then(() =>
+              addSessionMessage({
+                sessionId,
+                userId: authUserId,
+                role: "assistant",
+                content: snapshot,
+                structured: {
+                  kind: "lead",
+                  turnId,
+                  completionStatus: "partial",
+                  reply: snapshot,
+                },
+                createdAt: startedAt + 1,
+                speakerModel: leadModel.id,
+                speakerRole: "lead",
+                speakerLabel: leadMember.label,
+                turnId,
+                completionStatus: "partial",
+                idempotent: true,
+              }),
+            )
+            .then(() => undefined)
+            .catch(() => undefined);
+        };
+        const finishCheckpoints = async () => {
+          checkpointsClosed = true;
+          await checkpointChain;
+        };
+        const onClientGone = () => {
+          queueCheckpoint(true);
+        };
+        req.signal.addEventListener("abort", onClientGone, { once: true });
         // 可見文字一結束就解鎖。分隔線後的 JSON 不顯示，但不能繼續擋住輸入框。
         const releaseInput = () => {
           if (inputReleased) return;
@@ -1237,8 +1289,12 @@ async function handleStreamMode(opts: {
               if (visible) {
                 leadVisiblePartial = tail.getVisibleText();
                 send({ type: "text", text: visible, modelId: leadModel.id, role: "lead" });
+                queueCheckpoint(false);
               }
-              if (tail.getMode() === "after_delim") releaseInput();
+              if (tail.getMode() === "after_delim") {
+                queueCheckpoint(true);
+                releaseInput();
+              }
             }
             if (ev.type === "done") {
               doneEv = {
@@ -1255,10 +1311,12 @@ async function handleStreamMode(opts: {
           if (isAbortError(e) || req.signal.aborted) {
             aborted = true;
           } else {
+            await finishCheckpoints();
             await persistPartial("failed");
             send({ type: "error", message: e instanceof Error ? e.message : String(e) });
             send({ type: "done", completionStatus: "failed" });
             controller.close();
+            req.signal.removeEventListener("abort", onClientGone);
             return;
           }
         }
@@ -1268,7 +1326,9 @@ async function handleStreamMode(opts: {
         leadVisiblePartial = tail.getVisibleText();
 
         if (aborted || req.signal.aborted) {
+          await finishCheckpoints();
           await persistPartial("aborted");
+          req.signal.removeEventListener("abort", onClientGone);
           send({ type: "error", message: "aborted", aborted: true });
           send({ type: "done", completionStatus: "failed", aborted: true });
           controller.close();
@@ -1296,6 +1356,9 @@ async function handleStreamMode(opts: {
         if (doneEv && (visibleText || jsonRaw)) {
           await settle(leadModel, visibleText || jsonRaw, doneEv);
         }
+
+        await finishCheckpoints();
+        req.signal.removeEventListener("abort", onClientGone);
 
         const skipMemory = softTimeout && !extractJsonObject(leadAnswer);
         if (softTimeout) {

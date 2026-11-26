@@ -99,11 +99,14 @@ describe("4A partial／idempotent 契約（純函式／記憶體模擬）", () =
     assert.equal(shouldPersistPartialAssistant("有字"), true);
   });
 
-  it("aborted→ok 可升級；ok→aborted 不可", () => {
+  it("aborted→ok 可升級；ok→aborted 不可；partial 快照可加長", () => {
     assert.equal(shouldUpgradeTurnCompletion("aborted", "ok"), true);
     assert.equal(shouldUpgradeTurnCompletion("failed", "degraded"), true);
     assert.equal(shouldUpgradeTurnCompletion("ok", "aborted"), false);
     assert.equal(shouldUpgradeTurnCompletion("ok", "ok"), false);
+    assert.equal(shouldUpgradeTurnCompletion("partial", "partial"), true);
+    assert.equal(shouldUpgradeTurnCompletion("partial", "aborted"), true);
+    assert.equal(shouldUpgradeTurnCompletion("aborted", "partial"), false);
   });
 
   it("同 turnId 重複 partial／finalize 不增生列（Map 模擬 route 層）", () => {

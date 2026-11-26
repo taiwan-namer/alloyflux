@@ -173,6 +173,12 @@ const MessageItem = memo(
         title={active ? "點擊顯示全文" : undefined}
       >
         <div className="strategy-msg-role">{messageRoleLabel(m)}</div>
+        {m.role === "assistant" &&
+        (m.completionStatus === "partial" || m.completionStatus === "aborted") ? (
+          <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+            回覆未完成，這是重新整理前已保存的部分
+          </div>
+        ) : null}
         {m.role === "assistant" ? (
           <div className="strategy-msg-body strategy-md-body">
             <SafeLightMarkdown content={text} streaming={active} />
@@ -192,7 +198,8 @@ const MessageItem = memo(
     a.m.speakerLabel === b.m.speakerLabel &&
     a.m.speakerModel === b.m.speakerModel &&
     a.m.speakerRole === b.m.speakerRole &&
-    a.m.structured?.source === b.m.structured?.source,
+    a.m.structured?.source === b.m.structured?.source &&
+    a.m.completionStatus === b.m.completionStatus,
 );
 
 /** 歷史訊息：串流更新（streamBubbles／pendingUser）不會重繪此區 */
