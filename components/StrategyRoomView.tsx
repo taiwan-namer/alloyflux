@@ -755,16 +755,46 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     let completion: (StrategyStreamEvent & { type: "done" }) | null = null;
 
     try {
-      const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sid)}/message`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ content, stream: true }),
-        signal: controller.signal,
-      });
-      if (!isCurrent()) {
-        void res.body?.cancel().catch(() => {});
-        return;
+      let res: Response | null = null;
+      for (let attempt = 0; attempt < 7; attempt++) {
+        res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sid)}/message`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ content, stream: true }),
+          signal: controller.signal,
+        });
+        if (!isCurrent()) {
+          void res.body?.cancel().catch(() => {});
+          return;
+        }
+        if (res.status !== 409) break;
+        const data = (await res.json().catch(() => ({}))) as { error?: string; busy?: boolean };
+        if (!data.busy || attempt === 6 || !isCurrent()) {
+          onError(data.error || "送出失敗");
+          onDraftChange(content);
+          setPendingUser(null);
+          setStreamBubbles([]);
+          setGenerating(false);
+          return;
+        }
+        // 上一則正文已顯示，伺服器還在收尾。短暫停一下再送，不要先跳出那句鎖
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(new DOMException("aborted", "AbortError"));
+          };
+          const timer = setTimeout(() => {
+            controller.signal.removeEventListener("abort", onAbort);
+            resolve();
+          }, 3000);
+          if (controller.signal.aborted) {
+            onAbort();
+            return;
+          }
+          controller.signal.addEventListener("abort", onAbort, { once: true });
+        });
       }
+      if (!res) return;
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         if (!isCurrent()) return;

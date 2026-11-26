@@ -13,6 +13,7 @@ import {
   selectBoundedHistory,
   shouldPersistPartialAssistant,
   shouldUpgradeTurnCompletion,
+  leadStreamWatchdog,
   STRATEGY_LIMITS,
 } from "./strategy-loop";
 
@@ -236,6 +237,38 @@ describe("buildReportInjection", () => {
     assert.match(out.index, /srep_before/);
     const noPkg = buildReportInjection(reports, { lastHostTurnAt: 200, focusIds: [] });
     assert.deepEqual(noPkg.injectedIds, []);
+  });
+});
+
+describe("主持串流停住時的收尾", () => {
+  const t0 = 1_000_000;
+
+  it("還在寫可見文字時，短暫停頓不收尾", () => {
+    assert.equal(
+      leadStreamWatchdog({ now: t0 + 20_000, startedAt: t0, lastEventAt: t0 + 8_000, inputReleased: false }),
+      "continue",
+    );
+  });
+
+  it("可見文字已結束且沉默超過 12 秒就放鎖收尾", () => {
+    assert.equal(
+      leadStreamWatchdog({ now: t0 + 30_000, startedAt: t0, lastEventAt: t0 + 18_000, inputReleased: true }),
+      "idle",
+    );
+  });
+
+  it("可見文字剛結束、JSON 還在來時繼續等", () => {
+    assert.equal(
+      leadStreamWatchdog({ now: t0 + 20_000, startedAt: t0, lastEventAt: t0 + 19_000, inputReleased: true }),
+      "continue",
+    );
+  });
+
+  it("沒有新事件也會在軟截止收尾", () => {
+    assert.equal(
+      leadStreamWatchdog({ now: t0 + 270_001, startedAt: t0, lastEventAt: t0, inputReleased: false }),
+      "deadline",
+    );
   });
 });
 

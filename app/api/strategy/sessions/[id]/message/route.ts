@@ -22,6 +22,7 @@ import {
 } from "@/lib/strategy-templates";
 import {
   acquireTurnLock,
+  refreshTurnLock,
   addDispatchItems,
   addSessionMessage,
   buildReportInjection,
@@ -44,6 +45,7 @@ import {
   queryRoomContent,
   readDossier,
   releaseTurnLock,
+  leadStreamWatchdog,
   resolveSessionMembers,
   selectStrategyHistory,
   STRATEGY_LIMITS,
@@ -70,7 +72,6 @@ export const maxDuration = 300;
 
 const L = STRATEGY_LIMITS;
 const ADVISOR_BUDGET_MS = 180_000;
-const SOFT_DEADLINE_MS = 270_000;
 
 type RoomQueryResult = { roomId: string; roomName: string; question: string; snippet: string };
 
@@ -486,10 +487,15 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     );
   }
   let releasing: Promise<void> | null = null;
-  const release = () =>
-    (releasing ??= releaseTurnLock(auth.user.id, sessionId, lockToken).catch((e) => {
+  const heartbeat = setInterval(() => {
+    void refreshTurnLock(auth.user.id, sessionId, lockToken).catch(() => {});
+  }, 20_000);
+  const release = () => {
+    clearInterval(heartbeat);
+    return (releasing ??= releaseTurnLock(auth.user.id, sessionId, lockToken).catch((e) => {
       console.warn("[strategy-turn-lock] release failed", e instanceof Error ? e.message : e);
     }));
+  };
 
   try {
     // 等鎖期間前一回合可能剛寫完帳本，用拿到鎖之後的最新狀態組 context
@@ -1030,6 +1036,7 @@ async function handleStreamMode(opts: {
       let leadVisiblePartial = "";
       let aborted = false;
       let softTimeout = false;
+      let visibleStall = false;
 
       const persistPartial = async (
         status: Extract<StrategyMessageCompletionStatus, "aborted" | "failed" | "partial">,
@@ -1268,19 +1275,50 @@ async function handleStreamMode(opts: {
           send({ type: "input_ready" });
         };
 
+        const upstream = new AbortController();
+        const relayClientAbort = () => upstream.abort();
+        if (req.signal.aborted) upstream.abort();
+        else req.signal.addEventListener("abort", relayClientAbort, { once: true });
+        let lastEventAt = Date.now();
+        let cutoff: "idle" | "deadline" | null = null;
+        const stopUpstream = (reason: "idle" | "deadline") => {
+          if (cutoff || req.signal.aborted) return;
+          cutoff = reason;
+          if (reason === "deadline") softTimeout = true;
+          upstream.abort();
+        };
+        // 停住的串流不會再進迴圈，軟截止與「正文已結束」都要在這裡自己醒來
+        const watchdog = setInterval(() => {
+          const action = leadStreamWatchdog({
+            now: Date.now(),
+            startedAt,
+            lastEventAt,
+            inputReleased,
+          });
+          if (action === "continue") return;
+          stopUpstream(action);
+        }, 1000);
+
         try {
           for await (const ev of routeChat(
             leadModel,
             leadUpstream,
             authUserId,
-            req.signal,
+            upstream.signal,
             undefined,
             streamLeadSystem(template, lean),
             undefined,
             researchOpts,
           )) {
-            if (Date.now() - startedAt > SOFT_DEADLINE_MS) {
-              softTimeout = true;
+            lastEventAt = Date.now();
+            const action = leadStreamWatchdog({
+              now: lastEventAt,
+              startedAt,
+              lastEventAt,
+              inputReleased,
+            });
+            if (action !== "continue") {
+              stopUpstream(action);
               break;
             }
             // thinking 靜默丟棄，不轉發前端
@@ -1308,7 +1346,9 @@ async function handleStreamMode(opts: {
           }
         } catch (e) {
           leadVisiblePartial = tail.getVisibleText();
-          if (isAbortError(e) || req.signal.aborted) {
+          if (cutoff && !req.signal.aborted) {
+            if (cutoff === "deadline") softTimeout = true;
+          } else if (isAbortError(e) || req.signal.aborted) {
             aborted = true;
           } else {
             await finishCheckpoints();
@@ -1319,7 +1359,12 @@ async function handleStreamMode(opts: {
             req.signal.removeEventListener("abort", onClientGone);
             return;
           }
+        } finally {
+          clearInterval(watchdog);
+          req.signal.removeEventListener("abort", relayClientAbort);
         }
+        if (cutoff === "idle" && !req.signal.aborted) visibleStall = true;
+        if (cutoff === "deadline") softTimeout = true;
 
         const flushed = tail.flushVisible();
         if (flushed) send({ type: "text", text: flushed, modelId: leadModel.id, role: "lead" });
@@ -1360,13 +1405,18 @@ async function handleStreamMode(opts: {
         await finishCheckpoints();
         req.signal.removeEventListener("abort", onClientGone);
 
-        const skipMemory = softTimeout && !extractJsonObject(leadAnswer);
+        const skipMemory = (softTimeout || visibleStall) && !extractJsonObject(leadAnswer);
         if (softTimeout) {
           send({
             type: "notice",
             message: skipMemory
               ? "已達 270 秒軟截止：僅保留純文字回覆，不更新記憶與派送"
               : "已達 270 秒軟截止：盡力完成結構化收尾",
+          });
+        } else if (visibleStall && skipMemory) {
+          send({
+            type: "notice",
+            message: "回覆已顯示，後續收尾逾時，這次不更新帳本",
           });
         }
 
@@ -1386,12 +1436,12 @@ async function handleStreamMode(opts: {
           skipMemoryAndDispatch: skipMemory,
           visibleText,
           turnId,
-          completionStatus: softTimeout ? "degraded" : "ok",
+          completionStatus: softTimeout || (visibleStall && skipMemory) ? "degraded" : "ok",
         });
 
         send({
           type: "done",
-          completionStatus: softTimeout ? "degraded" : "ok",
+          completionStatus: softTimeout || (visibleStall && skipMemory) ? "degraded" : "ok",
           assistant: {
             reply: structured.reply,
             phase: structured.phase,

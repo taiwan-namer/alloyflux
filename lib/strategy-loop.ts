@@ -1808,8 +1808,32 @@ export async function markDispatchDone(
   return { ok: true, sessionId, pauseState: updated?.pauseState ?? "none" };
 }
 
-/** 主持人回合鎖逾時：程序中斷沒釋放時，過了這段時間自動失效 */
-export const TURN_LOCK_TTL_MS = 5 * 60_000;
+/** 主持人回合鎖閒置逾時：沒有心跳就失效。活著的回合會持續刷新，中斷的約一分鐘可再送 */
+export const TURN_LOCK_TTL_MS = 70_000;
+
+/** 整段主持串流的軟截止。沒有新事件時也要檢查，不能等下一個 token */
+export const LEAD_STREAM_SOFT_DEADLINE_MS = 270_000;
+
+/** 可見文字已經結束後，上游再沉默這麼久就收尾放鎖 */
+export const LEAD_STREAM_STALL_AFTER_VISIBLE_MS = 12_000;
+
+export type LeadStreamWatchdog = "continue" | "deadline" | "idle";
+
+/** 串流停住時決定要不要自己收尾。可見文字已結束卻不再來事件，就不要繼續佔著回合鎖 */
+export function leadStreamWatchdog(opts: {
+  now: number;
+  startedAt: number;
+  lastEventAt: number;
+  inputReleased: boolean;
+  softDeadlineMs?: number;
+  stallAfterVisibleMs?: number;
+}): LeadStreamWatchdog {
+  const soft = opts.softDeadlineMs ?? LEAD_STREAM_SOFT_DEADLINE_MS;
+  const stall = opts.stallAfterVisibleMs ?? LEAD_STREAM_STALL_AFTER_VISIBLE_MS;
+  if (opts.now - opts.startedAt > soft) return "deadline";
+  if (opts.inputReleased && opts.now - opts.lastEventAt >= stall) return "idle";
+  return "continue";
+}
 
 let turnLockColumnsReady: Promise<void> | null = null;
 
@@ -1843,6 +1867,22 @@ export async function acquireTurnLock(
     )
     .run(token, now, sessionId, userId, now - TURN_LOCK_TTL_MS);
   return (r.changes ?? 0) > 0;
+}
+
+/** 回合還在跑就刷新時間，避免長回覆被當成過期鎖 */
+export async function refreshTurnLock(
+  userId: string,
+  sessionId: string,
+  token: string,
+  now = nowMs(),
+): Promise<void> {
+  await ensureTurnLockColumns();
+  await db()
+    .prepare(
+      `UPDATE strategy_sessions SET turn_lock_at = ?
+       WHERE id = ? AND user_id = ? AND turn_lock = ?`,
+    )
+    .run(now, sessionId, userId, token);
 }
 
 /** 只釋放自己拿的鎖；逾時後被別人接手的不動 */
