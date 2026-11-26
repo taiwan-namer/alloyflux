@@ -21,7 +21,11 @@ import {
   STREAM_REPLY_EMPTY_RULE,
   type StrategyTemplate,
 } from "@/lib/strategy-templates";
+import { after } from "next/server";
 import {
+  acquireTurnLock,
+  refreshTurnLock,
+  releaseTurnLock,
   addDispatchItems,
   addSessionMessage,
   buildReportInjection,
@@ -475,6 +479,22 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return Response.json({ error: "Insufficient credits" }, { status: 402 });
   }
 
+  // 排隊，不拒絕。上一則還在寫就等到它收完再處理；沒心跳的鎖約一分鐘後失效。
+  const lockToken = `lock_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  const queued = await waitForRoomTurn(auth.user.id, sessionId, lockToken, req.signal);
+  if (!queued) {
+    return Response.json({ error: "aborted", aborted: true }, { status: 499 });
+  }
+  const heartbeat = setInterval(() => {
+    void refreshTurnLock(auth.user.id, sessionId, lockToken).catch(() => {});
+  }, 20_000);
+  const release = () => {
+    clearInterval(heartbeat);
+    return releaseTurnLock(auth.user.id, sessionId, lockToken).catch((e) => {
+      console.warn("[strategy-turn-lock] release failed", e instanceof Error ? e.message : e);
+    });
+  };
+
   session = (await getStrategySession(auth.user.id, sessionId)) ?? session;
   const wantStream = body.stream === true;
   const template = await resolveTemplateForSession(auth.user.id, session);
@@ -484,8 +504,27 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     if (lead) lead.modelId = body.model.trim();
   }
 
-  if (!wantStream) {
-    return await handleJsonMode({
+  try {
+    if (!wantStream) {
+      return await handleJsonMode({
+        req,
+        authUserId: auth.user.id,
+        fromWeb,
+        session,
+        sessionId,
+        content,
+        template,
+        members,
+        lean,
+        turnType,
+      });
+    }
+
+    let streamSettled!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      streamSettled = resolve;
+    });
+    const res = await handleStreamMode({
       req,
       authUserId: auth.user.id,
       fromWeb,
@@ -496,21 +535,51 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       members,
       lean,
       turnType,
+      onSettled: async () => {
+        await release();
+        streamSettled();
+      },
     });
+    if (!res.headers.get("content-type")?.includes("ndjson")) {
+      await release();
+      return res;
+    }
+    after(() => settled);
+    return res;
+  } finally {
+    if (!wantStream) await release();
   }
+}
 
-  return await handleStreamMode({
-    req,
-    authUserId: auth.user.id,
-    fromWeb,
-    session,
-    sessionId,
-    content,
-    template,
-    members,
-    lean,
-    turnType,
-  });
+/** 上一則還沒結束就排隊等，等到能處理或連線中止。不回「正在回覆」把人拒掉。 */
+async function waitForRoomTurn(
+  userId: string,
+  sessionId: string,
+  token: string,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const deadline = Date.now() + 180_000;
+  while (Date.now() < deadline) {
+    if (signal.aborted) return false;
+    if (await acquireTurnLock(userId, sessionId, token)) return true;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, 400);
+      const onAbort = () => {
+        clearTimeout(timer);
+        reject(new DOMException("aborted", "AbortError"));
+      };
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+    }).catch(() => undefined);
+    if (signal.aborted) return false;
+  }
+  return acquireTurnLock(userId, sessionId, token);
 }
 
 async function handleJsonMode(opts: {

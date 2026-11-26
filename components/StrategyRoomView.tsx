@@ -323,6 +323,9 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   streamingRef.current = streaming;
   const generatingRef = useRef(false);
   generatingRef.current = generating;
+  /** 主持人還在回時先排著，這則結束再送。跟 Cursor 一樣，不拒掉。 */
+  const outboundRef = useRef<string[]>([]);
+  const [outbound, setOutbound] = useState<string[]>([]);
   onSyncPatchRef.current = onSyncPatch;
   const newestMsg = detail.messages[detail.messages.length - 1];
   newestCursorRef.current = newestMsg ? `${newestMsg.createdAt}:${newestMsg.id}` : "";
@@ -845,16 +848,20 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   async function sendStream(text: string) {
     const sid = sessionId;
     const content = text.trim();
-    if (!content || generating || committing || detail.session.status === "closed") return;
+    if (!content || generatingRef.current || committing || detail.session.status === "closed") return;
+    generatingRef.current = true;
 
     // 上一輪可見回覆尚未進歷史：先 sync；若仍未進，暫留氣泡再開新串流，避免吃掉主持人回覆
-    if (handoffPendingRef.current) {
+      if (handoffPendingRef.current) {
       try {
         await syncPullRef.current(true);
       } catch {
         /* ignore */
       }
-      if (sid !== sessionIdRef.current) return;
+      if (sid !== sessionIdRef.current) {
+        generatingRef.current = false;
+        return;
+      }
       if (handoffPendingRef.current && bubblesRef.current.some((b) => b.content.trim())) {
         setParkedBubbles(bubblesRef.current.map((b) => ({ ...b, done: true })));
       }
@@ -888,46 +895,16 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     let completion: (StrategyStreamEvent & { type: "done" }) | null = null;
 
     try {
-      let res: Response | null = null;
-      for (let attempt = 0; attempt < 7; attempt++) {
-        res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sid)}/message`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ content, stream: true }),
-          signal: controller.signal,
-        });
-        if (!isCurrent()) {
-          void res.body?.cancel().catch(() => {});
-          return;
-        }
-        if (res.status !== 409) break;
-        const data = (await res.json().catch(() => ({}))) as { error?: string; busy?: boolean };
-        if (!data.busy || attempt === 6 || !isCurrent()) {
-          onError(data.error || "送出失敗");
-          onDraftChange(content);
-          setPendingUser(null);
-          setStreamBubbles([]);
-          setGenerating(false);
-          return;
-        }
-        // 上一則正文已顯示，伺服器還在收尾。短暫停一下再送，不要先跳出那句鎖
-        await new Promise<void>((resolve, reject) => {
-          const onAbort = () => {
-            clearTimeout(timer);
-            reject(new DOMException("aborted", "AbortError"));
-          };
-          const timer = setTimeout(() => {
-            controller.signal.removeEventListener("abort", onAbort);
-            resolve();
-          }, 3000);
-          if (controller.signal.aborted) {
-            onAbort();
-            return;
-          }
-          controller.signal.addEventListener("abort", onAbort, { once: true });
-        });
+      const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sid)}/message`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content, stream: true }),
+        signal: controller.signal,
+      });
+      if (!isCurrent()) {
+        void res.body?.cancel().catch(() => {});
+        return;
       }
-      if (!res) return;
       if (!res.ok) {
         const data = (await res.json().catch(() => ({}))) as { error?: string };
         if (!isCurrent()) return;
@@ -1084,11 +1061,36 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     }
   }
 
+  function queueOutbound(text: string) {
+    outboundRef.current = [...outboundRef.current, text];
+    setOutbound(outboundRef.current);
+  }
+
   function submit(e?: FormEvent) {
     e?.preventDefault();
-    if (!draft.trim() || generating || committing || detail.session.status === "closed") return;
-    void sendStream(draft);
+    const text = draft.trim();
+    if (!text || detail.session.status === "closed") return;
+    onDraftChange("");
+    if (generatingRef.current || outboundRef.current.length > 0) {
+      queueOutbound(text);
+      return;
+    }
+    void sendStream(text);
   }
+
+  useEffect(() => {
+    outboundRef.current = [];
+    setOutbound([]);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (generating || committing || !outboundRef.current.length) return;
+    const next = outboundRef.current[0];
+    if (!next) return;
+    outboundRef.current = outboundRef.current.slice(1);
+    setOutbound(outboundRef.current);
+    void sendStream(next);
+  }, [generating, committing]);
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -1603,6 +1605,13 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               </div>
             ))}
 
+            {outbound.map((text, i) => (
+              <div key={`queued-${i}`} className="strategy-msg strategy-msg-user is-pending">
+                <div className="strategy-msg-role">你（網頁）· 排隊</div>
+                <pre className="strategy-msg-body">{text}</pre>
+              </div>
+            ))}
+
             {pendingUser ? (
               <div className="strategy-msg strategy-msg-user is-pending">
                 <div className="strategy-msg-role">
@@ -1657,7 +1666,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               value={draft}
               maxLength={8000}
               rows={3}
-              disabled={generating || detail.session.status === "closed"}
+              disabled={detail.session.status === "closed"}
               placeholder={
                 detail.session.status === "closed"
                   ? "會議室已關閉"
@@ -1671,17 +1680,22 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                 每次發言會依 token 扣點
               </span>
               {generating ? (
-                <button
-                  type="button"
-                  className="strategy-stop-btn"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    stopGeneration();
-                  }}
-                >
-                  停止
-                </button>
+                <>
+                  <button type="submit" disabled={!draft.trim() || detail.session.status === "closed"}>
+                    排隊
+                  </button>
+                  <button
+                    type="button"
+                    className="strategy-stop-btn"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      stopGeneration();
+                    }}
+                  >
+                    停止
+                  </button>
+                </>
               ) : (
                 <button type="submit" disabled={!draft.trim() || detail.session.status === "closed"}>
                   送出
