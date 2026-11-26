@@ -301,16 +301,19 @@ function oneLine(content: string, max = 60): string {
 }
 
 /**
- * 報告注入：只放「上一回合之後新上傳」與主持人指名（reportFocus）的報告正文，
+ * 報告注入：放「上一回合之後新上傳」、目前工作包開始後上傳（驗收前）與主持人指名（reportFocus）的報告正文，
  * 同系列分段合併；其餘只進索引。
  */
 export function buildReportInjection(
   reports: InjectableReport[],
-  opts: { lastHostTurnAt: number; focusIds: string[] },
+  opts: { lastHostTurnAt: number; focusIds: string[]; packageSince?: number },
 ): { bodies: string; index: string; injectedIds: string[] } {
   const L = STRATEGY_LIMITS;
   const focus = new Set(opts.focusIds.slice(0, L.reportFocusMax));
-  const picked = reports.filter((r) => r.createdAt > opts.lastHostTurnAt || focus.has(r.id));
+  const since = opts.packageSince ?? 0;
+  const picked = reports.filter(
+    (r) => r.createdAt > opts.lastHostTurnAt || (since > 0 && r.createdAt >= since) || focus.has(r.id),
+  );
   const pickedIds = new Set(picked.map((r) => r.id));
 
   const groups = new Map<string, InjectableReport[]>();
@@ -1802,6 +1805,54 @@ export async function markDispatchDone(
   return { ok: true, sessionId, pauseState: updated?.pauseState ?? "none" };
 }
 
+/** 主持人回合鎖逾時：程序中斷沒釋放時，過了這段時間自動失效 */
+export const TURN_LOCK_TTL_MS = 5 * 60_000;
+
+let turnLockColumnsReady: Promise<void> | null = null;
+
+/** 既有正式庫走背景遷移，鎖欄位可能還沒建；第一次用到時同步補上 */
+function ensureTurnLockColumns(): Promise<void> {
+  if (!turnLockColumnsReady) {
+    turnLockColumnsReady = (async () => {
+      await ensureTables();
+      await db().exec(`ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS turn_lock TEXT`);
+      await db().exec(`ALTER TABLE strategy_sessions ADD COLUMN IF NOT EXISTS turn_lock_at BIGINT`);
+    })().catch((e) => {
+      turnLockColumnsReady = null;
+      throw e;
+    });
+  }
+  return turnLockColumnsReady;
+}
+
+/** 同一房間一次只跑一個主持人回合；拿到回傳 true */
+export async function acquireTurnLock(
+  userId: string,
+  sessionId: string,
+  token: string,
+  now = nowMs(),
+): Promise<boolean> {
+  await ensureTurnLockColumns();
+  const r = await db()
+    .prepare(
+      `UPDATE strategy_sessions SET turn_lock = ?, turn_lock_at = ?
+       WHERE id = ? AND user_id = ? AND (turn_lock_at IS NULL OR turn_lock_at < ?)`,
+    )
+    .run(token, now, sessionId, userId, now - TURN_LOCK_TTL_MS);
+  return (r.changes ?? 0) > 0;
+}
+
+/** 只釋放自己拿的鎖；逾時後被別人接手的不動 */
+export async function releaseTurnLock(userId: string, sessionId: string, token: string): Promise<void> {
+  await ensureTurnLockColumns();
+  await db()
+    .prepare(
+      `UPDATE strategy_sessions SET turn_lock = NULL, turn_lock_at = NULL
+       WHERE id = ? AND user_id = ? AND turn_lock = ?`,
+    )
+    .run(sessionId, userId, token);
+}
+
 export async function countSessionMessages(userId: string, sessionId: string): Promise<number> {
   await ensureTables();
   const row = (await db()
@@ -2084,6 +2135,32 @@ export async function listSessionMessagesPage(
     ? messages.length + (hasMore ? 1 : 0)
     : await countSessionMessages(userId, sessionId);
   return { messages, hasMore, nextCursor, total };
+}
+
+/** sync：取游標（createdAt:id）之後的訊息，舊到新；truncated=true 表示超過 limit 還有更新的 */
+export async function listSessionMessagesAfter(
+  userId: string,
+  sessionId: string,
+  after: string,
+  limit: number,
+): Promise<{ messages: StrategySessionMessageRow[]; truncated: boolean }> {
+  const cur = decodeMessageCursor(after);
+  if (!cur) return { messages: [], truncated: false };
+  await ensureTables();
+  const cap = Math.min(Math.max(limit, 1), STRATEGY_LIMITS.messagesPageMax);
+  const rows = (await db()
+    .prepare(
+      `SELECT id, session_id, user_id, role, content, structured_json, created_at,
+              speaker_model, speaker_role, speaker_label, turn_id, completion_status
+       FROM strategy_session_messages
+       WHERE session_id = ? AND user_id = ?
+         AND (created_at > ? OR (created_at = ? AND id > ?))
+       ORDER BY created_at ASC, id ASC
+       LIMIT ?`,
+    )
+    .all(sessionId, userId, cur.createdAt, cur.createdAt, cur.id, cap + 1)) as Record<string, unknown>[];
+  const truncated = rows.length > cap;
+  return { messages: (truncated ? rows.slice(0, cap) : rows).map(mapSessionMessageRow), truncated };
 }
 
 /** 開房／sync：自最新往舊合併直到 hardCap；超過則 hasMore=true（還有更舊） */

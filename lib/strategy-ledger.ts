@@ -16,6 +16,17 @@ export type LedgerItem = {
   note?: string;
   parkedReason?: string;
   resumeTrigger?: string;
+  /** 主持人驗收結案時寫的結論（做了什麼、結果、留給後續的事） */
+  conclusion?: string;
+  updatedAt: number;
+};
+
+/** 專案簡介：討論期結束後由主持人寫入，每回合固定注入 */
+export type ProjectBrief = {
+  topic: string;
+  problems: string[];
+  requirements: string[];
+  constraints: string[];
   updatedAt: number;
 };
 
@@ -38,6 +49,7 @@ export type WorkPackage = {
 export type HeldInstruction = { text: string; itemId: string | null; reason: string };
 
 export type StrategyLedger = {
+  brief: ProjectBrief | null;
   items: LedgerItem[];
   currentItemId: string | null;
   currentPackage: WorkPackage | null;
@@ -55,6 +67,10 @@ export const LEDGER_LIMITS = {
   maxItems: 40,
   titleMaxChars: 120,
   noteMaxChars: 300,
+  conclusionMaxChars: 600,
+  briefFieldMaxChars: 300,
+  briefListMax: 8,
+  opsPerTurnMax: 20,
   packageFieldMaxChars: 400,
   packageListMax: 8,
   logMax: 12,
@@ -69,6 +85,17 @@ const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.\-/]{0,47}$/;
 /** 不可逆動作：一律保留給發起人批准，不自動派送 */
 const IRREVERSIBLE_RE =
   /git\s+push|vercel\s+(deploy|--prod)|\bdeploy\b|部署|上線正式|DROP\s+TABLE|TRUNCATE|DELETE\s+FROM|正式(資料庫|DB)\s*(寫入|刪除|修改|migrat)/i;
+
+/** 禁令子句（「不包含部署」「禁止 push」）不是要執行的動作 */
+const PROHIBITION_RE = /不包含|不包括|不含|不得|禁止|嚴禁|不要|不可|不准|不能|勿|未經.{0,12}(批准|驗收|同意)/;
+
+/** 以逗號／句號／分號切子句，去掉禁令子句後仍提到不可逆動作才算 */
+export function isIrreversibleInstruction(text: string): boolean {
+  if (!IRREVERSIBLE_RE.test(text)) return false;
+  return text
+    .split(/[，,。；;！!？?\n]+/)
+    .some((clause) => !PROHIBITION_RE.test(clause) && IRREVERSIBLE_RE.test(clause));
+}
 
 const STATUS_LABEL: Record<LedgerItemStatus, string> = {
   todo: "⬜ 未開始",
@@ -96,7 +123,22 @@ function strList(v: unknown, maxItems: number, maxChars: number): string[] {
 }
 
 export function emptyLedger(): StrategyLedger {
-  return { items: [], currentItemId: null, currentPackage: null, lastHostTurn: null, log: [] };
+  return { brief: null, items: [], currentItemId: null, currentPackage: null, lastHostTurn: null, log: [] };
+}
+
+function normalizeBrief(raw: unknown, now: number): ProjectBrief | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const L = LEDGER_LIMITS;
+  const topic = clip(str(r.topic), L.briefFieldMaxChars);
+  if (!topic) return null;
+  return {
+    topic,
+    problems: strList(r.problems, L.briefListMax, L.briefFieldMaxChars),
+    requirements: strList(r.requirements, L.briefListMax, L.briefFieldMaxChars),
+    constraints: strList(r.constraints, L.briefListMax, L.briefFieldMaxChars),
+    updatedAt: Number(r.updatedAt) > 0 ? Number(r.updatedAt) : now,
+  };
 }
 
 export function isLedgerActive(ledger: StrategyLedger): boolean {
@@ -126,6 +168,8 @@ function normalizeItem(raw: unknown, now: number): LedgerItem | null {
   if (parkedReason) item.parkedReason = clip(parkedReason, LEDGER_LIMITS.noteMaxChars);
   const resumeTrigger = str(r.resumeTrigger);
   if (resumeTrigger) item.resumeTrigger = clip(resumeTrigger, LEDGER_LIMITS.noteMaxChars);
+  const conclusion = str(r.conclusion);
+  if (conclusion) item.conclusion = clip(conclusion, LEDGER_LIMITS.conclusionMaxChars);
   return item;
 }
 
@@ -193,6 +237,7 @@ export function readLedger(meta: Record<string, unknown> | null | undefined, now
         }
       : null;
   return {
+    brief: normalizeBrief(r.brief, now),
     items,
     currentItemId: currentItemId && seen.has(currentItemId) ? currentItemId : null,
     currentPackage: normalizePackage(r.currentPackage, now),
@@ -250,6 +295,8 @@ export type LedgerTurnInput = {
   workPackage?: unknown;
   verdict?: unknown;
   verdictReason?: unknown;
+  /** verdict 為 accept 時寫入項目的結論 */
+  conclusion?: unknown;
   escalationDecision?: unknown;
   instructions: unknown[];
   reportRequests: unknown[];
@@ -294,12 +341,42 @@ function isWithinItem(ledger: StrategyLedger, itemId: string, scopeId: string): 
   return false;
 }
 
+function completeItem(ledger: StrategyLedger, item: LedgerItem, conclusion: string, now: number, events: string[]): void {
+  item.status = "done";
+  delete item.parkedReason;
+  delete item.resumeTrigger;
+  if (conclusion) item.conclusion = clip(conclusion, LEDGER_LIMITS.conclusionMaxChars);
+  item.updatedAt = now;
+  events.push(
+    conclusion
+      ? `${item.id} 完成：${clip(conclusion, 80)}`
+      : `${item.id} 完成（⚠ 主持人未寫結論）`,
+  );
+}
+
+/** 路線圖下一個要做的項目：先找進行中、再找未開始；有未完成子項目的父項目讓給子項目 */
+export function pickNextItem(ledger: StrategyLedger): LedgerItem | null {
+  const open = (s: LedgerItemStatus) => s === "todo" || s === "in_progress";
+  const hasOpenChild = new Set(
+    ledger.items.filter((i) => i.parentId && open(i.status)).map((i) => i.parentId as string),
+  );
+  const candidates = ledger.items.filter((i) => open(i.status) && !hasOpenChild.has(i.id));
+  return candidates.find((i) => i.status === "in_progress") ?? candidates.find((i) => i.status === "todo") ?? null;
+}
+
 function applyOps(ledger: StrategyLedger, opsRaw: unknown, now: number, events: string[]): void {
   if (!Array.isArray(opsRaw)) return;
-  for (const raw of opsRaw.slice(0, 12)) {
+  for (const raw of opsRaw.slice(0, LEDGER_LIMITS.opsPerTurnMax)) {
     if (!raw || typeof raw !== "object") continue;
     const op = raw as Record<string, unknown>;
     const kind = str(op.op);
+    if (kind === "setBrief") {
+      const brief = normalizeBrief({ ...op, updatedAt: now }, now);
+      if (!brief) continue;
+      ledger.brief = brief;
+      events.push(`專案簡介更新：${clip(brief.topic, 60)}`);
+      continue;
+    }
     const id = str(op.id);
     const item = ledger.items.find((i) => i.id === id);
     if (kind === "add") {
@@ -311,9 +388,16 @@ function applyOps(ledger: StrategyLedger, opsRaw: unknown, now: number, events: 
       continue;
     }
     if (!item) continue;
-    if (kind === "setStatus") {
+    if (kind === "complete") {
+      if (item.status === "done") continue;
+      completeItem(ledger, item, str(op.conclusion), now, events);
+    } else if (kind === "setStatus") {
       const status = op.status as LedgerItemStatus;
       if (!LEDGER_ITEM_STATUSES.includes(status) || status === item.status) continue;
+      if (status === "done") {
+        completeItem(ledger, item, str(op.conclusion) || str(op.note), now, events);
+        continue;
+      }
       item.status = status;
       const note = str(op.note);
       if (note) item.note = clip(note, LEDGER_LIMITS.noteMaxChars);
@@ -360,6 +444,7 @@ export function applyLedgerTurn(
   now = Date.now(),
 ): LedgerTurnResult {
   const ledger: StrategyLedger = {
+    brief: current.brief,
     items: current.items.map((i) => ({ ...i })),
     currentItemId: current.currentItemId,
     currentPackage: current.currentPackage ? { ...current.currentPackage } : null,
@@ -401,9 +486,83 @@ export function applyLedgerTurn(
     }
   }
 
-  if (turn.workPackage && typeof turn.workPackage === "object" && (!wasEscalated || escalationResolved)) {
+  // 驗收判定：針對本回合開始時的工作包，先判再裝新包，否則「通過＋下一包」會判到新包上
+  const verdict = str(turn.verdict) as LedgerVerdict;
+  const newPkgItemId =
+    turn.workPackage && typeof turn.workPackage === "object"
+      ? str((turn.workPackage as Record<string, unknown>).itemId)
+      : "";
+  const judged = ledger.currentPackage;
+  if (
+    judged &&
+    !wasEscalated &&
+    judged.status !== "accepted" &&
+    (verdict === "accept" || verdict === "reject")
+  ) {
+    judged.updatedAt = now;
+    if (verdict === "accept") {
+      judged.status = "accepted";
+      events.push(`工作包 ${judged.id} 驗收通過`);
+      const item = ledger.items.find((i) => i.id === judged.itemId);
+      const conclusion = str(turn.conclusion);
+      // 同回合替同一項目開新工作包＝項目還沒做完，只結工作包
+      if (item && item.status !== "done" && newPkgItemId !== item.id) {
+        completeItem(ledger, item, conclusion, now, events);
+      } else if (item && item.status === "done" && conclusion && !item.conclusion) {
+        item.conclusion = clip(conclusion, LEDGER_LIMITS.conclusionMaxChars);
+      }
+    } else {
+      judged.rejectCount += 1;
+      const reason = clip(str(turn.verdictReason), LEDGER_LIMITS.noteMaxChars);
+      if (reason) judged.lastRejectReason = reason;
+      if (judged.rejectCount >= LEDGER_LIMITS.rejectEscalateAt) {
+        judged.status = "escalated";
+        events.push(`工作包 ${judged.id} 已退回 ${judged.rejectCount} 次 → 進入僵局處置`);
+      } else {
+        judged.status = "executing";
+        events.push(`工作包 ${judged.id} 退回第 ${judged.rejectCount} 次${reason ? `：${clip(reason, 60)}` : ""}`);
+      }
+    }
+  }
+
+  // 目前項目已結案 → 自動接路線圖下一項
+  const curItem = ledger.items.find((i) => i.id === ledger.currentItemId);
+  if (curItem?.status === "done") {
+    const next = pickNextItem(ledger);
+    if (next) {
+      ledger.currentItemId = next.id;
+      if (next.status === "todo" && (!newPkgItemId || newPkgItemId === next.id)) {
+        next.status = "in_progress";
+        next.updatedAt = now;
+      }
+      events.push(`自動接下一項 ${next.id}「${clip(next.title, 40)}」`);
+    } else {
+      ledger.currentItemId = null;
+      events.push("路線圖項目全部完成");
+    }
+    if (ledger.currentPackage?.status === "accepted") ledger.currentPackage = null;
+  }
+
+  if (
+    turn.workPackage &&
+    typeof turn.workPackage === "object" &&
+    (ledger.currentPackage?.status !== "escalated" || escalationResolved)
+  ) {
+    // 同 ID 重新下發（未驗收、非僵局處置換包）沿用退回次數與起始時間，否則僵局保護會被歸零繞過
+    const prev = ledger.currentPackage;
+    const sameOpen =
+      !escalationResolved &&
+      prev !== null &&
+      prev.status !== "accepted" &&
+      prev.id === str((turn.workPackage as Record<string, unknown>).id);
     const pkg = normalizePackage(
-      { ...(turn.workPackage as Record<string, unknown>), rejectCount: 0, status: "executing", createdAt: now, updatedAt: now },
+      {
+        ...(turn.workPackage as Record<string, unknown>),
+        rejectCount: sameOpen ? prev.rejectCount : 0,
+        status: "executing",
+        createdAt: sameOpen ? prev.createdAt : now,
+        updatedAt: now,
+      },
       now,
     );
     if (pkg && (!isLedgerActive(ledger) || ledger.items.some((i) => i.id === pkg.itemId))) {
@@ -423,29 +582,7 @@ export function applyLedgerTurn(
     }
   }
 
-  // 驗收判定
-  const verdict = str(turn.verdict) as LedgerVerdict;
-  const pkg = ledger.currentPackage;
-  let escalated = pkg?.status === "escalated" && !escalationResolved;
-  if (pkg && !escalated && (verdict === "accept" || verdict === "reject")) {
-    pkg.updatedAt = now;
-    if (verdict === "accept") {
-      pkg.status = "accepted";
-      events.push(`工作包 ${pkg.id} 驗收通過`);
-    } else {
-      pkg.rejectCount += 1;
-      const reason = clip(str(turn.verdictReason), LEDGER_LIMITS.noteMaxChars);
-      if (reason) pkg.lastRejectReason = reason;
-      if (pkg.rejectCount >= LEDGER_LIMITS.rejectEscalateAt) {
-        pkg.status = "escalated";
-        escalated = true;
-        events.push(`工作包 ${pkg.id} 已退回 ${pkg.rejectCount} 次 → 進入僵局處置`);
-      } else {
-        pkg.status = "executing";
-        events.push(`工作包 ${pkg.id} 退回第 ${pkg.rejectCount} 次${reason ? `：${clip(reason, 60)}` : ""}`);
-      }
-    }
-  }
+  const escalated = ledger.currentPackage?.status === "escalated" && !escalationResolved;
 
   const active = isLedgerActive(ledger);
   const scopeItemId = ledger.currentPackage?.itemId ?? ledger.currentItemId;
@@ -454,7 +591,7 @@ export function applyLedgerTurn(
     const text = instructionText(ins);
     if (!text) continue;
     const itemId = instructionItemId(ins);
-    if (IRREVERSIBLE_RE.test(text)) {
+    if (isIrreversibleInstruction(text)) {
       held.push({ text: clip(text, 400), itemId, reason: "不可逆動作（部署／push／正式資料庫）需發起人批准" });
       continue;
     }
@@ -471,7 +608,7 @@ export function applyLedgerTurn(
   // 報告需求是唯讀蒐證；僵局時仍允許（例如要 Cursor 交卡關說明）
   const allowedReportRequests = turn.reportRequests.filter((r) => {
     const text = instructionText(r);
-    if (text && IRREVERSIBLE_RE.test(text)) {
+    if (text && isIrreversibleInstruction(text)) {
       held.push({ text: clip(text, 400), itemId: instructionItemId(r), reason: "不可逆動作需發起人批准" });
       return false;
     }
@@ -519,6 +656,7 @@ function renderItems(ledger: StrategyLedger): string {
   const line = (it: LedgerItem, depth: number) => {
     const cur = ledger.currentItemId === it.id ? " ◀ 目前" : "";
     const extra = [
+      it.conclusion ? `結論：${clip(it.conclusion, 300)}` : "",
       it.note ? `備註：${it.note}` : "",
       it.parkedReason ? `暫停原因：${it.parkedReason}` : "",
       it.resumeTrigger ? `恢復點：${it.resumeTrigger}` : "",
@@ -541,7 +679,13 @@ export function renderLedgerAnchor(ledger: StrategyLedger): string {
   const item = ledger.items.find((i) => i.id === ledger.currentItemId);
   const pkg = ledger.currentPackage;
   const parts: string[] = [];
+  if (ledger.brief) parts.push(`主題：${clip(ledger.brief.topic, 80)}`);
+  if (isLedgerActive(ledger)) {
+    const done = ledger.items.filter((i) => i.status === "done").length;
+    parts.push(`路線圖 ${done}/${ledger.items.length} 完成`);
+  }
   if (item) parts.push(`目前項目：${item.id}「${clip(item.title, 60)}」（${STATUS_LABEL[item.status]}）`);
+  if (item && !pkg) parts.push("⚠ 目前項目沒有工作包：本回合要輸出 workPackage 並下指令給 Cursor");
   if (pkg) {
     parts.push(`工作包：${clip(pkg.goal, 120)}`);
     if (pkg.acceptance.length) parts.push(`驗收：${clip(pkg.acceptance.join("；"), 160)}`);
@@ -552,10 +696,38 @@ export function renderLedgerAnchor(ledger: StrategyLedger): string {
 
 /** 每回合固定放在脈絡最前面 */
 export function renderLedgerForHost(ledger: StrategyLedger): string {
-  if (!isLedgerActive(ledger) && !ledger.currentPackage && !ledger.lastHostTurn) return "";
   const parts: string[] = ["# 主線帳本（程式保存，以此為準；不要憑記憶推測進度）"];
-  if (isLedgerActive(ledger)) parts.push(renderItems(ledger));
+  const brief = ledger.brief;
+  if (brief) {
+    parts.push(
+      [
+        `## 專案簡介\n主題：${brief.topic}`,
+        brief.problems.length ? `問題：${brief.problems.join("；")}` : "",
+        brief.requirements.length ? `需求：${brief.requirements.join("；")}` : "",
+        brief.constraints.length ? `限制：${brief.constraints.join("；")}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    );
+  }
+  if (!isLedgerActive(ledger)) {
+    parts.push(
+      "## 尚未排路線圖\n討論出主題、問題與需求後，同一回合輸出 setBrief 與路線圖（多個 add，依執行順序），再 setCurrent 第一項並給 workPackage。討論還不夠時先問使用者，不要急著排。",
+    );
+  } else {
+    if (!brief) parts.push("## ⚠ 尚無專案簡介\n本回合請用 setBrief 補上主題／問題／需求／限制。");
+    const done = ledger.items.filter((i) => i.status === "done").length;
+    parts.push(`## 路線圖（${done}/${ledger.items.length} 完成）\n${renderItems(ledger)}`);
+  }
   const pkg = ledger.currentPackage;
+  const curItem = ledger.items.find((i) => i.id === ledger.currentItemId);
+  if (curItem && !pkg) {
+    parts.push(
+      `## ⚠ 目前項目 ${curItem.id} 沒有工作包（本回合必做）\n輸出 workPackage（itemId:"${curItem.id}"）並用 instructions 派給 Cursor 開工；不要只回覆使用者。`,
+    );
+  } else if (isLedgerActive(ledger) && !curItem && pickNextItem(ledger)) {
+    parts.push("## ⚠ 沒有目前項目\n用 setCurrent 選路線圖下一項並給 workPackage。");
+  }
   if (pkg) {
     parts.push(
       [
@@ -599,15 +771,20 @@ export function renderLedgerForHost(ledger: StrategyLedger): string {
 /** 附在 system 尾端的協定（不寫進範本，DB 自訂範本也一律套用） */
 export function ledgerProtocolBlock(): string {
   return `## 主線帳本協定（程式強制）
-你是規劃與驗收者，不是逐行審碼者。Cursor 負責實作、自測與自行審碼。
-- 進度以「主線帳本」為準。改帳本只能用 ledgerOps：
-  [{"op":"setStatus","id":"4A","status":"todo|in_progress|done|parked|blocked","note":"…"},
-   {"op":"park","id":"…","reason":"…","resumeTrigger":"…"},{"op":"resume","id":"…"},
-   {"op":"setCurrent","id":"…"},{"op":"add","id":"…","title":"…","parentId":"…"}]
+你是規劃與驗收者，不是逐行審碼者。Cursor 負責實作、自測與自行審碼。進度由你推動，使用者不必勾選。
+- 會議流程：①討論期：和使用者釐清主題、問題、需求。②排路線圖：討論夠了就在同一回合輸出 setBrief＋多個 add（依執行順序，一項＝一個可驗收的階段或問題）＋setCurrent 第一項＋workPackage＋instructions。③逐項執行：Cursor 做完交報告 → 你驗收 → 通過就結案並接下一項。④全部完成後總結。
+- 進度以「主線帳本」為準。改帳本只能用 ledgerOps（每回合最多 ${LEDGER_LIMITS.opsPerTurnMax} 個）：
+  [{"op":"setBrief","topic":"…","problems":["…"],"requirements":["…"],"constraints":["…"]},
+   {"op":"add","id":"P1","title":"…","parentId":"…"},{"op":"setCurrent","id":"…"},
+   {"op":"complete","id":"…","conclusion":"…"},
+   {"op":"setStatus","id":"4A","status":"todo|in_progress|parked|blocked","note":"…"},
+   {"op":"park","id":"…","reason":"…","resumeTrigger":"…"},{"op":"resume","id":"…"}]
+- 驗收通過（verdict "accept"）時必填 "conclusion"：3–5 行（做了什麼、驗收結果、數字、留給後續的事）。程式會自動把項目標為完成、記下結論、切到路線圖下一項；你要在同一回合給下一項的 workPackage 與 instructions，讓 Cursor 直接開工。
+- 本回合訊息來自 Cursor 交付報告時，必須做出判定：verdict accept／reject，或用 reportRequests 指名缺什麼；不要只回覆使用者而不給 Cursor 下一步。
 - 開工時輸出 workPackage：{"id":"wp-…","itemId":"目前項目 id","goal":"…","scope":["允許改的檔案／模組"],"acceptance":["可用測試輸出判定的驗收條件"],"stopConditions":["遇到就停下回報的情況"]}。
   一個工作包應讓 Cursor 能自主做完再一次回報，不要切成一小步一回合。
 - instructions 可寫字串或 {"itemId":"…","text":"…"}；itemId 與目前項目不同會被保留不派送。部署／git push／正式資料庫寫入一律保留給發起人。
-- Cursor 交驗收報告時，輸出 verdict："accept" 或 "reject"（附 verdictReason）。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局處置。
+- 不通過輸出 verdict "reject"（附 verdictReason）＋一條具體修正指令。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局處置。
 - 要看程式碼時，指名函式或行號範圍（每段 ≤150 行）；不要要求整份檔案。
 - 「做到哪裡」直接引用帳本；帳本沒寫的就說不知道，請 Cursor 用 git／報告查證。`;
 }
@@ -616,7 +793,10 @@ export function ledgerProtocolBlock(): string {
 export function renderLedgerForHuman(ledger: StrategyLedger): string {
   if (!isLedgerActive(ledger)) return "";
   const pkg = ledger.currentPackage;
+  const done = ledger.items.filter((i) => i.status === "done").length;
   return [
+    ledger.brief ? `主題：${ledger.brief.topic}` : "",
+    `路線圖 ${done}/${ledger.items.length} 完成`,
     renderItems(ledger),
     pkg ? `\n目前工作包：${pkg.id}（${pkg.itemId}）${pkg.goal}｜${pkg.status}｜退回 ${pkg.rejectCount} 次` : "",
   ]

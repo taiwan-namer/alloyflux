@@ -5,6 +5,7 @@ import {
   getStrategySession,
   listRunsForSessionBrief,
   listSessionDispatch,
+  listSessionMessagesAfter,
   listSessionMessagesPage,
   listSessionReports,
   readDossier,
@@ -12,6 +13,8 @@ import {
 } from "@/lib/strategy-loop";
 
 export const dynamic = "force-dynamic";
+
+const SYNC_AFTER_MAX = 50;
 
 /** 輕量增量同步：GET /api/strategy/sessions/[id]/sync?since=<ms>&count=<n> */
 export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }) {
@@ -61,15 +64,28 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     clientCount != null && clientCount > 0 ? Math.max(0, meta.messageCount - clientCount) : 0;
   const pageLimit =
     grown > 0 && grown <= 8 ? Math.min(8, Math.max(requested, grown + 1)) : requested;
-  const [page, runs, reportRows, dispatch] = await Promise.all([
+  // 客戶端帶本機最新一則游標：補齊游標之後的全部新訊息，避免閒置回來新增太多時中間缺一段
+  const after = url.searchParams.get("after");
+  const [page, gapFill, runs, reportRows, dispatch] = await Promise.all([
     listSessionMessagesPage(auth.user.id, id, {
       limit: pageLimit,
       skipTotal: true,
     }),
+    after ? listSessionMessagesAfter(auth.user.id, id, after, SYNC_AFTER_MAX) : null,
     listRunsForSessionBrief(auth.user.id, id, 10),
     listSessionReports(auth.user.id, id, 30, { includeContent: false }),
     listSessionDispatch(auth.user.id, id, 50),
   ]);
+  let messages = page.messages;
+  if (gapFill?.messages.length) {
+    const byId = new Map(gapFill.messages.map((m) => [m.id, m]));
+    for (const m of page.messages) byId.set(m.id, m);
+    messages = [...byId.values()].sort((a, b) =>
+      a.createdAt !== b.createdAt ? a.createdAt - b.createdAt : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+    );
+  }
+  // 新增量超過補齊上限：中間仍會缺，要客戶端整房重載
+  const gap = Boolean(gapFill?.truncated);
   const reports = reportRows.map((r) => ({
     id: r.id,
     requestId: r.requestId,
@@ -91,7 +107,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     workspaceMemoryNotes: meta.workspaceMemoryNotes,
     session,
     dossier: readDossier(session.meta),
-    messages: page.messages,
+    messages,
+    gap,
     runs,
     reports,
     dispatch,

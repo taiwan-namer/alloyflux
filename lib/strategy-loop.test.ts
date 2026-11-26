@@ -225,6 +225,15 @@ describe("buildReportInjection", () => {
     assert.match(out.index, /srep_old/);
     assert.doesNotMatch(out.index, /srep_new1/);
   });
+
+  it("工作包驗收前，期間上傳的報告在之後回合仍注入", () => {
+    const reports = [r("srep_deliv", "bridge", 150, "deliverable"), r("srep_before", "舊包", 80)];
+    const out = buildReportInjection(reports, { lastHostTurnAt: 200, focusIds: [], packageSince: 120 });
+    assert.deepEqual(out.injectedIds, ["srep_deliv"]);
+    assert.match(out.index, /srep_before/);
+    const noPkg = buildReportInjection(reports, { lastHostTurnAt: 200, focusIds: [] });
+    assert.deepEqual(noPkg.injectedIds, []);
+  });
 });
 
 describe("精簡會議室回合閘門", () => {

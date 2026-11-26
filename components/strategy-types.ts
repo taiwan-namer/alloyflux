@@ -164,6 +164,8 @@ export type StrategySyncResponse =
       hasMore?: boolean;
       nextCursor?: string | null;
       messageTotal?: number;
+      /** 新增量超過補齊上限，本頁與本機之間仍有缺口，需整房重載 */
+      gap?: boolean;
       workspaceMemoryNotes?: string;
       session: StrategySessionDetail["session"];
       dossier: StrategySessionDetail["dossier"];

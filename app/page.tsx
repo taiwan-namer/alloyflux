@@ -2611,8 +2611,8 @@ export default function ChatPage() {
 
     const hit = opts?.force ? null : getStrategyCacheEntry(id, true);
     if (hit) {
-      // 看過的會議室先畫最近幾則，不等網路
-      applyStrategyDetail(hit.detail, { switching, refreshMemory: true });
+      // 看過的會議室先畫最近幾則，不等網路；同房重開時保留已載入的更早訊息
+      applyStrategyDetail(hit.detail, { switching, refreshMemory: true, keepOlder: !switching });
       setStrategyBusy(false);
       if (Date.now() - hit.at < 20_000) return;
       void ensureStrategyFetch(id).then((fresh) => {
@@ -2818,54 +2818,68 @@ export default function ChatPage() {
   function handleSyncPatch(data: Extract<StrategySyncResponse, { changed: true }>) {
     // 4A：串流中仍可接受 reconciliation（RoomView 以 force pull 觸發）；不再因 sending 永久吞掉
     if (!strategyDetail || strategyDetail.session.id !== data.session.id) return;
+    if (data.gap) {
+      // 新增量超過補齊上限：merge 會留下中段缺口，直接換成最新一頁
+      const sid = data.session.id;
+      void ensureStrategyFetch(sid).then((fresh) => {
+        if (fresh && fresh.session.id === sid) {
+          applyStrategyDetail(fresh, { switching: false, refreshMemory: !wsMemoryDirty });
+        }
+      });
+      return;
+    }
     const nextDispatch = Array.isArray(data.dispatch) ? data.dispatch : strategyDetail.dispatch;
     const pendingIds = new Set(nextDispatch.filter((d) => d.status === "pending").map((d) => d.id));
     setDispatchSelected((sel) => new Set([...sel].filter((id) => pendingIds.has(id))));
-    // sync 只帶最新一頁：與既有訊息 merge，避免把「載入更早」洗掉
-    let nextMessages = strategyDetail.messages;
-    let nextHasMore = typeof data.hasMore === "boolean" ? data.hasMore : strategyDetail.hasMore;
-    let nextCursor = data.nextCursor !== undefined ? data.nextCursor : strategyDetail.nextCursor;
-    if (Array.isArray(data.messages)) {
-      const byId = new Map<string, (typeof strategyDetail.messages)[number]>();
-      for (const m of strategyDetail.messages) byId.set(m.id, m);
-      for (const m of data.messages) byId.set(m.id, m);
-      nextMessages = [...byId.values()].sort((a, b) => {
-        const dt = (a.createdAt || 0) - (b.createdAt || 0);
-        return dt !== 0 ? dt : String(a.id).localeCompare(String(b.id));
-      });
-      const syncOldest = data.messages[0];
-      const mergedOldest = nextMessages[0];
-      // 已載入比 sync 頁更舊的訊息時，保留原本的 hasMore／cursor
-      if (
-        syncOldest &&
-        mergedOldest &&
-        (mergedOldest.createdAt < syncOldest.createdAt ||
-          (mergedOldest.createdAt === syncOldest.createdAt &&
-            String(mergedOldest.id) < String(syncOldest.id)))
-      ) {
-        nextHasMore = strategyDetail.hasMore;
-        nextCursor = strategyDetail.nextCursor ?? null;
+    // 函式型更新：與「載入更早」／開房合併交錯時，不拿舊 render 的列表蓋掉剛補進來的訊息
+    setStrategyDetail((prev) => {
+      if (!prev || prev.session.id !== data.session.id) return prev;
+      // sync 只帶最新一頁：與既有訊息 merge，避免把「載入更早」洗掉
+      let nextMessages = prev.messages;
+      let nextHasMore = typeof data.hasMore === "boolean" ? data.hasMore : prev.hasMore;
+      let nextCursor = data.nextCursor !== undefined ? data.nextCursor : prev.nextCursor;
+      if (Array.isArray(data.messages)) {
+        const byId = new Map<string, (typeof prev.messages)[number]>();
+        for (const m of prev.messages) byId.set(m.id, m);
+        for (const m of data.messages) byId.set(m.id, m);
+        nextMessages = [...byId.values()].sort((a, b) => {
+          const dt = (a.createdAt || 0) - (b.createdAt || 0);
+          return dt !== 0 ? dt : String(a.id).localeCompare(String(b.id));
+        });
+        const syncOldest = data.messages[0];
+        const mergedOldest = nextMessages[0];
+        // 已載入比 sync 頁更舊的訊息時，保留原本的 hasMore／cursor
+        if (
+          syncOldest &&
+          mergedOldest &&
+          (mergedOldest.createdAt < syncOldest.createdAt ||
+            (mergedOldest.createdAt === syncOldest.createdAt &&
+              String(mergedOldest.id) < String(syncOldest.id)))
+        ) {
+          nextHasMore = prev.hasMore;
+          nextCursor = prev.nextCursor ?? null;
+        }
       }
-    }
-    const next: StrategySessionDetail = {
-      ...strategyDetail,
-      session: { ...strategyDetail.session, ...data.session },
-      dossier: data.dossier ?? strategyDetail.dossier,
-      messages: nextMessages,
-      runs: Array.isArray(data.runs) ? data.runs : strategyDetail.runs,
-      reports: Array.isArray(data.reports) ? data.reports : strategyDetail.reports,
-      dispatch: nextDispatch,
-      hasMore: nextHasMore,
-      nextCursor,
-      messageTotal:
-        typeof data.messageTotal === "number"
-          ? data.messageTotal
-          : typeof data.messageCount === "number"
-            ? data.messageCount
-            : strategyDetail.messageTotal,
-    };
-    setStrategyDetail(next);
-    putStrategyCache(next.session.id, next);
+      const next: StrategySessionDetail = {
+        ...prev,
+        session: { ...prev.session, ...data.session },
+        dossier: data.dossier ?? prev.dossier,
+        messages: nextMessages,
+        runs: Array.isArray(data.runs) ? data.runs : prev.runs,
+        reports: Array.isArray(data.reports) ? data.reports : prev.reports,
+        dispatch: nextDispatch,
+        hasMore: nextHasMore,
+        nextCursor,
+        messageTotal:
+          typeof data.messageTotal === "number"
+            ? data.messageTotal
+            : typeof data.messageCount === "number"
+              ? data.messageCount
+              : prev.messageTotal,
+      };
+      putStrategyCache(next.session.id, next);
+      return next;
+    });
     if (!wsMemoryDirty && typeof data.workspaceMemoryNotes === "string") {
       setWsMemoryDraft(data.workspaceMemoryNotes);
     }

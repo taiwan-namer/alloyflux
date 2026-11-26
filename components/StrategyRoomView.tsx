@@ -302,6 +302,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const sessionIdRef = useRef(detail.session.id);
   const streamingRef = useRef(false);
   const onSyncPatchRef = useRef(onSyncPatch);
+  /** 本機最新一則的游標（createdAt:id），sync 用來補齊之後的訊息 */
+  const newestCursorRef = useRef("");
   const onStreamCommittedRef = useRef(onStreamCommitted);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -321,6 +323,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const generatingRef = useRef(false);
   generatingRef.current = generating;
   onSyncPatchRef.current = onSyncPatch;
+  const newestMsg = detail.messages[detail.messages.length - 1];
+  newestCursorRef.current = newestMsg ? `${newestMsg.createdAt}:${newestMsg.id}` : "";
   onStreamingChangeRef.current = onStreamingChange;
   onStreamCommittedRef.current = onStreamCommitted;
 
@@ -558,9 +562,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       syncAbortRef.current = ac;
       const since = lastUpdatedAtRef.current || 0;
       const count = lastMessageCountRef.current || 0;
+      const after = newestCursorRef.current;
       try {
         const res = await fetch(
-          `/api/strategy/sessions/${encodeURIComponent(sid)}/sync?since=${encodeURIComponent(String(since))}&count=${encodeURIComponent(String(count))}&limit=5`,
+          `/api/strategy/sessions/${encodeURIComponent(sid)}/sync?since=${encodeURIComponent(String(since))}&count=${encodeURIComponent(String(count))}&limit=5${after ? `&after=${encodeURIComponent(after)}` : ""}`,
           { cache: "no-store", signal: ac.signal },
         );
         if (!res.ok || cancelled || ac.signal.aborted) return;

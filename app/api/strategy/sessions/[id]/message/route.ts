@@ -21,6 +21,7 @@ import {
   type StrategyTemplate,
 } from "@/lib/strategy-templates";
 import {
+  acquireTurnLock,
   addDispatchItems,
   addSessionMessage,
   buildReportInjection,
@@ -42,6 +43,7 @@ import {
   mergeDossier,
   queryRoomContent,
   readDossier,
+  releaseTurnLock,
   resolveSessionMembers,
   selectStrategyHistory,
   STRATEGY_LIMITS,
@@ -61,6 +63,7 @@ import {
   type HeldInstruction,
 } from "@/lib/strategy-ledger";
 import { randomUUID } from "crypto";
+import { after } from "next/server";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
@@ -111,7 +114,7 @@ function leanSopBlock(): string {
 1. 了解：依使用者描述與 Cursor 的架構報告理解專案。資訊不足時，用一個 reportRequests 請 Cursor 交架構摘要（不要原始碼）。
 2. 下指令：instructions 只寫「目標、範圍、驗收標準」，不指定逐行改法；每次最多 5 條，全部屬於目前項目。同時輸出 workPackage（itemId、goal、scope、acceptance）。
 3. 對齊：Cursor 回報「對齊有問題」時，只針對那個問題修正指令，不重新規劃整個專案。
-4. 驗收：Cursor 交「最終報告」時對照驗收標準判定。通過 → verdict "accept"，說明下一步或結束；不通過 → verdict "reject"＋verdictReason，只給一條具體修正指令。
+4. 驗收：Cursor 交「最終報告」時對照驗收標準判定。通過 → verdict "accept"＋conclusion（3–5 行結論），程式會自動結案並接路線圖下一項，同回合給下一項的 workPackage 與 instructions；不通過 → verdict "reject"＋verdictReason，只給一條具體修正指令。
 5. 使用者要求復盤時，再總結得失。
 禁止：要求原始碼或拆段上傳；擴大範圍（新點子寫在 reply 的「建議清單」，不要下成指令）；只為了確認而要求額外報告；部署、git push、正式資料庫寫入一律寫成「待發起人批准」。
 reply 控制在 800 字內。項目完成或要換下一項時，用 ledgerOps（setStatus／setCurrent）更新帳本。`;
@@ -119,9 +122,9 @@ reply 控制在 800 字內。項目完成或要換下一項時，用 ledgerOps�
 
 function jsonOnlySystem(template: StrategyTemplate, lean: boolean): string {
   if (lean) {
-    return `${template.systemPrompt}\n\n${leanSopBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, escalationDecision。`;
+    return `${template.systemPrompt}\n\n${leanSopBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision。`;
   }
-  return `${template.systemPrompt}\n\n${limitsBlock()}\n\n${ledgerProtocolBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, escalationDecision, reportFocus。`;
+  return `${template.systemPrompt}\n\n${limitsBlock()}\n\n${ledgerProtocolBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision, reportFocus。`;
 }
 
 function streamLeadSystem(template: StrategyTemplate, lean: boolean): string {
@@ -129,7 +132,7 @@ function streamLeadSystem(template: StrategyTemplate, lean: boolean): string {
 
 ${lean ? leanSopBlock() : `${limitsBlock()}\n\n${ledgerProtocolBlock()}`}
 
-結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, roomQueries；需要時另加 ledgerOps, workPackage, verdict, verdictReason, escalationDecision${lean ? "" : ", reportFocus"}。
+結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, roomQueries；需要時另加 ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision${lean ? "" : ", reportFocus"}。
 分隔標記必須單獨一行：${STRATEGY_STATE_DELIMITER}
 ${STREAM_REPLY_EMPTY_RULE}`;
 }
@@ -148,19 +151,26 @@ async function buildContextBlock(
   const ledger = readLedger(session.meta);
   const roomMemory = formatStrategyRoomMemory(session.meta, session.id);
   const memoryBlock = roomMemory ? `## 會議室記憶（狀態筆記與較早對話摘要）\n${roomMemory}` : "";
+  // 工作包驗收前，期間上傳的交付一直注入；否則中間多一回合（重送、網頁發言）報告就只剩索引
+  const pkg = ledger.currentPackage;
+  const packageSince = pkg && pkg.status !== "accepted" ? pkg.createdAt : 0;
+  const sourceBlock = fromWeb
+    ? "## 發言來源\n本回合訊息來自：使用者（網頁）"
+    : "## 發言來源\n本回合訊息來自：Cursor。這是交付或回報：必須給 Cursor 下一步（verdict accept＋conclusion＋下一項 workPackage／instructions，或 reject＋修正指令，或 reportRequests 指名缺什麼），不要只回覆使用者。";
 
   if (lean) {
-    // 像一般聊天：只有專案錨點＋上一回合之後新上傳的報告，其餘全靠對話紀錄
+    // 像一般聊天：只有專案錨點＋上一回合之後／本工作包期間上傳的報告，其餘全靠對話紀錄
     const fresh = await listSessionReports(authUserId, session.id, 10);
     const { bodies } = buildReportInjection(fresh, {
       lastHostTurnAt: ledger.lastHostTurn?.at ?? 0,
       focusIds: [],
+      packageSince,
     });
     const contextBlock = [
       renderLedgerAnchor(ledger),
       memoryBlock,
-      bodies ? `## 上一回合之後 Cursor 上傳的報告${bodies}` : "",
-      `## 發言來源\n本回合訊息來自：${fromWeb ? "使用者（網頁）" : "Cursor"}`,
+      bodies ? `## 上一回合之後／本工作包期間 Cursor 上傳的報告${bodies}` : "",
+      sourceBlock,
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -180,6 +190,7 @@ async function buildContextBlock(
   const { bodies: reportBodies, index: reportIndex } = buildReportInjection(reports, {
     lastHostTurnAt: ledger.lastHostTurn?.at ?? 0,
     focusIds: readReportFocus(session.meta),
+    packageSince,
   });
   const runBodies = budgetJoin(
     runs.map(
@@ -212,9 +223,9 @@ async function buildContextBlock(
       : reports.length
         ? ""
         : "## 尚未收到任何報告",
-    reportBodies ? `## 上一回合之後的新報告／指名報告${reportBodies}` : "",
+    reportBodies ? `## 上一回合之後的新報告／本工作包期間的交付／指名報告${reportBodies}` : "",
     runBodies ? `## 已掛載 run${runBodies}` : "",
-    `## 發言來源提示\n本回合訊息來自：${fromWeb ? "使用者（網頁）" : "Cursor"}`,
+    sourceBlock,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -289,6 +300,31 @@ async function findRecentDuplicateTurn(userId: string, sessionId: string, conten
     return reply ?? null;
   }
   return null;
+}
+
+const WEB_REPEAT_WINDOW_MS = 2 * 60_000;
+
+/** 網頁短時間內重送一字不差的同一句、且上次已有完整回覆（畫面像卡住時重按）：不再多跑一回合 */
+async function findRecentWebRepeat(userId: string, sessionId: string, content: string): Promise<boolean> {
+  const recent = await listSessionMessages(userId, sessionId, 12);
+  const cutoff = Date.now() - WEB_REPEAT_WINDOW_MS;
+  for (let i = recent.length - 1; i >= 0; i--) {
+    const m = recent[i]!;
+    if (m.createdAt < cutoff) break;
+    if (m.role !== "user" || m.structured?.source !== "web" || m.structured?.kind === "note") continue;
+    if (m.content.trim() !== content) continue;
+    // 上次失敗／中斷就讓使用者重送
+    return recent
+      .slice(i + 1)
+      .some(
+        (x) =>
+          x.role === "assistant" &&
+          x.structured?.kind !== "advisor" &&
+          x.completionStatus !== "failed" &&
+          x.completionStatus !== "aborted",
+      );
+  }
+  return false;
 }
 
 function readReportFocus(meta: Record<string, unknown>): string[] {
@@ -429,20 +465,61 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     }
   }
 
+  if (fromWeb && (await findRecentWebRepeat(auth.user.id, sessionId, content))) {
+    return Response.json(
+      { error: "同一句剛剛已送出並回覆過；若要主持人重新處理，請換個說法或補充內容", duplicate: true },
+      { status: 409 },
+    );
+  }
+
   if ((await balance(auth.user.id)) <= 0) {
     return Response.json({ error: "Insufficient credits" }, { status: 402 });
   }
 
-  const wantStream = body.stream === true;
-  const template = await resolveTemplateForSession(auth.user.id, session);
-  const members = resolveSessionMembers(session).map((m) => ({ ...m }));
-  if (body.model?.trim()) {
-    const lead = members.find((m) => m.role === "lead");
-    if (lead) lead.modelId = body.model.trim();
+  // 同房一次一個回合：兩個回合平行會各自讀同一份帳本再寫回，造成重複建項、退回重複計數
+  const lockToken = `lock_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+  if (!(await acquireTurnLock(auth.user.id, sessionId, lockToken))) {
+    if (!fromWeb) return saveNote("turn_busy");
+    return Response.json(
+      { error: "主持人正在回覆上一則訊息，請等回覆出來再送", busy: true },
+      { status: 409 },
+    );
   }
+  let releasing: Promise<void> | null = null;
+  const release = () =>
+    (releasing ??= releaseTurnLock(auth.user.id, sessionId, lockToken).catch((e) => {
+      console.warn("[strategy-turn-lock] release failed", e instanceof Error ? e.message : e);
+    }));
 
-  if (!wantStream) {
-    return handleJsonMode({
+  try {
+    // 等鎖期間前一回合可能剛寫完帳本，用拿到鎖之後的最新狀態組 context
+    session = (await getStrategySession(auth.user.id, sessionId)) ?? session;
+    const wantStream = body.stream === true;
+    const template = await resolveTemplateForSession(auth.user.id, session);
+    const members = resolveSessionMembers(session).map((m) => ({ ...m }));
+    if (body.model?.trim()) {
+      const lead = members.find((m) => m.role === "lead");
+      if (lead) lead.modelId = body.model.trim();
+    }
+
+    if (!wantStream) {
+      return await handleJsonMode({
+        req,
+        authUserId: auth.user.id,
+        fromWeb,
+        session,
+        sessionId,
+        content,
+        template,
+        members,
+        lean,
+        turnType,
+      });
+    }
+
+    let streamSettled!: () => void;
+    const settled = new Promise<void>((resolve) => (streamSettled = resolve));
+    const res = await handleStreamMode({
       req,
       authUserId: auth.user.id,
       fromWeb,
@@ -453,21 +530,25 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       members,
       lean,
       turnType,
+      onSettled: async () => {
+        await release();
+        streamSettled();
+      },
     });
+    // 沒進到串流（例如模型不存在）就不會有 onSettled，在這裡放掉
+    if (!res.headers.get("content-type")?.includes("ndjson")) {
+      await release();
+      return res;
+    }
+    // 回應結束後 serverless 可能凍結；用 after 撐到鎖確實釋放
+    after(() => settled);
+    return res;
+  } catch (e) {
+    await release();
+    throw e;
+  } finally {
+    if (body.stream !== true) await release();
   }
-
-  return handleStreamMode({
-    req,
-    authUserId: auth.user.id,
-    fromWeb,
-    session,
-    sessionId,
-    content,
-    template,
-    members,
-    lean,
-    turnType,
-  });
 }
 
 async function handleJsonMode(opts: {
@@ -628,6 +709,7 @@ async function finalizeTurn(input: {
         workPackage: parsedPack.parsed.workPackage,
         verdict: parsedPack.parsed.verdict,
         verdictReason: parsedPack.parsed.verdictReason,
+        conclusion: parsedPack.parsed.conclusion,
         escalationDecision: parsedPack.parsed.escalationDecision,
         instructions,
         reportRequests,
@@ -852,6 +934,8 @@ async function handleStreamMode(opts: {
   members: SessionMember[];
   lean: boolean;
   turnType: LeanTurnType | null;
+  /** 串流主體結束（含中斷、錯誤）時呼叫一次 */
+  onSettled?: () => Promise<void>;
 }) {
   const { req, authUserId, fromWeb, session, sessionId, content, template, members, lean, turnType } = opts;
   const leadMember = members.find((m) => m.role === "lead") ?? members[0]!;
@@ -879,8 +963,8 @@ async function handleStreamMode(opts: {
   const encoder = encodeNdjson;
 
   // 先回串流讓前端可立刻「停止」；組 context／upstream 放到 start 內並尊重 req.signal
-  const stream = new ReadableStream({
-    async start(controller) {
+  const turn = {
+    async run(controller: ReadableStreamDefaultController<Uint8Array>) {
       const send = (obj: unknown) => {
         try {
           controller.enqueue(encoder(obj));
@@ -1265,6 +1349,15 @@ async function handleStreamMode(opts: {
         }
       } finally {
         controller.close();
+      }
+    },
+  };
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        await turn.run(controller);
+      } finally {
+        await opts.onSettled?.();
       }
     },
   });
