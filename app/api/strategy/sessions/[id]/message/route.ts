@@ -60,6 +60,7 @@ import {
 } from "@/lib/strategy-loop";
 import {
   applyLedgerTurn,
+  fillInstructionsFromDelivery,
   ledgerProtocolBlock,
   readLedger,
   renderLedgerAnchor,
@@ -159,7 +160,7 @@ async function buildContextBlock(
   const packageSince = pkg && pkg.status !== "accepted" ? pkg.createdAt : 0;
   const sourceBlock = fromWeb
     ? "## 發言來源\n本回合訊息來自：使用者（網頁）"
-    : "## 發言來源\n本回合訊息來自：Cursor。可見回覆只能是「判定」（最多 5 行）加「交付命令」。交付命令全文同時寫進 instructions；留空等於沒派工，Cursor 不會執行寫在回覆裡的句子。禁止只給結語、方向，或「請依下列／接續／先補證據」。通過就接下一項 workPackage 與命令。還差就寫「還差」加一條修正命令，phase 填 reviewing；禁止寫「不通過」或 phase=await_code，那會讓 Cursor 停下等人。";
+    : "## 發言來源\n本回合訊息來自：Cursor。可見回覆只能是「判定」（最多 5 行）加「交付命令」。交付命令全文同時寫進 instructions。若 instructions 留空，平台會用交付命令或下一項 workPackage 補成派工，路線圖繼續。禁止只給結語、方向，或「請依下列／接續／先補證據」。通過就接下一項 workPackage 與命令。還差就寫「還差」加一條修正命令，phase 填 reviewing；禁止寫「不通過」或 phase=await_code，那會讓 Cursor 停下等人。";
 
   if (lean) {
     // 像一般聊天：只有專案錨點＋上一回合之後／本工作包期間上傳的報告，其餘全靠對話紀錄
@@ -833,7 +834,6 @@ async function finalizeTurn(input: {
   );
   const {
     reply,
-    instructions,
     reportRequests,
     openQuestions,
     nextStatus,
@@ -841,6 +841,7 @@ async function finalizeTurn(input: {
     summary,
     roomQueries,
   } = parsedPack;
+  const instructions = fillInstructionsFromDelivery(reply, parsedPack.instructions, parsedPack.parsed.workPackage);
 
   const nextQueryResults: RoomQueryResult[] = [];
   if (!input.skipMemoryAndDispatch) {

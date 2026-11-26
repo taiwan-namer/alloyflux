@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   applyLedgerTurn,
   emptyLedger,
+  fillInstructionsFromDelivery,
   ledgerProtocolBlock,
   readLedger,
   renderLedgerAnchor,
@@ -330,11 +331,38 @@ describe("strategy ledger", () => {
   });
 });
 
+describe("fillInstructionsFromDelivery", () => {
+  it("instructions 已有內容就不動", () => {
+    assert.deepEqual(fillInstructionsFromDelivery("交付命令：去做 07", ["已有命令"]), ["已有命令"]);
+  });
+
+  it("instructions 空白時用回覆裡的交付命令", () => {
+    const out = fillInstructionsFromDelivery("判定：06 通過\n交付命令：執行 wp-e-data-exec-07-recording", []);
+    assert.deepEqual(out, ["執行 wp-e-data-exec-07-recording"]);
+  });
+
+  it("沒有交付命令時用下一項工作包", () => {
+    const out = fillInstructionsFromDelivery("只有判定", [], {
+      id: "wp-07",
+      itemId: "07",
+      goal: "補錄音",
+      acceptance: ["有逐筆欄位"],
+    });
+    assert.equal((out[0] as { itemId: string }).itemId, "07");
+    assert.match(instructionTextOf(out[0]), /wp-07/);
+    assert.match(instructionTextOf(out[0]), /補錄音/);
+  });
+});
+
+function instructionTextOf(x: unknown): string {
+  return typeof x === "string" ? x : String((x as { text?: string }).text ?? "");
+}
+
 describe("ledgerProtocolBlock", () => {
   it("要求主持人把交付命令寫進 instructions，不能只給結語", () => {
     const text = ledgerProtocolBlock();
     assert.match(text, /交付命令必須原文寫進 instructions/);
-    assert.match(text, /instructions 留空等於沒派工/);
+    assert.match(text, /平台會用可見的交付命令，或本回合的下一項 workPackage，補成派工/);
     assert.match(text, /請依下列／接續這項／先補證據/);
     assert.match(text, /禁止把 phase 設成 await_code/);
     assert.match(text, /可見回覆禁止寫「不通過」/);

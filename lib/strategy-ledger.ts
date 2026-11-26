@@ -322,6 +322,35 @@ function instructionText(x: unknown): string {
   return String(x ?? "").trim();
 }
 
+/** instructions 空了，但回覆裡有交付命令或下一項工作包：補成派工，路線圖才能接著做。 */
+export function fillInstructionsFromDelivery(
+  reply: string,
+  instructions: unknown[],
+  workPackage?: unknown,
+): unknown[] {
+  if (instructions.some((x) => instructionText(x).length > 0)) return instructions;
+  const marked = reply.split(/交付命令\s*[：:]?/);
+  const command = (marked.length > 1 ? marked[marked.length - 1] : "").trim();
+  if (command.length >= 8) return [command.slice(0, 4000)];
+  if (!workPackage || typeof workPackage !== "object") return instructions;
+  const pkg = workPackage as Record<string, unknown>;
+  const id = str(pkg.id);
+  const itemId = str(pkg.itemId);
+  const goal = str(pkg.goal);
+  if (!id && !goal) return instructions;
+  const acceptance = Array.isArray(pkg.acceptance)
+    ? pkg.acceptance.map((x) => str(x)).filter(Boolean).slice(0, 8)
+    : [];
+  const text = [
+    `執行工作包 ${id || "下一項"}${itemId ? `（路線圖 ${itemId}）` : ""}`,
+    goal ? `目標：${goal}` : "",
+    acceptance.length ? `驗收：${acceptance.join("；")}` : "",
+  ]
+    .filter(Boolean)
+    .join("。");
+  return [itemId ? { itemId, text } : text];
+}
+
 function instructionItemId(x: unknown): string | null {
   if (x && typeof x === "object") {
     const id = str((x as Record<string, unknown>).itemId);
@@ -779,7 +808,7 @@ export function ledgerProtocolBlock(): string {
    {"op":"complete","id":"…","conclusion":"…"},
    {"op":"setStatus","id":"4A","status":"todo|in_progress|parked|blocked","note":"…"},
    {"op":"park","id":"…","reason":"…","resumeTrigger":"…"},{"op":"resume","id":"…"}]
-- 派工（要 Cursor 做事時必做）：可見回覆只准兩段，先「判定」最多 5 行，接著「交付命令」。交付命令必須原文寫進 instructions（至少一條）。Cursor 只執行 instructions；寫在回覆裡但 instructions 留空等於沒派工。禁止只給結語或方向，也禁止「請依下列／接續這項／先補證據」卻不寫出命令本身。
+- 派工（要 Cursor 做事時必做）：可見回覆只准兩段，先「判定」最多 5 行，接著「交付命令」。交付命令必須原文寫進 instructions（至少一條）。Cursor 只執行 instructions。若 instructions 留空，平台會用可見的交付命令，或本回合的下一項 workPackage，補成派工，路線圖繼續做到下一項；兩者都沒有才是沒派工。禁止只給結語或方向，也禁止「請依下列／接續這項／先補證據」卻不寫出命令本身。
 - 交付命令一次寫完，讓 Cursor 做完就能交最終報告：交付物、範圍、這次明確不做的事、驗收。每條驗收都要能用報告裡的固定輸入、比對欄位、程序邊界、數字或狀態判定。禁止用「完整／正確／足夠／釐清／接續」當條件，那些詞會讓規格拖到下一輪才補。
 - 驗收通過（verdict "accept"）時必填 "conclusion"（放在判定段，3–5 行：做了什麼、驗收結果、數字、這次不代表什麼）。程式會結案並切到下一項；同一回合必須給下一項 workPackage 與對應交付命令。workPackage：{"id":"wp-…","itemId":"目前項目 id","goal":"…","scope":["允許改的檔案／模組"],"acceptance":["可用測試輸出判定的條件，不要形容詞"],"stopConditions":["遇到就停下回報的情況"]}。一個工作包要能一次做完再回報。
 - 還差一項：帳本用 verdict "reject"（附 verdictReason）＋一條修正命令，把要改的點和要重測的證據寫完。可見回覆禁止寫「不通過」「待改碼」「await_code」，改寫「還差：一句話」然後接交付命令；phase 必須填 reviewing。有 instructions 時禁止把 phase 設成 await_code，那個階段會讓 Cursor 停下來等使用者。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局；僵局時 narrow／alternate 也要新 workPackage 加非空 instructions。
