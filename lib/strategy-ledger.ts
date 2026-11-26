@@ -336,7 +336,7 @@ export function fillInstructionsFromDelivery(
   workPackage?: unknown,
 ): unknown[] {
   const existing = instructions.filter((x) => instructionText(x).length > 0);
-  const existingChars = existing.reduce((n, x) => n + instructionText(x).length, 0);
+  const existingChars = existing.reduce((n: number, x) => n + instructionText(x).length, 0);
   const command = extractDeliveryCommand(reply);
   // 已有夠完整的指令就保留；只有空／過短時才用可見交付命令補上
   if (existing.length > 0 && (existingChars >= 80 || command.length <= existingChars)) {
