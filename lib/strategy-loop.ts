@@ -1155,7 +1155,7 @@ export async function readSessionLedgerRaw(
       )
       .get(sessionId, userId)) as { ledger?: unknown } | undefined;
     if (!row) return { found: false, ledger: null };
-    let ledger = row.ledger ?? null;
+    let ledger: unknown = row.ledger ?? null;
     if (typeof ledger === "string") {
       try {
         ledger = JSON.parse(ledger) as unknown;
