@@ -1140,6 +1140,29 @@ export async function getStrategySession(
   return row ? mapSession(row) : null;
 }
 
+/** 只取出 meta 裡的路線圖，不把整包 meta 跟訊息綁在同一次讀取 */
+export async function readSessionLedgerRaw(userId: string, sessionId: string): Promise<unknown> {
+  await ensureTables();
+  try {
+    const row = (await db()
+      .prepare(
+        `SELECT (meta_json::jsonb -> 'ledger') AS ledger
+         FROM strategy_sessions
+         WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
+      )
+      .get(sessionId, userId)) as { ledger?: unknown } | undefined;
+    const ledger = row?.ledger ?? null;
+    if (typeof ledger !== "string") return ledger;
+    try {
+      return JSON.parse(ledger) as unknown;
+    } catch {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+}
+
 /** 側欄刪除會議室（軟刪；列表不再顯示） */
 export async function softDeleteStrategySession(userId: string, sessionId: string): Promise<boolean> {
   await ensureTables();
@@ -1919,7 +1942,7 @@ export async function getSessionSyncMeta(
   messageCount: number;
 } | null> {
   await ensureTables();
-  const sess = await getStrategySession(userId, sessionId);
+  const sess = await getStrategySession(userId, sessionId, { omitMeta: true });
   if (!sess) return null;
 
   let workspaceUpdatedAt = 0;

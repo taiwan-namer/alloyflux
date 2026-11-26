@@ -7,6 +7,7 @@ import {
   listSessionDispatch,
   listSessionMessagesPage,
   listSessionReports,
+  readSessionLedgerRaw,
   PAUSE_ACTIONS,
   readDossier,
   softDeleteStrategySession,
@@ -45,7 +46,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       : Number(rawLimit);
 
   // #8：訊息／runs／reports／dispatch 平行查；lite 跳過 COUNT 與報告內文、runs 大 JSON
-  const [page, runs, reportRows, dispatch] = await Promise.all([
+  // 開房走 part=thread 時不讀整包 meta，但路線圖要一起回來，否則資訊抽屜要等下一輪有變動的 sync
+  const [page, runs, reportRows, dispatch, threadLedgerRaw] = await Promise.all([
     withMessages
       ? listSessionMessagesPage(auth.user.id, id, {
           limit,
@@ -61,6 +63,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     threadOnly ? Promise.resolve([]) : listRunsForSessionBrief(auth.user.id, id, lite ? 5 : 10),
     threadOnly ? Promise.resolve([]) : listSessionReports(auth.user.id, id, lite ? 20 : 30, { includeContent: false }),
     threadOnly ? Promise.resolve([]) : listSessionDispatch(auth.user.id, id, lite ? 30 : 50),
+    threadOnly ? readSessionLedgerRaw(auth.user.id, id) : Promise.resolve(null),
   ]);
 
   const reports = reportRows.map((r) => ({
@@ -82,7 +85,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         };
       })
     : page.messages;
-  const ledger = threadOnly ? null : readLedger(session.meta);
+  const ledger = threadOnly
+    ? readLedger(threadLedgerRaw && typeof threadLedgerRaw === "object" ? { ledger: threadLedgerRaw } : null)
+    : readLedger(session.meta);
   const { meta: _meta, pendingInstructions: _pending, ...threadSession } = session;
   return Response.json({
     session: threadOnly ? threadSession : session,

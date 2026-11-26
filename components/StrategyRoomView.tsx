@@ -520,6 +520,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   }, [draft]);
 
   const syncPullRef = useRef<(force?: boolean) => Promise<void>>(async () => {});
+  const syncInFlightRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -529,10 +530,15 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       if (cancelled) return;
       // 串流中預設跳過；force=true 用於結束／abort／commit 後的 reconciliation
       if (!force && (document.visibilityState === "hidden" || streamingRef.current)) return;
+      // 上一輪還沒回來就不要中止。每 3 秒中止會讓較慢的同步永遠完不成，資訊抽屜的路線圖就出不來。
+      if (syncInFlightRef.current) {
+        if (!force) return;
+        syncAbortRef.current?.abort();
+      }
 
-      syncAbortRef.current?.abort();
       const ac = new AbortController();
       syncAbortRef.current = ac;
+      syncInFlightRef.current = true;
       const since = lastUpdatedAtRef.current || 0;
       const count = lastMessageCountRef.current || 0;
       const after = newestCursorRef.current;
@@ -565,6 +571,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         onSyncPatchRef.current(data);
       } catch (e) {
         if ((e as Error)?.name === "AbortError") return;
+      } finally {
+        if (syncAbortRef.current === ac) syncInFlightRef.current = false;
       }
     }
 
