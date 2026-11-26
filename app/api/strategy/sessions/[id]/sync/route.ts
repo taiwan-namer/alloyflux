@@ -8,10 +8,8 @@ import {
   listSessionMessagesAfter,
   listSessionMessagesPage,
   listSessionReports,
-  readDossier,
   STRATEGY_LIMITS,
 } from "@/lib/strategy-loop";
-import { readLedger, renderLedgerForHuman } from "@/lib/strategy-ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -55,7 +53,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     });
   }
 
-  const session = await getStrategySession(auth.user.id, id);
+  // 對話同步不讀 meta。路線圖另載，避免資訊查詢拖住新訊息
+  const session = await getStrategySession(auth.user.id, id, { omitMeta: true });
   if (!session) return Response.json({ error: "Not found" }, { status: 404 });
 
   // 畫面只要最近幾則。客戶端 count 若已是總數、且這輪只多了幾則，多帶一則重疊以免中間被跳過；開房時 count 仍是視窗長度，不要因此把歷史撈回來。
@@ -95,8 +94,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     chars: r.chars,
     createdAt: r.createdAt,
   }));
-  const ledger = readLedger(session.meta);
-  const ledgerActive = Boolean(ledger.items.length || ledger.brief || ledger.currentPackage);
+  const { meta: _meta, pendingInstructions: _pending, ...lightSession } = session;
 
   return Response.json({
     changed: true,
@@ -108,10 +106,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     nextCursor: page.nextCursor,
     messageTotal: page.total,
     workspaceMemoryNotes: meta.workspaceMemoryNotes,
-    session,
-    dossier: readDossier(session.meta),
-    ledger: ledgerActive ? ledger : null,
-    ledgerText: ledgerActive ? renderLedgerForHuman(ledger) : "",
+    session: lightSession,
     messages,
     gap,
     runs,

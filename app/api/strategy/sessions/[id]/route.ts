@@ -31,7 +31,19 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   if (!auth) return Response.json({ error: "Unauthorized" }, { status: 401 });
   const { id } = await ctx.params;
   const url = new URL(req.url);
-  const threadOnly = url.searchParams.get("part") === "thread";
+  const part = url.searchParams.get("part");
+  const threadOnly = part === "thread";
+  if (part === "ledger") {
+    const raw = await readSessionLedgerRaw(auth.user.id, id);
+    if (!raw.found) return Response.json({ error: "Not found" }, { status: 404 });
+    const ledger = readLedger(
+      raw.ledger && typeof raw.ledger === "object" ? { ledger: raw.ledger } : null,
+    );
+    return Response.json({
+      ledger,
+      ledgerText: renderLedgerForHuman(ledger),
+    });
+  }
   const session = await getStrategySession(auth.user.id, id, threadOnly ? { omitMeta: true } : undefined);
   if (!session) return Response.json({ error: "Not found" }, { status: 404 });
   const withMessages = url.searchParams.get("messages") !== "0";
@@ -46,8 +58,8 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
       : Number(rawLimit);
 
   // #8：訊息／runs／reports／dispatch 平行查；lite 跳過 COUNT 與報告內文、runs 大 JSON
-  // 開房走 part=thread 時不讀整包 meta，但路線圖要一起回來，否則資訊抽屜要等下一輪有變動的 sync
-  const [page, runs, reportRows, dispatch, threadLedgerRaw] = await Promise.all([
+  // 路線圖另走 part=ledger，不要跟訊息綁在同一次回應
+  const [page, runs, reportRows, dispatch] = await Promise.all([
     withMessages
       ? listSessionMessagesPage(auth.user.id, id, {
           limit,
@@ -63,7 +75,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     threadOnly ? Promise.resolve([]) : listRunsForSessionBrief(auth.user.id, id, lite ? 5 : 10),
     threadOnly ? Promise.resolve([]) : listSessionReports(auth.user.id, id, lite ? 20 : 30, { includeContent: false }),
     threadOnly ? Promise.resolve([]) : listSessionDispatch(auth.user.id, id, lite ? 30 : 50),
-    threadOnly ? readSessionLedgerRaw(auth.user.id, id) : Promise.resolve(null),
   ]);
 
   const reports = reportRows.map((r) => ({
@@ -85,17 +96,16 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         };
       })
     : page.messages;
-  const ledger = threadOnly
-    ? readLedger(threadLedgerRaw && typeof threadLedgerRaw === "object" ? { ledger: threadLedgerRaw } : null)
-    : readLedger(session.meta);
+  const ledger = threadOnly ? null : readLedger(session.meta);
   const { meta: _meta, pendingInstructions: _pending, ...threadSession } = session;
   return Response.json({
     session: threadOnly ? threadSession : session,
     dossier: threadOnly
       ? { strategies: {}, findings: [], decisions: [], fPlan: null }
       : readDossier(session.meta),
-    ledger,
-    ledgerText: ledger ? renderLedgerForHuman(ledger) : "",
+    ...(threadOnly
+      ? {}
+      : { ledger, ledgerText: ledger ? renderLedgerForHuman(ledger) : "" }),
     mode: readRoomMode(session.meta),
     messages,
     hasMore: page.hasMore,

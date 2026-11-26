@@ -1527,6 +1527,7 @@ export default function ChatPage() {
   const [chatOpening, setChatOpening] = useState(false);
   const openStrategyAbortRef = useRef<AbortController | null>(null);
   const openStrategyReqRef = useRef(0);
+  const ledgerFetchRef = useRef<{ id: string; at: number } | null>(null);
   const strategyCacheRef = useRef<Map<string, StrategyCacheEntry>>(new Map());
   const strategyInflightRef = useRef<Map<string, InflightJob<StrategySessionDetail | null>>>(new Map());
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -2585,7 +2586,7 @@ export default function ChatPage() {
         runs: keepList(detail.runs, prev?.runs),
         reports: keepList(detail.reports, prev?.reports),
         dossier: dossierEmpty && same && prev ? prev.dossier : detail.dossier,
-        ledger: detail.ledger !== undefined ? detail.ledger : same ? prev?.ledger : null,
+        ledger: detail.ledger != null ? detail.ledger : same ? prev?.ledger ?? null : null,
         ledgerText:
           detail.ledgerText !== undefined
             ? detail.ledgerText
@@ -2599,6 +2600,34 @@ export default function ChatPage() {
     if (opts.refreshMemory && (opts.switching || !wsMemoryDirty)) {
       setWsMemoryDraft(ws?.memory.notes ?? "");
     }
+  }
+
+  function refreshStrategyLedger(id: string) {
+    const now = Date.now();
+    const inflight = ledgerFetchRef.current;
+    if (inflight && inflight.id === id && now - inflight.at < 2500) return;
+    ledgerFetchRef.current = { id, at: now };
+    void fetch(`/api/strategy/sessions/${encodeURIComponent(id)}?part=ledger&messages=0`, {
+      cache: "no-store",
+    })
+      .then(async (res) => {
+        if (!res.ok) return null;
+        return (await res.json()) as { ledger?: StrategySessionDetail["ledger"]; ledgerText?: string };
+      })
+      .then((data) => {
+        if (!data) return;
+        setStrategyDetail((cur) => {
+          if (!cur || cur.session.id !== id) return cur;
+          const next = {
+            ...cur,
+            ledger: data.ledger ?? null,
+            ledgerText: data.ledgerText ?? "",
+          };
+          putStrategyCache(id, next);
+          return next;
+        });
+      })
+      .catch(() => {});
   }
 
   async function openStrategySession(id: string, opts?: { force?: boolean }) {
@@ -2622,6 +2651,7 @@ export default function ChatPage() {
     if (hit) {
       // 看過的會議室先畫最近幾則，不等網路；同房重開時保留已載入的更早訊息
       applyStrategyDetail(hit.detail, { switching, refreshMemory: true, keepOlder: !switching });
+      refreshStrategyLedger(id);
       setStrategyBusy(false);
       if (Date.now() - hit.at < 20_000) return;
       void ensureStrategyFetch(id).then((fresh) => {
@@ -2650,6 +2680,8 @@ export default function ChatPage() {
               dispatch: [],
               runs: [],
               reports: [],
+              ledger: null,
+              ledgerText: "",
             }
           : prev,
       );
@@ -2664,6 +2696,7 @@ export default function ChatPage() {
         return;
       }
       applyStrategyDetail(detail, { switching, refreshMemory: true });
+      refreshStrategyLedger(id);
     } catch (e) {
       if (ac.signal.aborted || reqId !== openStrategyReqRef.current) return;
       setStrategyDetail(null);
@@ -2839,6 +2872,7 @@ export default function ChatPage() {
           });
         }
       });
+      refreshStrategyLedger(sid);
       return;
     }
     const nextDispatch = Array.isArray(data.dispatch) ? data.dispatch : strategyDetail.dispatch;
@@ -2898,6 +2932,7 @@ export default function ChatPage() {
     if (!wsMemoryDirty && typeof data.workspaceMemoryNotes === "string") {
       setWsMemoryDraft(data.workspaceMemoryNotes);
     }
+    refreshStrategyLedger(data.session.id);
   }
 
   function handleOlderMessages(payload: {
@@ -3624,7 +3659,7 @@ export default function ChatPage() {
   const apiBase =
     typeof window !== "undefined" ? `${window.location.origin}/api/v1` : "https://你的網域/api/v1";
 
-  return (
+    return (
     <div className={`app view-${viewMode}${sidebarOpen ? " sidebar-open" : ""}`} data-brand={brand}>
       {sidebarOpen && (
         <button type="button" className="sidebar-backdrop" aria-label="關閉選單" onClick={() => setSidebarOpen(false)} />
@@ -3683,16 +3718,16 @@ export default function ChatPage() {
                   }}
                 />
               ) : (
-                <span className="title">{c.title}</span>
+              <span className="title">{c.title}</span>
               )}
               <div className="conv-menu-wrap">
-                <button
+              <button
                   type="button"
                   className="conv-more"
                   aria-label="對話選項"
                   aria-expanded={convMenuId === c.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
+                onClick={(e) => {
+                  e.stopPropagation();
                     setConvMenuId((prev) => (prev === c.id ? null : c.id));
                   }}
                 >
@@ -3712,9 +3747,9 @@ export default function ChatPage() {
                       role="menuitem"
                       className="danger"
                       onClick={() => void trashConversation(c.id)}
-                    >
-                      刪除
-                    </button>
+              >
+                刪除
+              </button>
                   </div>
                 )}
               </div>
@@ -4017,8 +4052,8 @@ export default function ChatPage() {
                     🧠 記憶與語氣
                   </button>
                   <span className="row" style={{ gap: 10 }}>
-                    <Link href="/vendor">算力節點夥伴 →</Link>
-                    {authUser.isAdmin && <Link href="/admin">管理後台 →</Link>}
+                  <Link href="/vendor">算力節點夥伴 →</Link>
+                  {authUser.isAdmin && <Link href="/admin">管理後台 →</Link>}
                   </span>
                 </div>
               </>
@@ -4246,7 +4281,7 @@ export default function ChatPage() {
                         : ""}
                       {m.groundingSources && m.groundingSources.length > 0
                         ? m.completionStatus === "failed"
-                          ? " · 查證未完成"
+                            ? " · 查證未完成"
                           : m.completionStatus === "truncated" ||
                               m.completionStatus === "unknown"
                             ? " · 部分查證"
@@ -4459,9 +4494,9 @@ export default function ChatPage() {
                     typeof window !== "undefined" &&
                     window.matchMedia("(hover: none), (pointer: coarse)").matches;
                   if (touchComposer) return;
-                  e.preventDefault();
+                    e.preventDefault();
                   if (busy) return;
-                  void send();
+                    void send();
                 }}
               />
               <div className="composer-bar">

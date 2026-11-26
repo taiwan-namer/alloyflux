@@ -1140,8 +1140,11 @@ export async function getStrategySession(
   return row ? mapSession(row) : null;
 }
 
-/** 只取出 meta 裡的路線圖，不把整包 meta 跟訊息綁在同一次讀取 */
-export async function readSessionLedgerRaw(userId: string, sessionId: string): Promise<unknown> {
+/** 只取出 meta 裡的路線圖。跟訊息查詢分開，避免資訊讀取拖住對話更新 */
+export async function readSessionLedgerRaw(
+  userId: string,
+  sessionId: string,
+): Promise<{ found: boolean; ledger: unknown }> {
   await ensureTables();
   try {
     const row = (await db()
@@ -1151,15 +1154,18 @@ export async function readSessionLedgerRaw(userId: string, sessionId: string): P
          WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
       )
       .get(sessionId, userId)) as { ledger?: unknown } | undefined;
-    const ledger = row?.ledger ?? null;
-    if (typeof ledger !== "string") return ledger;
-    try {
-      return JSON.parse(ledger) as unknown;
-    } catch {
-      return null;
+    if (!row) return { found: false, ledger: null };
+    let ledger = row.ledger ?? null;
+    if (typeof ledger === "string") {
+      try {
+        ledger = JSON.parse(ledger) as unknown;
+      } catch {
+        ledger = null;
+      }
     }
+    return { found: true, ledger };
   } catch {
-    return null;
+    return { found: false, ledger: null };
   }
 }
 

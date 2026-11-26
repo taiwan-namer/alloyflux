@@ -1653,7 +1653,17 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 }
 
 function LedgerRoadmapPanel({ ledger }: { ledger: StrategyLedger | null }) {
-  if (!ledger?.items?.length && !ledger?.brief && !ledger?.currentPackage) {
+  if (!ledger) {
+    return (
+      <div className="modal-section">
+        <h3>路線圖進度</h3>
+        <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+          載入中…
+        </p>
+      </div>
+    );
+  }
+  if (!ledger.items?.length && !ledger.brief && !ledger.currentPackage) {
     return (
       <div className="modal-section">
         <h3>路線圖進度</h3>
