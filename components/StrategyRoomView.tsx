@@ -99,13 +99,6 @@ export type StrategyRoomViewProps = {
   wsMemorySaving?: boolean;
 };
 
-/** 外部（/sync）新訊息：延遲 ~300ms 後逐步顯示（0.6–1.8s，依長度），點擊可立即顯示全文 */
-const REVEAL_DELAY_MS = 300;
-
-function revealDurationMs(len: number): number {
-  return Math.min(1800, Math.max(600, 600 + len * 2));
-}
-
 function messageRoleLabel(m: StrategySessionMessage) {
   if (m.role === "assistant") {
     return (
@@ -125,53 +118,12 @@ function messageRoleLabel(m: StrategySessionMessage) {
 
 type MessageItemProps = {
   m: StrategySessionMessage;
-  reveal: boolean;
-  onProgress: () => void;
 };
 
 const MessageItem = memo(
-  function MessageItem({ m, reveal, onProgress }: MessageItemProps) {
-    const total = m.content.length;
-    const [started, setStarted] = useState(false);
-    const [shown, setShown] = useState(0);
-    const [revealDone, setRevealDone] = useState(false);
-    const active = reveal && !revealDone;
-
-    useEffect(() => {
-      if (!active) return;
-      let raf = 0;
-      const timer = window.setTimeout(() => {
-        setStarted(true);
-        const dur = revealDurationMs(total);
-        const t0 = performance.now();
-        const tick = (now: number) => {
-          const p = Math.min(1, (now - t0) / dur);
-          setShown(Math.ceil(total * p));
-          if (p < 1) raf = requestAnimationFrame(tick);
-          else setRevealDone(true);
-        };
-        raf = requestAnimationFrame(tick);
-      }, REVEAL_DELAY_MS);
-      return () => {
-        window.clearTimeout(timer);
-        cancelAnimationFrame(raf);
-      };
-    }, [active, total]);
-
-    // 逐步顯示時，於 DOM 更新後貼底（僅在 reveal 期間）
-    useLayoutEffect(() => {
-      if (active && started) onProgress();
-    }, [active, started, shown, onProgress]);
-
-    const waiting = active && !started;
-    const text = active ? m.content.slice(0, shown) : m.content;
-
+  function MessageItem({ m }: MessageItemProps) {
     return (
-      <div
-        className={`strategy-msg strategy-msg-${m.role}${active ? " strategy-msg-reveal" : ""}${waiting ? " is-waiting" : ""}`}
-        onClick={active ? () => setRevealDone(true) : undefined}
-        title={active ? "點擊顯示全文" : undefined}
-      >
+      <div className={`strategy-msg strategy-msg-${m.role}`}>
         <div className="strategy-msg-role">{messageRoleLabel(m)}</div>
         {m.role === "assistant" &&
         (m.completionStatus === "partial" || m.completionStatus === "aborted") ? (
@@ -181,17 +133,15 @@ const MessageItem = memo(
         ) : null}
         {m.role === "assistant" ? (
           <div className="strategy-msg-body strategy-md-body">
-            <SafeLightMarkdown content={text} streaming={active} />
+            <SafeLightMarkdown content={m.content} />
           </div>
         ) : (
-          <pre className="strategy-msg-body">{text}</pre>
+          <pre className="strategy-msg-body">{m.content}</pre>
         )}
       </div>
     );
   },
   (a, b) =>
-    a.reveal === b.reveal &&
-    a.onProgress === b.onProgress &&
     a.m.id === b.m.id &&
     a.m.content === b.m.content &&
     a.m.role === b.m.role &&
@@ -205,14 +155,12 @@ const MessageItem = memo(
 /** 歷史訊息：串流更新（streamBubbles／pendingUser）不會重繪此區 */
 const HistoryMessages = memo(function HistoryMessages(props: {
   messages: StrategySessionMessage[];
-  revealIds: ReadonlySet<string>;
-  onProgress: () => void;
 }) {
-  const { messages, revealIds, onProgress } = props;
+  const { messages } = props;
   return (
     <>
       {messages.map((m) => (
-        <MessageItem key={m.id} m={m} reveal={revealIds.has(m.id)} onProgress={onProgress} />
+        <MessageItem key={m.id} m={m} />
       ))}
     </>
   );
@@ -281,7 +229,6 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const [metaSaving, setMetaSaving] = useState(false);
   const templateGateRef = useRef<SopTemplateGate | null>(null);
   const [toast, setToast] = useState<{ key: number; text: string } | null>(null);
-  const [revealIds, setRevealIds] = useState<ReadonlySet<string>>(() => new Set());
   const [loadingOlder, setLoadingOlder] = useState(false);
   const reconcileRunRef = useRef<number | null>(null);
 
@@ -495,7 +442,6 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       seen.clear();
       handoffPendingRef.current = false;
       for (const m of detail.messages) seen.add(m.id);
-      setRevealIds((cur) => (cur.size ? new Set() : cur));
       return;
     }
     const fresh = detail.messages.filter((m) => !seen.has(m.id));
@@ -524,14 +470,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         // 僅 user 先落庫：對得上才清 pending，避免重複氣泡
         setPendingUser((p) => (p && freshUserTexts.has(p.trim()) ? null : p));
       }
-      // 自己這一輪不走 reveal：否則會先截斷再突然完整，還可能跟串流氣泡疊在一起
       return;
     }
-    setRevealIds((cur) => {
-      const next = new Set(cur);
-      for (const m of fresh) next.add(m.id);
-      return next;
-    });
   }, [sessionId, detail.messages, clearDripAndBubbles, parkedBubbles.length]);
 
   const modelsKey = JSON.stringify(detail.session.models ?? null);
@@ -648,12 +588,11 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     if (!el) return;
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     const overflows = el.scrollHeight > el.clientHeight + 8;
-    // 使用者明顯上捲時立刻關閉貼底，避免 sync／reveal 把捲動拉回底部
-    // 內容不夠長無法上滑時：不當成貼底鎖定，改靠頂部按鈕載入更早訊息
-    stickToBottomRef.current = overflows ? dist < 80 : false;
+    // 內容還不夠長時仍算貼底，回覆變長才會跟著往下。只有真的往上捲才停止跟隨。
+    stickToBottomRef.current = !overflows || dist < 80;
     if (el.scrollTop > 120) olderArmedRef.current = true;
-    // 貼底時 scrollTop 可能暫時是 0，不要因此把更早的訊息一次補進來
-    if (el.scrollTop < 72 && olderArmedRef.current && !stickToBottomRef.current) {
+    // 短內容 scrollTop 會是 0，不能因此把更早訊息一次補進來
+    if (overflows && el.scrollTop < 72 && olderArmedRef.current && !stickToBottomRef.current) {
       olderArmedRef.current = false;
       void loadOlderMessages();
     }
@@ -684,10 +623,13 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       .finally(() => {
         if (refreshWallet && sid === sessionIdRef.current) void onRefreshWallet();
         // sync 若未帶進新訊息：旗標與氣泡一起留著，等歷史到再清；不要只清旗標，否則會變成兩個對話窗
-        window.setTimeout(() => {
-          if (sid !== sessionIdRef.current || !handoffPendingRef.current) return;
-          void syncPullRef.current(true);
-        }, 8000);
+        // 第一次 sync 若 races 在落庫前，短間隔再拉，避免要重新整理才看得到
+        for (const wait of [1000, 3000]) {
+          window.setTimeout(() => {
+            if (sid !== sessionIdRef.current || !handoffPendingRef.current) return;
+            void syncPullRef.current(true);
+          }, wait);
+        }
       });
   }
 
@@ -873,12 +815,9 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       if (!isCurrent()) return;
 
       if (completion?.aborted || completion?.completionStatus === "failed") {
-        // 非使用者／切房造成：伺服器端失敗；先清暫存再背景 reconciliation
-        clearDripAndBubbles();
+        // 先留著已吐出的字，等 sync 把庫裡的回覆接上再收掉氣泡
         setPendingUser(null);
-        setStreamBubbles([]);
         onError("生成失敗或已中斷");
-        onDraftChange(content);
         setGenerating(false);
         beginBackgroundReconcile(runId, sid);
         return;
@@ -892,19 +831,14 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
         return;
       }
 
-      // 無 done：當失敗處理
-      clearDripAndBubbles();
+      // 連線斷了也留著已吐出的字，背景 sync 接到庫裡的回覆再收氣泡
       setPendingUser(null);
-      setStreamBubbles([]);
       onError("連線中斷，回覆未完成");
-      onDraftChange(content);
       setGenerating(false);
       beginBackgroundReconcile(runId, sid);
     } catch (e) {
       if (!isCurrent()) return;
-      clearDripAndBubbles();
       setPendingUser(null);
-      setStreamBubbles([]);
       if ((e as Error)?.name === "AbortError") {
         // 使用者停止：stopGeneration 已 reconcileOnce，這裡略過
         if (abortReasonRef.current === "user") return;
@@ -1476,7 +1410,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                 {busy ? "載入中…" : "尚無訊息"}
               </div>
             ) : (
-              <HistoryMessages messages={detail.messages} revealIds={revealIds} onProgress={scrollIfSticky} />
+              <HistoryMessages messages={detail.messages} />
             )}
 
             {parkedBubbles.map((b) => (
