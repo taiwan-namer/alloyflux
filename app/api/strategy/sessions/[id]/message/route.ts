@@ -706,6 +706,7 @@ async function handleJsonMode(opts: {
     stopUpstream(action);
   }, 1000);
   let clientAbort = false;
+  let jsonReadyEarly = false;
   try {
     for await (const ev of routeChat(
       model,
@@ -735,14 +736,16 @@ async function handleJsonMode(opts: {
         const crossed = tail.getMode() === "after_delim" && !flushedDelim;
         if (crossed) flushedDelim = true;
         if (tail.getMode() === "after_delim") inputReleased = true;
+        // 結構化 JSON 一閉合就收尾派工。不要等模型把尾巴吐完，Cursor 才拿得到指令。
         const jsonReady = inputReleased && Boolean(extractJsonObject(tail.getJsonRaw()));
         if (jsonReady) {
           if (shown) queueCheckpoint(shown, true, "ok");
+          jsonReadyEarly = true;
+          upstreamAbort.abort();
           break;
         }
         if (crossed) {
           if (shown) queueCheckpoint(shown, true, "ok");
-          await drainCheckpoints();
         } else if (shown) {
           queueCheckpoint(shown, false);
         }
@@ -758,8 +761,8 @@ async function handleJsonMode(opts: {
       }
     }
   } catch (e) {
-    if (cutoff && !req.signal.aborted) {
-      // 自己切斷的上游：用已經寫出的正文收尾，不要當成使用者中止
+    if (jsonReadyEarly || (cutoff && !req.signal.aborted)) {
+      // JSON 已齊／自己切斷：用已寫出的正文收尾，不要當成使用者中止
     } else if (isAbortError(e) || req.signal.aborted) {
       clientAbort = true;
     } else {
@@ -1446,8 +1449,9 @@ async function handleStreamMode(opts: {
         else req.signal.addEventListener("abort", relayClientAbort, { once: true });
         let lastEventAt = Date.now();
         let cutoff: "idle" | "deadline" | null = null;
+        let jsonReadyEarly = false;
         const stopUpstream = (reason: "idle" | "deadline") => {
-          if (cutoff || req.signal.aborted) return;
+          if (cutoff || req.signal.aborted || jsonReadyEarly) return;
           cutoff = reason;
           if (reason === "deadline") softTimeout = true;
           upstream.abort();
@@ -1505,6 +1509,9 @@ async function handleStreamMode(opts: {
                     label: leadMember.label,
                   });
                   send({ type: "input_ready" });
+                  // JSON 已齊就停上游，不要再等尾巴；派工可以立刻收尾
+                  jsonReadyEarly = true;
+                  upstream.abort();
                   break;
                 }
                 await releaseInput();
@@ -1522,7 +1529,7 @@ async function handleStreamMode(opts: {
           }
         } catch (e) {
           leadVisiblePartial = tail.getVisibleText();
-          if (cutoff && !req.signal.aborted) {
+          if (jsonReadyEarly || (cutoff && !req.signal.aborted)) {
             if (cutoff === "deadline") softTimeout = true;
           } else if (isAbortError(e) || req.signal.aborted) {
             aborted = true;

@@ -10,20 +10,14 @@ export function joinCodePoints(points: string[]): string {
   return points.join("");
 }
 
-/** 依積壓碼點數決定本幀取出量。少量維持逐字，避免一小包一次倒完就停。 */
+/** 跟聊天一樣：本幀把已到的字一次接上，不逐字拖、不製造空等。 */
 export function adaptiveTakeCount(backlog: number): number {
-  if (backlog <= 0) return 0;
-  if (backlog <= 48) return 1;
-  if (backlog <= 160) return 2;
-  return Math.min(8, Math.max(3, Math.ceil(backlog / 24)));
+  return backlog > 0 ? backlog : 0;
 }
 
-/** 遠端回覆用：一次一個字，積壓很多才加快，看起來像聊天吐字 */
+/** @deprecated 遠端回覆已改為直接顯示；保留給舊測試。 */
 export function typewriterTakeCount(backlog: number): number {
-  if (backlog <= 0) return 0;
-  if (backlog <= 48) return 1;
-  if (backlog <= 160) return 2;
-  return Math.min(24, Math.max(4, Math.ceil(backlog / 10)));
+  return adaptiveTakeCount(backlog);
 }
 
 export function takeAdaptiveSlice(
