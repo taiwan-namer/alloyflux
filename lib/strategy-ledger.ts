@@ -723,7 +723,7 @@ export function renderLedgerForHost(ledger: StrategyLedger): string {
   const curItem = ledger.items.find((i) => i.id === ledger.currentItemId);
   if (curItem && !pkg) {
     parts.push(
-      `## ⚠ 目前項目 ${curItem.id} 沒有工作包（本回合必做）\n輸出 workPackage（itemId:"${curItem.id}"）並用 instructions 派給 Cursor 開工；不要只回覆使用者。`,
+      `## ⚠ 目前項目 ${curItem.id} 沒有工作包（本回合必做）\n輸出 workPackage（itemId:"${curItem.id}"），並把可執行的交付命令寫進 instructions。只寫在回覆裡、instructions 留空，Cursor 不會開工。`,
     );
   } else if (isLedgerActive(ledger) && !curItem && pickNextItem(ledger)) {
     parts.push("## ⚠ 沒有目前項目\n用 setCurrent 選路線圖下一項並給 workPackage。");
@@ -746,9 +746,9 @@ export function renderLedgerForHost(ledger: StrategyLedger): string {
         `## ⚠ 僵局處置（本回合必做）
 此工作包已退回 ${pkg.rejectCount} 次。本回合不得再對同一工作包下修補指令（會被程式攔下）。
 必須輸出 escalationDecision：{"choice":"narrow|alternate|park","reason":"…","resumeTrigger":"park 時填恢復點"}。
-- narrow：縮小範圍，同時輸出新的 workPackage
-- alternate：換做法，同時輸出新的 workPackage
-- park：暫停此項，回到主線下一個項目
+- narrow：縮小範圍，同時輸出新的 workPackage，並把交付命令寫進 instructions（只寫在回覆裡不會派送）
+- alternate：換做法，同時輸出新的 workPackage，並把交付命令寫進 instructions
+- park：暫停此項，回到主線下一個項目；若下一項要開工，同樣要有 workPackage 與 instructions
 資訊不足時可先用 reportRequests 要 Cursor 交「卡關說明」（≤2000 字：卡在哪、試過什麼、可選方案）。`,
       );
     }
@@ -779,12 +779,12 @@ export function ledgerProtocolBlock(): string {
    {"op":"complete","id":"…","conclusion":"…"},
    {"op":"setStatus","id":"4A","status":"todo|in_progress|parked|blocked","note":"…"},
    {"op":"park","id":"…","reason":"…","resumeTrigger":"…"},{"op":"resume","id":"…"}]
-- 驗收通過（verdict "accept"）時必填 "conclusion"：3–5 行（做了什麼、驗收結果、數字、留給後續的事）。程式會自動把項目標為完成、記下結論、切到路線圖下一項；你要在同一回合給下一項的 workPackage 與 instructions，讓 Cursor 直接開工。
-- 本回合訊息來自 Cursor 交付報告時，必須做出判定：verdict accept／reject，或用 reportRequests 指名缺什麼；不要只回覆使用者而不給 Cursor 下一步。
-- 開工時輸出 workPackage：{"id":"wp-…","itemId":"目前項目 id","goal":"…","scope":["允許改的檔案／模組"],"acceptance":["可用測試輸出判定的驗收條件"],"stopConditions":["遇到就停下回報的情況"]}。
-  一個工作包應讓 Cursor 能自主做完再一次回報，不要切成一小步一回合。
+- 派工（要 Cursor 做事時必做）：可見回覆只准兩段，先「判定」最多 5 行，接著「交付命令」。交付命令必須原文寫進 instructions（至少一條）。Cursor 只執行 instructions；寫在回覆裡但 instructions 留空等於沒派工。禁止只給結語或方向，也禁止「請依下列／接續這項／先補證據」卻不寫出命令本身。
+- 交付命令一次寫完，讓 Cursor 做完就能交最終報告：交付物、範圍、這次明確不做的事、驗收。每條驗收都要能用報告裡的固定輸入、比對欄位、程序邊界、數字或狀態判定。禁止用「完整／正確／足夠／釐清／接續」當條件，那些詞會讓規格拖到下一輪才補。
+- 驗收通過（verdict "accept"）時必填 "conclusion"（放在判定段，3–5 行：做了什麼、驗收結果、數字、這次不代表什麼）。程式會結案並切到下一項；同一回合必須給下一項 workPackage 與對應交付命令。workPackage：{"id":"wp-…","itemId":"目前項目 id","goal":"…","scope":["允許改的檔案／模組"],"acceptance":["可用測試輸出判定的條件，不要形容詞"],"stopConditions":["遇到就停下回報的情況"]}。一個工作包要能一次做完再回報。
+- 不通過：verdict "reject"（附 verdictReason）＋一條修正命令，把要改的點和要重測的證據寫完，不要只解釋為什麼沒過。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局；僵局時 narrow／alternate 也要新 workPackage 加非空 instructions。
+- 本回合訊息來自 Cursor 時必須派工（accept 接下一項、reject 一條修正、或 reportRequests 指名缺的證據）。不要只回覆使用者。
 - instructions 可寫字串或 {"itemId":"…","text":"…"}；itemId 與目前項目不同會被保留不派送。部署／git push／正式資料庫寫入一律保留給發起人。
-- 不通過輸出 verdict "reject"（附 verdictReason）＋一條具體修正指令。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局處置。
 - 要看程式碼時，指名函式或行號範圍（每段 ≤150 行）；不要要求整份檔案。
 - 「做到哪裡」直接引用帳本；帳本沒寫的就說不知道，請 Cursor 用 git／報告查證。`;
 }

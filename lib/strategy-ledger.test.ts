@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   applyLedgerTurn,
   emptyLedger,
+  ledgerProtocolBlock,
   readLedger,
   renderLedgerAnchor,
   renderLedgerForHost,
@@ -326,6 +327,15 @@ describe("strategy ledger", () => {
     assert.match(text, /\[4B\] 品牌體感與失靈修復 — 🟡 進行中 ◀ 目前/);
     assert.match(text, /\s{2}- \[4B-DE\]/);
     assert.match(text, /你上一回合下的指令\n- 指令：補測試/);
+  });
+});
+
+describe("ledgerProtocolBlock", () => {
+  it("要求主持人把交付命令寫進 instructions，不能只給結語", () => {
+    const text = ledgerProtocolBlock();
+    assert.match(text, /交付命令必須原文寫進 instructions/);
+    assert.match(text, /instructions 留空等於沒派工/);
+    assert.match(text, /請依下列／接續這項／先補證據/);
   });
 });
 
