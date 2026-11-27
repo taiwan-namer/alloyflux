@@ -1653,6 +1653,10 @@ export async function addDispatchItems(input: {
       );
     ids.push(id);
   }
+  if (input.dispatched && ids.length) {
+    const { wakeDispatchWaiters } = await import("./strategy-dispatch-wait");
+    wakeDispatchWaiters(input.userId);
+  }
   return ids;
 }
 
@@ -1728,6 +1732,8 @@ export async function decideDispatchItems(
     } else {
       await touchSessionUpdatedAt(userId, sessionId);
     }
+    const { wakeDispatchWaiters } = await import("./strategy-dispatch-wait");
+    wakeDispatchWaiters(userId);
   } else {
     await touchSessionUpdatedAt(userId, sessionId);
   }
