@@ -10,6 +10,7 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import {
   DISPATCH_STATUS_LABEL,
@@ -1808,7 +1809,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
             <div className="modal-section">
               <h3>會議室摘要</h3>
               {detail.session.summary ? (
-                <p className="strategy-summary">{detail.session.summary}</p>
+                <RoomSummary text={detail.session.summary} />
               ) : (
                 <div className="muted" style={{ fontSize: 13 }}>
                   尚無摘要
@@ -1885,17 +1886,19 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
             )}
 
             {detail.reports.length > 0 ? (
-              <div className="modal-section">
-                <h3>報告索引</h3>
+              <DrawerFold title={`報告索引（${detail.reports.length}${detail.reports.length >= 30 ? "+" : ""}）`}>
                 <ul className="strategy-report-list">
-                  {detail.reports.slice(0, 12).map((r) => (
+                  {detail.reports.map((r) => (
                     <li key={r.id}>
                       <span className="title">{r.title}</span>
                       <span className="muted">{r.chars.toLocaleString("zh-TW")} 字</span>
                     </li>
                   ))}
                 </ul>
-              </div>
+                {detail.reports.length >= 30 ? (
+                  <p className="muted strategy-fold-note">這裡只列最近 30 份標題。更早的報告仍留在資料庫。</p>
+                ) : null}
+              </DrawerFold>
             ) : null}
           </aside>
         ) : null}
@@ -1904,25 +1907,89 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   );
 }
 
+type SummaryBlock = { lead: string; lines: string[] };
+
+/** 把主持人寫成一整段的摘要拆成句子；冒號與分號後面的補充另起一行。 */
+function formatRoomSummary(text: string): SummaryBlock[] {
+  const sentences = text
+    .replace(/\s+/g, " ")
+    .split(/。+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return sentences.map((sentence) => {
+    const semi = sentence.split(/；+/).map((s) => s.trim()).filter(Boolean);
+    let lead = semi[0] ?? sentence;
+    const lines = semi.slice(1);
+    const colon = lead.indexOf("：");
+    if (colon > 0 && colon <= 42) {
+      const after = lead.slice(colon + 1).trim();
+      lead = lead.slice(0, colon).trim();
+      if (after) lines.unshift(after);
+    } else if (!lines.length && lead.length > 28 && lead.includes("，")) {
+      const bits = lead.split("，").map((s) => s.trim()).filter(Boolean);
+      lead = bits[0] ?? lead;
+      lines.push(...bits.slice(1));
+    }
+    return { lead, lines };
+  });
+}
+
+function RoomSummary({ text }: { text: string }) {
+  const blocks = formatRoomSummary(text);
+  if (!blocks.length) return <p className="strategy-summary">{text}</p>;
+  return (
+    <ul className="strategy-summary-list">
+      {blocks.map((block, i) => (
+        <li key={`${i}-${block.lead.slice(0, 12)}`}>
+          <div className="strategy-summary-lead">{block.lead}</div>
+          {block.lines.map((line, j) => (
+            <div key={j} className="strategy-summary-detail">
+              {line}
+            </div>
+          ))}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function DrawerFold({ title, children }: { title: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="modal-section">
+      <button
+        type="button"
+        className="strategy-fold-btn"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="strategy-fold-mark" aria-hidden>
+          {open ? "▾" : "▸"}
+        </span>
+        <span>{title}</span>
+      </button>
+      {open ? <div className="strategy-fold-body">{children}</div> : null}
+    </div>
+  );
+}
+
 function LedgerRoadmapPanel({ ledger }: { ledger: StrategyLedger | null }) {
   if (!ledger) {
     return (
-      <div className="modal-section">
-        <h3>路線圖進度</h3>
+      <DrawerFold title="路線圖進度">
         <p className="muted" style={{ fontSize: 12, margin: 0 }}>
           載入中…
         </p>
-      </div>
+      </DrawerFold>
     );
   }
   if (!ledger.items?.length && !ledger.brief && !ledger.currentPackage) {
     return (
-      <div className="modal-section">
-        <h3>路線圖進度</h3>
+      <DrawerFold title="路線圖進度">
         <p className="muted" style={{ fontSize: 12, margin: 0 }}>
           尚無路線圖。討論定案後由主持人排項目；完成時由主持人打勾，此處僅供查看。
         </p>
-      </div>
+      </DrawerFold>
     );
   }
   const items = ledger.items ?? [];
@@ -1948,11 +2015,7 @@ function LedgerRoadmapPanel({ ledger }: { ledger: StrategyLedger | null }) {
   for (const r of roots) walk(r, 0);
 
   return (
-    <div className="modal-section">
-      <h3>
-        路線圖進度
-        {items.length ? `（${done}/${items.length}）` : ""}
-      </h3>
+    <DrawerFold title={items.length ? `路線圖進度（${done}/${items.length}）` : "路線圖進度"}>
       <p className="muted strategy-ledger-hint">進度由主持人更新，此處不可點選。</p>
       {ledger.brief?.topic ? (
         <p className="strategy-ledger-topic">主題：{ledger.brief.topic}</p>
@@ -2000,7 +2063,7 @@ function LedgerRoadmapPanel({ ledger }: { ledger: StrategyLedger | null }) {
           })}
         </ul>
       ) : null}
-    </div>
+    </DrawerFold>
   );
 }
 
@@ -2017,8 +2080,7 @@ function DispatchDrawer(props: {
   const { pending, recent, selected, paused, onToggle, onSelectAll, onDecide, onMarkDone } = props;
   if (!pending.length && !recent.length) return null;
   return (
-    <div className="modal-section">
-      <h3>待派送給 Cursor{pending.length ? `（${pending.length}）` : ""}</h3>
+    <DrawerFold title={`待派送給 Cursor${pending.length ? `（${pending.length}）` : ""}`}>
       {paused ? (
         <p className="muted" style={{ fontSize: 12 }}>
           會議室暫停中，無法新派送；仍可駁回或標記完成。
@@ -2068,6 +2130,6 @@ function DispatchDrawer(props: {
           ))}
         </ul>
       ) : null}
-    </div>
+    </DrawerFold>
   );
 }

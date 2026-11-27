@@ -1317,6 +1317,61 @@ a {
   line-height: 1.6;
 }
 
+.strategy-summary-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.strategy-summary-lead {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.strategy-summary-detail {
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.strategy-fold-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.strategy-fold-mark {
+  width: 1em;
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.strategy-fold-body {
+  margin-top: 8px;
+}
+
+.strategy-fold-note {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
 .strategy-dispatch-list {
   list-style: none;
   margin: 0;
