@@ -483,10 +483,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   }
 
   // 排隊，不拒絕。上一則還在寫就等到它收完再處理；沒心跳的鎖約一分鐘後失效。
+  // 網頁串流要先把連線打開再等：Cursor 查資料時這段可能很久，空等會被中間層切斷，畫面就變成「連線中斷」。
   const lockToken = `lock_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
-  const queued = await waitForRoomTurn(auth.user.id, sessionId, lockToken, req.signal);
-  if (!queued) {
-    return Response.json({ error: "aborted", aborted: true }, { status: 499 });
+  const wantStreamEarly = body.stream === true;
+  if (!wantStreamEarly) {
+    const queued = await waitForRoomTurn(auth.user.id, sessionId, lockToken, req.signal);
+    if (!queued) {
+      return Response.json({ error: "aborted", aborted: true }, { status: 499 });
+    }
   }
   const heartbeat = setInterval(() => {
     void refreshTurnLock(auth.user.id, sessionId, lockToken).catch(() => {});
@@ -538,6 +542,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
       members,
       lean,
       turnType,
+      beforeTurn: () => waitForRoomTurn(auth.user.id, sessionId, lockToken, req.signal),
       onSettled: async () => {
         await release();
         streamSettled();
@@ -1108,6 +1113,8 @@ async function handleStreamMode(opts: {
   members: SessionMember[];
   lean: boolean;
   turnType: LeanTurnType | null;
+  /** 串流已經送出心跳之後才排隊，避免查資料時連線空等被切斷 */
+  beforeTurn?: () => Promise<boolean>;
   /** 串流主體結束（含中斷、錯誤）時呼叫一次 */
   onSettled?: () => Promise<void>;
 }) {
@@ -1146,6 +1153,21 @@ async function handleStreamMode(opts: {
           /* client gone */
         }
       };
+
+      if (opts.beforeTurn) {
+        const queued = await opts.beforeTurn();
+        if (!queued) {
+          if (req.signal.aborted) {
+            send({ type: "error", message: "aborted", aborted: true });
+            send({ type: "done", completionStatus: "failed", aborted: true });
+          } else {
+            send({ type: "error", message: "上一則還在查資料，這則先沒排上，請再送一次" });
+            send({ type: "done", completionStatus: "failed" });
+          }
+          controller.close();
+          return;
+        }
+      }
 
       send({ type: "stage", stage: "starting" });
       if (req.signal.aborted) {
@@ -1659,9 +1681,24 @@ async function handleStreamMode(opts: {
   };
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
+      const beat = () => {
+        try {
+          controller.enqueue(encoder({ type: "ping" }));
+        } catch {
+          /* client gone */
+        }
+      };
+      // 立刻送出一筆，後面每 8 秒再送。查資料、排隊、模型還沒吐字時連線都不會空著。
+      try {
+        controller.enqueue(encoder({ type: "stage", stage: "queued" }));
+      } catch {
+        /* client gone */
+      }
+      const ping = setInterval(beat, 8_000);
       try {
         await turn.run(controller);
       } finally {
+        clearInterval(ping);
         await opts.onSettled?.();
       }
     },

@@ -129,7 +129,9 @@ const MessageItem = memo(
         {m.role === "assistant" &&
         (m.completionStatus === "partial" || m.completionStatus === "aborted") ? (
           <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
-            回覆未完成，這是重新整理前已保存的部分
+            {m.completionStatus === "partial"
+              ? "還在寫，先顯示已經保存的部分"
+              : "回覆未完成，這是重新整理前已保存的部分"}
           </div>
         ) : null}
         {m.role === "assistant" ? (
@@ -187,6 +189,26 @@ type OlderPage = {
 
 function olderRequestKey(sessionId: string, cursor: string) {
   return `${sessionId}\n${cursor}`;
+}
+
+/** 連線先斷時，看伺服器是不是還有進行中的主持人回覆。有的話不要喊斷線。 */
+async function hostReplyVisible(sessionId: string): Promise<boolean> {
+  await new Promise((r) => setTimeout(r, 700));
+  try {
+    const res = await fetch(`/api/strategy/sessions/${encodeURIComponent(sessionId)}/tail`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as {
+      tail?: { completionStatus?: string | null; content?: string } | null;
+    };
+    const tail = data.tail;
+    if (!tail) return false;
+    if (tail.completionStatus === "partial") return true;
+    return Boolean(tail.content?.trim());
+  } catch {
+    return false;
+  }
 }
 
 async function requestOlderPage(sessionId: string, cursor: string): Promise<OlderPage | null> {
@@ -256,6 +278,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   /** 上一輪串流氣泡尚未進歷史時又開新回合：暫留顯示，避免主持人回覆被清掉 */
   const [parkedBubbles, setParkedBubbles] = useState<StreamingMemberBubble[]>([]);
   const [notices, setNotices] = useState<string[]>([]);
+  /** 查資料或排隊時的說明，不是錯誤 */
+  const [holdHint, setHoldHint] = useState<string | null>(null);
   const [degradedHint, setDegradedHint] = useState(false);
   const [memberDraft, setMemberDraft] = useState<StrategyMemberConfig[]>([]);
   const [templateDraft, setTemplateDraft] = useState("");
@@ -287,6 +311,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   /** done 後保留串流氣泡直到歷史訊息進畫面，避免閃空白 */
   const handoffPendingRef = useRef(false);
   const abortReasonRef = useRef<"user" | "switch" | null>(null);
+  const streamErrorRef = useRef<string | null>(null);
   /** 已接收串流緩衝（權威內容；動畫不得改寫） */
   const bubblesRef = useRef<StreamingMemberBubble[]>([]);
   const dripDriverRef = useRef(createAdaptiveDripDriver());
@@ -454,6 +479,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       setParkedBubbles([]);
       setHostTail(null);
       setNotices([]);
+      setHoldHint(null);
       setDegradedHint(false);
       setSettingsOpen(false);
       setToast(null);
@@ -886,6 +912,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     stickToBottomRef.current = true;
 
     onError(null);
+    streamErrorRef.current = null;
+    setHoldHint(null);
     setDegradedHint(false);
     setNotices([]);
     setPendingUser(content);
@@ -964,7 +992,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       if (completion?.aborted || completion?.completionStatus === "failed") {
         // 先留著已吐出的字，等 sync 把庫裡的回覆接上再收掉氣泡
         setPendingUser(null);
-        onError("生成失敗或已中斷");
+        setHoldHint(null);
+        if (abortReasonRef.current !== "user") {
+          onError(streamErrorRef.current || "生成失敗或已中斷");
+        }
         setGenerating(false);
         beginBackgroundReconcile(runId, sid);
         return;
@@ -972,23 +1003,33 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
 
       if (sawDone && (completion?.completionStatus === "ok" || completion?.completionStatus === "degraded")) {
         if (completion.completionStatus === "degraded") setDegradedHint(true);
+        setHoldHint(null);
         // input_ready 多半已解鎖；舊後端無此事件時在此補解鎖
         unlockComposerAfterVisible();
         beginBackgroundReconcile(runId, sid, true);
         return;
       }
 
-      // 連線斷了也留著已吐出的字，背景 sync 接到庫裡的回覆再收氣泡
+      // 連線先斷時，伺服器可能還在查資料。有進行中的回覆就讓畫面接上，不要先喊斷線。
       setPendingUser(null);
-      onError("連線中斷，回覆未完成");
       setGenerating(false);
       beginBackgroundReconcile(runId, sid);
+      if (!(await hostReplyVisible(sid)) && isCurrent()) {
+        setHoldHint(null);
+        onError("連線中斷，回覆未完成");
+      } else if (isCurrent()) {
+        setHoldHint(null);
+      }
     } catch (e) {
       if (!isCurrent()) return;
       setPendingUser(null);
       if ((e as Error)?.name === "AbortError") {
         // 使用者停止：stopGeneration 已 reconcileOnce，這裡略過
         if (abortReasonRef.current === "user") return;
+        setGenerating(false);
+        beginBackgroundReconcile(runId, sid);
+        if (await hostReplyVisible(sid)) return;
+        if (!isCurrent()) return;
         onError("連線中斷，回覆未完成");
       } else {
         onError(e instanceof Error ? e.message : String(e));
@@ -1012,12 +1053,18 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   function handleStreamEvent(ev: StrategyStreamEvent, isCurrent: () => boolean) {
     if (!isCurrent()) return;
     // thinking：靜默忽略
-    if (ev.type === "thinking") return;
+    if (ev.type === "thinking" || ev.type === "ping") return;
+    if (ev.type === "stage") {
+      if (ev.stage === "queued") setHoldHint("上一則還在查資料，這則已排隊");
+      else if (!bubblesRef.current.some((b) => b.content.trim())) setHoldHint("主持人正在整理");
+      return;
+    }
     if (ev.type === "notice" && ev.message) {
       setNotices((prev) => [...prev, ev.message]);
       return;
     }
     if (ev.type === "error" && ev.message && !ev.aborted) {
+      streamErrorRef.current = ev.message;
       onError(ev.message);
       return;
     }
@@ -1035,6 +1082,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
       return;
     }
     if (ev.type === "text" && ev.text) {
+      setHoldHint(null);
       const buf = bubblesRef.current;
       if (!buf.length) {
         buf.push({
@@ -1645,6 +1693,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
               </div>
             ))}
 
+            {holdHint ? <div className="strategy-stream-notice">{holdHint}</div> : null}
             {notices.map((n, i) => (
               <div key={`n-${i}`} className="strategy-stream-notice">
                 {n}

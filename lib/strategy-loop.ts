@@ -1963,7 +1963,8 @@ export async function readLiveHostTail(userId: string, sessionId: string): Promi
     .get(sessionId, userId)) as Record<string, unknown> | undefined;
   if (!row) return null;
   const createdAt = Number(row.created_at);
-  if (!Number.isFinite(createdAt) || Date.now() - createdAt > 5 * 60 * 1000) return null;
+  // Cursor 查資料常常超過五分鐘。這段時間內仍要把進行中的回覆顯示成「還在寫」，不要從畫面上消失。
+  if (!Number.isFinite(createdAt) || Date.now() - createdAt > 15 * 60 * 1000) return null;
   const rawStatus = row.completion_status == null ? null : String(row.completion_status);
   const completionStatus =
     rawStatus === "ok" ||

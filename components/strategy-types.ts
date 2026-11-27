@@ -54,6 +54,8 @@ export type StrategyStreamEvent =
   | { type: "thinking"; text: string; modelId?: string }
   | { type: "text"; text: string; modelId?: string; role?: string }
   | { type: "stage"; stage: string }
+  /** 長時間查資料時保持連線，前端不當成斷線 */
+  | { type: "ping" }
   | { type: "member_done"; role?: string; modelId?: string; label?: string }
   /** 可見文字已結束；落庫／派送仍在背景——前端應立刻解鎖輸入 */
   | { type: "input_ready" }
