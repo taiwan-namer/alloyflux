@@ -61,6 +61,7 @@ import {
 import {
   applyLedgerTurn,
   fillInstructionsFromDelivery,
+  preferHostReply,
   ledgerProtocolBlock,
   readLedger,
   renderLedgerAnchor,
@@ -347,8 +348,8 @@ function parseAssistantStructured(
   const parsed = extractJsonObject(answer) || {};
   const fromJson = typeof parsed.reply === "string" ? parsed.reply.trim() : "";
   const visible = (opts?.visibleText ?? "").trim();
-  // stream：可見正文優先；允許 JSON reply 為 ""；非 stream：維持 JSON reply → 全文切片
-  const reply = visible || fromJson || answer.slice(0, 4000);
+  // 可見正文與 JSON reply 誰的交付命令比較完整就用誰，避免短判定蓋掉命令
+  const reply = preferHostReply(visible, fromJson, answer);
   const instructions = Array.isArray(parsed.instructions) ? parsed.instructions : [];
   const reportRequests = Array.isArray(parsed.reportRequests) ? parsed.reportRequests : [];
   const openQuestions = Array.isArray(parsed.openQuestions) ? parsed.openQuestions : [];
@@ -867,9 +868,11 @@ async function finalizeTurn(input: {
     roomQueries,
   } = parsedPack;
   const instructions = fillInstructionsFromDelivery(reply, parsedPack.instructions, parsedPack.parsed.workPackage);
+  // 正文裡已經有交付命令時，不要因為 JSON 沒寫完就把它從派工拿掉
+  const skipLedger = Boolean(input.skipMemoryAndDispatch) && instructions.length === 0;
 
   const nextQueryResults: RoomQueryResult[] = [];
-  if (!input.skipMemoryAndDispatch) {
+  if (!skipLedger) {
     for (const q of roomQueries) {
       if (!q || typeof q !== "object") continue;
       const { roomId, question } = q as { roomId?: unknown; question?: unknown };
@@ -881,7 +884,7 @@ async function finalizeTurn(input: {
 
   const freshSession = await getStrategySession(input.authUserId, input.sessionId);
   const baseMeta = freshSession?.meta ?? input.session.meta;
-  const ledgerResult = input.skipMemoryAndDispatch
+  const ledgerResult = skipLedger
     ? null
     : applyLedgerTurn(readLedger(baseMeta), {
         ledgerOps: parsedPack.parsed.ledgerOps,
@@ -898,7 +901,7 @@ async function finalizeTurn(input: {
   const held: HeldInstruction[] = ledgerResult?.held ?? [];
   const toDispatch = [...allowedInstructions, ...allowedReportRequests];
   const shouldAutoDispatch =
-    !input.skipMemoryAndDispatch &&
+    !skipLedger &&
     (freshSession?.pauseState ?? "none") === "none" &&
     Boolean(freshSession?.autoDispatch);
 
@@ -963,9 +966,9 @@ async function finalizeTurn(input: {
     ledgerEscalated: ledgerResult?.escalated ?? false,
     openQuestions,
     canStartRun: nextStatus === "ready_to_run" || nextStatus === "ready_next_run",
-    fPlan: input.skipMemoryAndDispatch ? input.dossier.fPlan : nextDossier.fPlan,
+    fPlan: skipLedger ? input.dossier.fPlan : nextDossier.fPlan,
     contextChars: input.contextChars,
-    summary: input.skipMemoryAndDispatch ? input.session.summary : summary,
+    summary: skipLedger ? input.session.summary : summary,
     roomQueries: nextQueryResults.map((r) => ({
       roomId: r.roomId,
       roomName: r.roomName,
@@ -974,7 +977,7 @@ async function finalizeTurn(input: {
     autoDispatch: shouldAutoDispatch,
     pauseState: freshSession?.pauseState ?? "none",
     dispatchIds,
-    nextDossier: input.skipMemoryAndDispatch ? input.dossier : nextDossier,
+    nextDossier: skipLedger ? input.dossier : nextDossier,
     completionStatus,
     turnId: input.turnId ?? undefined,
   };
@@ -994,7 +997,7 @@ async function finalizeTurn(input: {
     idempotent: Boolean(input.turnId),
   });
 
-  if (!input.skipMemoryAndDispatch) {
+  if (!skipLedger) {
     let nextMeta: Record<string, unknown> = {
       ...baseMeta,
       dossier: nextDossier,

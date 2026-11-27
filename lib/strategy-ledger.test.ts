@@ -5,6 +5,8 @@ import {
   emptyLedger,
   fillInstructionsFromDelivery,
   isIrreversibleInstruction,
+  preferHostReply,
+  projectVisibleDelivery,
   ledgerProtocolBlock,
   readLedger,
   renderLedgerAnchor,
@@ -429,6 +431,42 @@ describe("fillInstructionsFromDelivery", () => {
     assert.equal((out[0] as { itemId: string }).itemId, "07");
     assert.match(instructionTextOf(out[0]), /wp-07/);
     assert.match(instructionTextOf(out[0]), /補錄音/);
+  });
+});
+
+describe("看得到的交付命令", () => {
+  it("JSON 裡的命令比可見短判定完整時，用 JSON", () => {
+    const picked = preferHostReply("判定\n還差一項", "判定\n還差一項\n交付命令：執行 E-DATA-LIVE-01 並寫 review.md");
+    assert.match(picked, /E-DATA-LIVE-01/);
+  });
+
+  it("帳本指令是空的時，用最新主持人正文裡的交付命令", () => {
+    const ledger = emptyLedger();
+    ledger.lastHostTurn = { at: 100, instructions: [], reportRequests: [], held: [] };
+    const next = projectVisibleDelivery(ledger, [
+      { role: "assistant", content: "判定\n舊的", createdAt: 50, speakerRole: "lead" },
+      {
+        role: "assistant",
+        content: "判定\n你說得對\n交付命令\nCursor：執行 E-DATA-LIVE-01，寫 review.md，不部署",
+        createdAt: 200,
+        speakerRole: "lead",
+      },
+    ]);
+    assert.equal(next.lastHostTurn?.instructions.length, 1);
+    assert.match(next.lastHostTurn?.instructions[0] ?? "", /E-DATA-LIVE-01/);
+    assert.ok((next.lastHostTurn?.at ?? 0) > 100);
+  });
+
+  it("同一條命令不要每讀一次都變成新回合", () => {
+    const ledger = emptyLedger();
+    const projected = projectVisibleDelivery(ledger, [
+      { role: "assistant", content: "交付命令：執行同一條", createdAt: 200, speakerRole: "lead" },
+    ]);
+    const again = projectVisibleDelivery(projected, [
+      { role: "assistant", content: "交付命令：執行同一條", createdAt: 200, speakerRole: "lead" },
+    ]);
+    assert.equal(again.lastHostTurn?.at, projected.lastHostTurn?.at);
+    assert.deepEqual(again.lastHostTurn?.instructions, projected.lastHostTurn?.instructions);
   });
 });
 

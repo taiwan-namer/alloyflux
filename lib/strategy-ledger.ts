@@ -74,7 +74,8 @@ export const LEDGER_LIMITS = {
   packageFieldMaxChars: 400,
   packageListMax: 8,
   logMax: 12,
-  lastTurnEachMaxChars: 900,
+  /** 交付命令常超過九百字；裁太短 Cursor 會拿到半套指令 */
+  lastTurnEachMaxChars: 4000,
   lastTurnMaxItems: 8,
   /** 同一工作包被退回幾次就進入僵局處置 */
   rejectEscalateAt: 2,
@@ -365,6 +366,63 @@ export function fillInstructionsFromDelivery(
     .filter(Boolean)
     .join("。");
   return [itemId ? { itemId, text } : text];
+}
+
+/** 可見正文與 JSON reply 都可能帶交付命令。取命令比較完整的那一份，避免短判定蓋掉命令。 */
+export function preferHostReply(visible: string, fromJson: string, fallback = ""): string {
+  const v = visible.trim();
+  const j = fromJson.trim();
+  const vCmd = extractDeliveryCommand(v);
+  const jCmd = extractDeliveryCommand(j);
+  if (jCmd.length > vCmd.length) return j;
+  return v || j || fallback.slice(0, 4000);
+}
+
+/**
+ * 看得到的交付命令就是指令。
+ * 回合若停在半成品，帳本裡的 instructions 會是空的，Cursor 就說沒有新指令。
+ * 讀取時用最新主持人正文補上，不改資料庫。
+ */
+export function projectVisibleDelivery(
+  ledger: StrategyLedger,
+  messages: { role: string; content: string; createdAt: number; speakerRole?: string | null }[],
+): StrategyLedger {
+  const latest = [...messages]
+    .reverse()
+    .find((m) => m.role === "assistant" && m.speakerRole !== "advisor" && m.content.trim());
+  if (!latest) return ledger;
+  const command = extractDeliveryCommand(latest.content);
+  if (command.length < 8) return ledger;
+  const text = clip(command, LEDGER_LIMITS.lastTurnEachMaxChars);
+  const last = ledger.lastHostTurn;
+  const existing = (last?.instructions ?? []).map((s) => s.trim()).filter(Boolean);
+  const same = existing.some((s) => {
+    const head = text.slice(0, 80);
+    return head.length > 0 && (s.startsWith(head) || text.startsWith(s.slice(0, 80)));
+  });
+  if (same) return ledger;
+  let at = Math.max(last?.at ?? 0, latest.createdAt);
+  if (last && at === last.at) at += 1;
+  if (isIrreversibleInstruction(text)) {
+    return {
+      ...ledger,
+      lastHostTurn: {
+        at,
+        instructions: [],
+        reportRequests: [],
+        held: [{ text: clip(text, 400), itemId: null, reason: "不可逆動作（部署／push／正式資料庫）需發起人批准" }],
+      },
+    };
+  }
+  return {
+    ...ledger,
+    lastHostTurn: {
+      at,
+      instructions: [text],
+      reportRequests: [],
+      held: [],
+    },
+  };
 }
 
 function instructionItemId(x: unknown): string | null {

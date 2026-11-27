@@ -20,7 +20,7 @@ import {
   type PauseAction,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
-import { readLedger, renderLedgerForHuman, validateLedgerInput } from "@/lib/strategy-ledger";
+import { projectVisibleDelivery, readLedger, renderLedgerForHuman, validateLedgerInput } from "@/lib/strategy-ledger";
 
 export const dynamic = "force-dynamic";
 
@@ -97,7 +97,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
         };
       })
     : page.messages;
-  const ledger = threadOnly ? null : readLedger(session.meta);
+  const ledger = threadOnly
+    ? null
+    : projectVisibleDelivery(readLedger(session.meta), page.messages);
   const { meta: _meta, pendingInstructions: _pending, ...threadSession } = session;
   return Response.json({
     session: threadOnly ? threadSession : session,
