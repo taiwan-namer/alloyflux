@@ -5106,8 +5106,49 @@ export default function ChatPage() {
                 </ul>
               )}
 
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: 10,
+                  borderRadius: 8,
+                  border: "1px solid var(--border)",
+                  background: "var(--panel-2)",
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>會議室 → Cursor 連線器</div>
+                <p className="muted" style={{ fontSize: 12, lineHeight: 1.55, margin: "0 0 8px" }}>
+                  不必下載 AlloyFlux 原始碼。在任意資料夾開終端機，下載連線器後用你的金鑰啟動；
+                  真正改檔請另外用 Cursor 開啟「你的專案」（例如 automax）。
+                </p>
+                <pre
+                  style={{
+                    margin: 0,
+                    padding: 10,
+                    borderRadius: 6,
+                    fontSize: 11,
+                    lineHeight: 1.45,
+                    overflow: "auto",
+                    background: "var(--bg)",
+                    border: "1px solid var(--border)",
+                  }}
+                >{`curl -fsSL ${apiBase}/cursor-connector.mjs -o alloyflux-connect.mjs
+ALLOYFLUX_API_KEY='sk_live_你的金鑰' node alloyflux-connect.mjs`}</pre>
+                <button
+                  type="button"
+                  className="ghost"
+                  style={{ marginTop: 8 }}
+                  onClick={() =>
+                    void copyText(
+                      `curl -fsSL ${apiBase}/cursor-connector.mjs -o alloyflux-connect.mjs\nALLOYFLUX_API_KEY='sk_live_你的金鑰' node alloyflux-connect.mjs`,
+                    )
+                  }
+                >
+                  複製連線指令
+                </button>
+              </div>
+
               <p className="muted" style={{ fontSize: 12, marginTop: 10, lineHeight: 1.55 }}>
-                💡 可填入支援 OpenAI 相容接口之工具。注意：外部寫程式工具每次請求會夾帶大量專案上下文，額度消耗速度將高於網頁版聊天。
+                💡 同一把金鑰也可給支援 OpenAI 相容接口的工具。外部寫程式工具若夾帶大量專案上下文，額度消耗會高於網頁聊天。
               </p>
             </div>
 
