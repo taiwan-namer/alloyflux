@@ -26,10 +26,20 @@ import {
 
 const SUMMARY_KEEP = 12;
 const ABSORB_PAGE = 40;
+const USER_SPEC_KEEP = 3;
+const USER_SPEC_CHARS = 2800;
+const USER_SPEC_INJECT_CHARS = 4500;
+
+export type UserSpec = {
+  messageId: string;
+  createdAt: number;
+  text: string;
+};
 
 type RoomMemory = {
   note: ConversationStateNote;
   summaries: HistorySummaryBlock[];
+  userSpecs: UserSpec[];
 };
 
 function emptyNote(sessionId: string): ConversationStateNote {
@@ -92,16 +102,72 @@ function readRoomMemory(meta: Record<string, unknown>, sessionId: string): RoomM
       });
     }
   }
-  return { note, summaries };
+  const userSpecs = readUserSpecs(raw?.userSpecs);
+  return { note, summaries, userSpecs };
+}
+
+function readUserSpecs(raw: unknown): UserSpec[] {
+  if (!Array.isArray(raw)) return [];
+  const out: UserSpec[] = [];
+  for (const item of raw) {
+    const s = asRecord(item);
+    if (!s || typeof s.text !== "string" || !s.text.trim()) continue;
+    if (typeof s.messageId !== "string" || !s.messageId) continue;
+    out.push({
+      messageId: s.messageId,
+      createdAt: Number(s.createdAt) || 0,
+      text: s.text.slice(0, USER_SPEC_CHARS),
+    });
+  }
+  return out.slice(-USER_SPEC_KEEP);
+}
+
+/** 網頁上使用者跟主持人談的規格：長文、表格、必須保存。短句確認不算。 */
+export function isUserSpecMessage(content: string): boolean {
+  const text = content.trim();
+  if (text.length < 80) return false;
+  if (text.length >= 400) return true;
+  return /必須保存|規格|模組|驗收|主軸|目標|項目／|項目\/|解決這次/.test(text);
+}
+
+export function mergeUserSpecs(existing: UserSpec[], incoming: UserSpec[]): UserSpec[] {
+  const byId = new Map(existing.map((s) => [s.messageId, s]));
+  for (const spec of incoming) {
+    const prev = byId.get(spec.messageId);
+    if (!prev || spec.text.length >= prev.text.length) byId.set(spec.messageId, spec);
+  }
+  return [...byId.values()]
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .slice(-USER_SPEC_KEEP);
+}
+
+export function formatUserSpecBlock(goal: string, specs: UserSpec[]): string {
+  if (!specs.length && !goal.trim()) return "";
+  const lines = [
+    "# 使用者規格（優先於路線圖結案口徑）",
+    "這是使用者跟主持人談定、要做出來的內容。路線圖只代表階段進度與限縮結論。",
+    "被問「做完了嗎」時：先對這份規格說明哪些能確認、哪些不能宣稱，再用路線圖補階段狀態。不要把路線圖全數結案說成規格逐欄通過或已實際啟用。",
+  ];
+  if (goal.trim()) lines.push(`原初目標：${goal.trim()}`);
+  let budget = USER_SPEC_INJECT_CHARS;
+  const newestFirst = [...specs].reverse();
+  for (const spec of newestFirst) {
+    if (budget < 200) break;
+    const body = spec.text.length > budget ? `${spec.text.slice(0, budget)}…` : spec.text;
+    lines.push(`--- 使用者規格 ---\n${body}`);
+    budget -= body.length;
+  }
+  return lines.join("\n");
 }
 
 /** 注入模型的會議室記憶。沒有內容就回空字串。 */
 export function formatStrategyRoomMemory(meta: Record<string, unknown> | null | undefined, sessionId: string): string {
   if (!meta) return "";
   const memory = readRoomMemory(meta, sessionId);
+  const spec = formatUserSpecBlock(memory.note.goal, memory.userSpecs);
   const note = formatConversationStateForInject(memory.note);
   const summaries = formatHistorySummariesForInject(memory.summaries.slice(-2));
-  return [note, summaries].filter((s) => s.trim()).join("\n\n");
+  return [spec, note, summaries].filter((s) => s.trim()).join("\n\n");
 }
 
 function historyOpts(lean: boolean, offset: number) {
@@ -128,6 +194,7 @@ export async function absorbStrategyRoomMemory(input: {
   const memory = readRoomMemory(input.meta, input.sessionId);
   let note = memory.note;
   const summaries = [...memory.summaries];
+  let userSpecs = memory.userSpecs;
 
   const page = await listSessionMessagesPage(input.userId, input.sessionId, {
     limit: STRATEGY_LIMITS.historyFetchLimit,
@@ -136,9 +203,24 @@ export async function absorbStrategyRoomMemory(input: {
   const bounded = selectStrategyHistory(page.messages, historyOpts(input.lean, offset));
   const windowStartAt = bounded[0]?.createdAt ?? Number.MAX_SAFE_INTEGER;
 
-  const latestUser = [...page.messages]
+  const webUsers = page.messages.filter(
+    (m) => m.role === "user" && m.structured?.source === "web" && isUserSpecMessage(m.content),
+  );
+  userSpecs = mergeUserSpecs(
+    userSpecs,
+    webUsers.map((m) => ({
+      messageId: m.id,
+      createdAt: m.createdAt,
+      text: m.content.trim().slice(0, USER_SPEC_CHARS),
+    })),
+  );
+
+  const latestWeb = [...page.messages]
     .reverse()
-    .find((m) => m.role === "user" && m.createdAt >= windowStartAt);
+    .find((m) => m.role === "user" && m.structured?.source === "web" && m.createdAt >= windowStartAt);
+  const latestUser =
+    latestWeb ??
+    [...page.messages].reverse().find((m) => m.role === "user" && m.createdAt >= windowStartAt);
   if (latestUser) {
     note = mergeStateNote(note, extractStatePatchesFromMessages([toPatchMessage(latestUser)]));
   }
@@ -182,6 +264,7 @@ export async function absorbStrategyRoomMemory(input: {
     roomMemory: {
       note,
       summaries: summaries.slice(-SUMMARY_KEEP),
+      userSpecs,
     },
   };
 }
