@@ -126,18 +126,17 @@ const MessageItem = memo(
     return (
       <div className={`strategy-msg strategy-msg-${m.role}`}>
         <div className="strategy-msg-role">{messageRoleLabel(m)}</div>
-        {m.role === "assistant" &&
-        (m.completionStatus === "partial" || m.completionStatus === "aborted") ? (
+        {m.role === "assistant" && m.completionStatus === "partial" ? (
           <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
-            {m.completionStatus === "partial"
-              ? "還在寫，先顯示已經保存的部分"
-              : "回覆未完成，這是重新整理前已保存的部分"}
+            還在寫，先顯示已經保存的部分
           </div>
         ) : null}
         {m.role === "assistant" ? (
-          <div className="strategy-msg-body strategy-md-body">
-            <SafeLightMarkdown content={m.content} />
-          </div>
+          m.completionStatus === "aborted" && !m.content.trim() ? null : (
+            <div className="strategy-msg-body strategy-md-body">
+              <SafeLightMarkdown content={m.content} />
+            </div>
+          )
         ) : (
           <pre className="strategy-msg-body">{m.content}</pre>
         )}
@@ -721,10 +720,13 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   }, [detail.messages, hostTail]);
 
   const historyMessages = useMemo(() => {
+    const hideAbortedEmpty = (m: StrategySessionMessage) =>
+      !(m.role === "assistant" && m.completionStatus === "aborted" && !m.content.trim());
     const live =
       streamBubbles.some((b) => b.content.trim()) || parkedBubbles.some((b) => b.content.trim());
-    if (!live && !remotePartial) return detail.messages;
+    if (!live && !remotePartial) return detail.messages.filter(hideAbortedEmpty);
     return detail.messages.filter((m) => {
+      if (!hideAbortedEmpty(m)) return false;
       if (remotePartial && m.id === remotePartial.id) return false;
       if (live && m.role === "assistant" && m.completionStatus === "partial") return false;
       return true;
@@ -867,6 +869,8 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     setStreamBubbles([]);
     setParkedBubbles([]);
     setPendingUser(null);
+    setHostTail(null);
+    setHoldHint(null);
     setNotices([]);
     setDegradedHint(false);
     setGenerating(false);
@@ -874,7 +878,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     onError(null);
     if (content) onDraftChange(content);
     requestAnimationFrame(() => textareaRef.current?.focus());
-    // #9：停止後立刻可打字／可重送；背景 sync 不擋 composer
+    // 停止後立刻可打字／可重送；背景 sync 只對齊狀態，不要把 aborted 片段再掛回畫面
     beginBackgroundReconcile(runId, sid, true);
   }
 

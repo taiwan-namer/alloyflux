@@ -98,6 +98,20 @@ export function isIrreversibleInstruction(text: string): boolean {
     .some((clause) => !PROHIBITION_RE.test(clause) && IRREVERSIBLE_RE.test(clause));
 }
 
+/**
+ * 假暫停／停會指令：主持人用「不執行命令」收尾時，常誤寫成停止派工／hold／等使用者恢復。
+ * 這類文字會讓 Cursor 以為會議結束；真正暫停只能走網頁 pauseAction。
+ * 「直接訊息回覆、不跑 shell」本身不算停會。
+ */
+const MEETING_HALT_RE =
+  /停止本輪後續派工|停止後續派工|停止派工作業|僅停止本輪|中斷會議|結束會議|散會|wp-[a-z0-9_.-]*-?hold[a-z0-9_.-]*|只有使用者明確同意恢復後|等待使用者(?:明確)?(?:同意)?恢復後才另派/i;
+
+export function isMeetingHaltInstruction(text: string): boolean {
+  const t = text.trim();
+  if (!t) return false;
+  return MEETING_HALT_RE.test(t);
+}
+
 const STATUS_LABEL: Record<LedgerItemStatus, string> = {
   todo: "⬜ 未開始",
   in_progress: "🟡 進行中",
@@ -721,10 +735,16 @@ export function applyLedgerTurn(
   const active = isLedgerActive(ledger);
   const scopeItemId = ledger.currentPackage?.itemId ?? ledger.currentItemId;
   const allowedInstructions: unknown[] = [];
+  let haltedDropped = 0;
   for (const ins of turn.instructions) {
     const text = instructionText(ins);
     if (!text) continue;
     const itemId = instructionItemId(ins);
+    if (isMeetingHaltInstruction(text)) {
+      // 直接丟棄，不進 held（否則還會掛在待派送，Cursor 仍會當停會）
+      haltedDropped += 1;
+      continue;
+    }
     if (isIrreversibleInstruction(text)) {
       held.push({ text: clip(text, 400), itemId, reason: "不可逆動作（部署／push／正式資料庫）需發起人批准" });
       continue;
@@ -742,6 +762,10 @@ export function applyLedgerTurn(
   // 報告需求是唯讀蒐證；僵局時仍允許（例如要 Cursor 交卡關說明）
   const allowedReportRequests = turn.reportRequests.filter((r) => {
     const text = instructionText(r);
+    if (text && isMeetingHaltInstruction(text)) {
+      haltedDropped += 1;
+      return false;
+    }
     if (text && isIrreversibleInstruction(text)) {
       held.push({ text: clip(text, 400), itemId: instructionItemId(r), reason: "不可逆動作需發起人批准" });
       return false;
@@ -749,6 +773,7 @@ export function applyLedgerTurn(
     return true;
   });
 
+  if (haltedDropped) events.push(`已擋下 ${haltedDropped} 條假暫停／停會指令（訊息交付≠停會）`);
   if (held.length) events.push(`保留 ${held.length} 項指令未派送`);
 
   ledger.lastHostTurn = {
@@ -914,11 +939,13 @@ export function ledgerProtocolBlock(): string {
    {"op":"setStatus","id":"4A","status":"todo|in_progress|parked|blocked","note":"…"},
    {"op":"park","id":"…","reason":"…","resumeTrigger":"…"},{"op":"resume","id":"…"}]
 - 派工（要 Cursor 做事時必做）：可見回覆只准兩段——短「判定」（最多 5 行）＋「交付命令」。同一條交付命令必須原文寫進 instructions（至少一條）。Cursor 只執行 instructions。若 instructions 留空或過短，平台會用可見交付命令／工作包補派，路線圖才能繼續。禁止只給結語或方向，也禁止「請依下列／接續這項／先補證據」卻不寫出命令本身。
-- 交付命令／instructions 一次寫完整，讓 Cursor 不用再問就能做完交報告：具體路徑或模組、要跑的指令、這次不做的事、可用輸出判定的驗收。每條驗收要有固定輸入、比對欄位、程序邊界、數字或狀態。禁止用「完整／正確／足夠／釐清／接續」當條件。
+- 交付命令／instructions 一次寫完整，讓 Cursor 不用再問就能做完交報告：具體路徑或模組、要跑的指令（或明確寫「僅用訊息／報告回覆，不跑 shell」）、這次不做的事、可用輸出判定的驗收。每條驗收要有固定輸入、比對欄位、程序邊界、數字或狀態。禁止用「完整／正確／足夠／釐清／接續」當條件。
+- 訊息交付是正常工作：要 Cursor「不執行命令、只用訊息或報告回覆」時，照樣寫成一條可驗收的交付命令；Cursor 應回訊息／上傳報告並標記該派工完成，會議繼續。這不是暫停，也不是結束會議。
+- 禁止自行下停會指令：不得寫「停止派工／結束本輪／hold／中斷會議／結束會議／等使用者恢復後才另派」。真正暫停只能由發起人在網頁按暫停。本輪設計／查核結案且沒有下一項可做時：判定段寫結論即可，instructions 可空，不要派 hold 或「停止後續派工」包。
 - 暫扣只給真的 git push／vercel --prod／部署到正式／正式資料庫寫入。本機改碼、測試、持久化例外、副本掛接不要標成不可逆。
-- 驗收通過（verdict "accept"）時必填 "conclusion"（放在判定段，3–5 行：做了什麼、驗收結果、數字、這次不代表什麼）。程式會結案並切到下一項；同一回合必須給下一項 workPackage 與對應交付命令。workPackage：{"id":"wp-…","itemId":"目前項目 id","goal":"…","scope":["允許改的檔案／模組"],"acceptance":["可用測試輸出判定的條件，不要形容詞"],"stopConditions":["遇到就停下回報的情況"]}。一個工作包要能一次做完再回報。
+- 驗收通過（verdict "accept"）時必填 "conclusion"（放在判定段，3–5 行：做了什麼、驗收結果、數字、這次不代表什麼）。程式會結案並切到下一項；同一回合若有下一項，給 workPackage 與對應交付命令；若沒有下一項或下一項仍 parked／需使用者決定，不要發明 hold 包。workPackage：{"id":"wp-…","itemId":"目前項目 id","goal":"…","scope":["允許改的檔案／模組"],"acceptance":["可用測試輸出判定的條件，不要形容詞"],"stopConditions":["遇到就停下回報的情況"]}。一個工作包要能一次做完再回報。
 - 還差一項：帳本用 verdict "reject"（附 verdictReason）＋一條修正命令，把要改的點和要重測的證據寫完。可見回覆禁止寫「不通過」「待改碼」「await_code」，改寫「還差：一句話」然後接交付命令；phase 必須填 reviewing。有 instructions 時禁止把 phase 設成 await_code。同一工作包退回 ${LEDGER_LIMITS.rejectEscalateAt} 次會進入僵局：本回合必須 escalationDecision（narrow|alternate|park）＋新 workPackage＋完整 instructions；平台同回合放行，不要變成等網頁批准。若同回合已給不同 id 的新工作包與非空 instructions，即使漏寫 escalationDecision 也視為 narrow 放行。
-- 本回合訊息來自 Cursor 時必須派工（accept 接下一項、reject 一條修正、或 reportRequests 指名缺的證據）。不要只回覆使用者。
+- 本回合訊息來自 Cursor 時應驗收並決定下一步（accept 接下一項、reject 一條修正、或 reportRequests 指名缺的證據）。不要只回覆使用者；但結案且無下一項時可不派工。同一缺口不要連發多次「再回一次訊息」。
 - instructions 可寫字串或 {"itemId":"…","text":"…"}；itemId 與目前項目不同會被保留不派送。只有 git push／vercel --prod／部署到正式／正式資料庫寫入保留給發起人。
 - 要看程式碼時，指名函式或行號範圍（每段 ≤150 行）；不要要求整份檔案。
 - 「做到哪裡」直接引用帳本；帳本沒寫的就說不知道，請 Cursor 用 git／報告查證。`;

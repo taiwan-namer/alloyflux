@@ -55,8 +55,9 @@ const AUTOMAX_FLOW = `## 流程（phase）
 3. ready_to_run：定案並給出 fPlan 與實作指令，canStartRun=true。
 4. running：本機 paper／驗證進行中。
 5. collecting／reviewing：復盤；缺資料就下指令。
-6. await_code：只有沒有指令、要使用者親自決定時才用。有交付命令時禁止用這個階段，否則 Cursor 會停下來等人。
-7. ready_next_run：允許開下一輪（canStartRun=true）。`;
+6. await_code：只有沒有指令、要使用者親自決定時才用。有交付命令時禁止用這個階段。await_code 不是結束會議；真正暫停只能由發起人在網頁按暫停。
+7. ready_next_run：允許開下一輪（canStartRun=true）。
+訊息交付（不跑 shell、只用訊息／報告回覆）是正常交付，不是停會。禁止下「停止派工／hold／中斷會議／等使用者恢復」這類假暫停指令。`;
 
 const JSON_SCHEMA_CORE = `## 每次只輸出一個 JSON 物件
 {

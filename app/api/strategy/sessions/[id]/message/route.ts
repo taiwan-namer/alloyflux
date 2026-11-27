@@ -116,10 +116,11 @@ function leanSopBlock(): string {
   return `## 工作 SOP（精簡會議室，必須遵守）
 你負責規劃與驗收，不看程式碼；程式碼由 Cursor 在本機讀取、對齊與修改。
 1. 了解：依使用者描述與 Cursor 的架構報告理解專案。資訊不足時，用一個 reportRequests 請 Cursor 交架構摘要（不要原始碼）。
-2. 下指令：可見回覆先寫最多 5 行判定，接著寫交付命令；同一條命令原文必須放進 instructions（至少一條，最多 5 條）。命令要含具體路徑／模組、要跑的指令、這次不做的事、可用測試輸出判定的驗收。禁止只寫「請依下列／接續／先補證據」。同時輸出 workPackage（itemId、goal、scope、acceptance）。不指定逐行改法。
+2. 下指令：可見回覆先寫最多 5 行判定，接著寫交付命令；同一條命令原文必須放進 instructions（至少一條，最多 5 條）。命令要含具體路徑／模組、要跑的指令（或明確寫「僅用訊息／報告回覆，不跑 shell」）、這次不做的事、可用測試輸出判定的驗收。禁止只寫「請依下列／接續／先補證據」。同時輸出 workPackage（itemId、goal、scope、acceptance）。不指定逐行改法。
 3. 對齊：Cursor 回報「對齊有問題」時，只針對那個問題給一條交付命令，不重新規劃整個專案。
-4. 驗收：Cursor 交「最終報告」時對照驗收標準判定。通過 → verdict "accept"＋conclusion（放在判定段），同回合給下一項 workPackage 與交付命令。還差一項 → 帳本 verdict "reject"＋verdictReason，可見回覆寫「還差」加一條修正命令，phase 填 reviewing。第二次退回時同回合給 escalationDecision（narrow|alternate）＋新 workPackage＋完整 instructions，平台會直接放行，不要變成等網頁批准。禁止寫「不通過」或 phase=await_code。
+4. 驗收：Cursor 交「最終報告」時對照驗收標準判定。通過 → verdict "accept"＋conclusion（放在判定段）；有下一項就同回合給 workPackage 與交付命令；沒有下一項或仍 parked／需使用者決定時，判定段結案即可，不要派 hold 或「停止派工」。還差一項 → 帳本 verdict "reject"＋verdictReason，可見回覆寫「還差」加一條修正命令，phase 填 reviewing。第二次退回時同回合給 escalationDecision（narrow|alternate）＋新 workPackage＋完整 instructions，平台會直接放行，不要變成等網頁批准。禁止寫「不通過」或 phase=await_code。
 5. 使用者要求復盤時，再總結得失。
+訊息交付是正常工作：要 Cursor 不跑命令、只用訊息回覆時，照樣下一條可驗收指令；Cursor 回訊息後會議繼續。禁止自行寫停止派工／結束本輪／hold／中斷會議／等使用者恢復；真正暫停只能由發起人在網頁按暫停。同一缺口不要連發多次「再回一次訊息」。
 禁止：要求原始碼或拆段上傳；擴大範圍（新點子寫在 reply 的「建議清單」，不要下成指令）；只為了確認而要求額外報告。只有 git push／vercel --prod／部署到正式／正式資料庫寫入寫成「待發起人批准」；本機改碼與測試不要暫扣。
 reply 控制在 800 字內。項目完成或要換下一項時，用 ledgerOps（setStatus／setCurrent）更新帳本。`;
 }
@@ -161,7 +162,7 @@ async function buildContextBlock(
   const packageSince = pkg && pkg.status !== "accepted" ? pkg.createdAt : 0;
   const sourceBlock = fromWeb
     ? "## 發言來源\n本回合訊息來自：使用者（網頁）"
-    : "## 發言來源\n本回合訊息來自：Cursor。可見回覆只能是短「判定」（最多 5 行）加「交付命令」。交付命令必須完整（路徑／要跑的指令／不做的事／驗收），並全文寫進 instructions。若 instructions 留空或過短，平台會用交付命令補派。禁止只給結語、方向，或「請依下列／接續／先補證據」。通過就接下一項 workPackage 與完整命令。還差就寫「還差」加一條修正命令，phase 填 reviewing；禁止寫「不通過」或 phase=await_code。";
+    : "## 發言來源\n本回合訊息來自：Cursor。可見回覆只能是短「判定」（最多 5 行）加「交付命令」。交付命令必須完整（路徑／要跑的指令或「僅用訊息回覆」／不做的事／驗收），並全文寫進 instructions。若 instructions 留空或過短，平台會用交付命令補派。禁止只給結語、方向，或「請依下列／接續／先補證據」。通過且有下一項就接 workPackage 與完整命令；結案且無下一項則判定段寫結論即可，不要派 hold／停止派工。還差就寫「還差」加一條修正命令，phase 填 reviewing；禁止寫「不通過」或 phase=await_code。訊息交付≠停會；禁止停止派工／中斷會議／等使用者恢復。";
 
   if (lean) {
     // 像一般聊天：只有專案錨點＋上一回合之後／本工作包期間上傳的報告，其餘全靠對話紀錄
@@ -783,9 +784,30 @@ async function handleJsonMode(opts: {
     req.signal.removeEventListener("abort", relayClientAbort);
   }
   if (clientAbort) {
-    queueCheckpoint(shownNow(), true);
+    // 使用者停止：清掉已寫的 partial，不要把片段當正式回覆留下
     checkpointsClosed = true;
+    pendingSnap = null;
     await drainCheckpoints();
+    await addSessionMessage({
+      sessionId,
+      userId: authUserId,
+      role: "assistant",
+      content: "",
+      structured: {
+        kind: "lead",
+        turnId,
+        completionStatus: "aborted",
+        reply: "",
+        cancelled: true,
+      },
+      createdAt: startedAt + 1,
+      speakerModel: model.id,
+      speakerRole: "lead",
+      speakerLabel: lead.label || "主導",
+      turnId,
+      completionStatus: "aborted",
+      idempotent: true,
+    });
     return Response.json({ error: "aborted", aborted: true }, { status: 499 });
   }
   queueCheckpoint(shownNow(), true);
@@ -1031,7 +1053,7 @@ async function finalizeTurn(input: {
   return structured;
 }
 
-/** abort／錯誤：idempotent 保存 user＋已產生 partial，不假裝完成；無可見內容不寫空 assistant */
+/** abort／錯誤：idempotent 保存 user；使用者停止時清掉 lead 快照，避免 sync 又把片段拉回畫面 */
 async function finalizePartialTurn(input: {
   authUserId: string;
   sessionId: string;
@@ -1063,6 +1085,32 @@ async function finalizePartialTurn(input: {
     idempotent: true,
   });
   idx += 1;
+
+  // 使用者按停止：只標 user 為 aborted，並把同 turn 的 lead partial 清空覆寫成 aborted
+  if (input.status === "aborted") {
+    await addSessionMessage({
+      sessionId: input.sessionId,
+      userId: input.authUserId,
+      role: "assistant",
+      content: "",
+      structured: {
+        kind: "lead",
+        turnId: input.turnId,
+        completionStatus: "aborted",
+        reply: "",
+        cancelled: true,
+      },
+      createdAt: baseTs + idx,
+      speakerModel: input.leadModelId,
+      speakerRole: "lead",
+      speakerLabel: input.leadLabel,
+      turnId: input.turnId,
+      completionStatus: "aborted",
+      idempotent: true,
+    });
+    return;
+  }
+
   for (const a of input.advisorTexts) {
     if (!a.text.trim()) continue;
     await addSessionMessage({
@@ -1371,6 +1419,11 @@ async function handleStreamMode(opts: {
         }
 
         if (aborted || req.signal.aborted) {
+          try {
+            await opts.onSettled?.();
+          } catch {
+            /* ignore */
+          }
           await persistPartial("aborted");
           send({ type: "error", message: "aborted", aborted: true });
           send({ type: "done", completionStatus: "failed", aborted: true });
@@ -1451,8 +1504,21 @@ async function handleStreamMode(opts: {
           checkpointsClosed = true;
           await checkpointChain;
         };
+        // 使用者停止：立刻停寫快照並放回合鎖，不要再把 partial 推進資料庫
+        let settledEarly = false;
+        const releaseTurnEarly = async () => {
+          if (settledEarly) return;
+          settledEarly = true;
+          checkpointsClosed = true;
+          try {
+            await opts.onSettled?.();
+          } catch {
+            /* ignore */
+          }
+        };
         const onClientGone = () => {
-          queueCheckpoint(true);
+          checkpointsClosed = true;
+          void releaseTurnEarly();
         };
         req.signal.addEventListener("abort", onClientGone, { once: true });
         // 可見文字一結束就解鎖輸入，並放開伺服器回合鎖。後面的 JSON 不再擋住下一則。
@@ -1574,12 +1640,13 @@ async function handleStreamMode(opts: {
         if (cutoff === "idle" && !req.signal.aborted) visibleStall = true;
         if (cutoff === "deadline") softTimeout = true;
 
-        const flushed = tail.flushVisible();
-        if (flushed) send({ type: "text", text: flushed, modelId: leadModel.id, role: "lead" });
         leadVisiblePartial = tail.getVisibleText();
 
         if (aborted || req.signal.aborted) {
+          await releaseTurnEarly();
+          checkpointsClosed = true;
           await finishCheckpoints();
+          // 清空已寫入的 partial，標成 aborted；不要把停止前的片段當正式回覆留下
           await persistPartial("aborted");
           req.signal.removeEventListener("abort", onClientGone);
           send({ type: "error", message: "aborted", aborted: true });
@@ -1587,6 +1654,10 @@ async function handleStreamMode(opts: {
           controller.close();
           return;
         }
+
+        const flushed = tail.flushVisible();
+        if (flushed) send({ type: "text", text: flushed, modelId: leadModel.id, role: "lead" });
+        leadVisiblePartial = tail.getVisibleText();
 
         const visibleText = tail.getVisibleText();
         const jsonRaw = tail.getJsonRaw();
@@ -1669,6 +1740,11 @@ async function handleStreamMode(opts: {
         });
       } catch (e) {
         if (isAbortError(e) || req.signal.aborted) {
+          try {
+            await opts.onSettled?.();
+          } catch {
+            /* ignore */
+          }
           await persistPartial("aborted");
           send({ type: "error", message: "aborted", aborted: true });
           send({ type: "done", completionStatus: "failed", aborted: true });
@@ -1702,6 +1778,7 @@ async function handleStreamMode(opts: {
         await turn.run(controller);
       } finally {
         clearInterval(ping);
+        // abort 路徑可能已提早 onSettled；再呼叫一次也安全（只放自己的鎖）
         await opts.onSettled?.();
       }
     },

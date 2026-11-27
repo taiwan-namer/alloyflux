@@ -5,6 +5,7 @@ import {
   emptyLedger,
   fillInstructionsFromDelivery,
   isIrreversibleInstruction,
+  isMeetingHaltInstruction,
   preferHostReply,
   projectVisibleDelivery,
   ledgerProtocolBlock,
@@ -111,6 +112,36 @@ describe("strategy ledger", () => {
     );
     assert.equal(r.held.length, 0);
     assert.equal(r.allowedInstructions.length, 1);
+  });
+
+  it("假暫停／hold 指令要擋下；純訊息交付要放行", () => {
+    assert.equal(
+      isMeetingHaltInstruction(
+        "執行邊界工作包 wp-e-replay-hold-01：僅停止本輪後續派工作業，不執行 shell。只有使用者明確同意恢復後，才另派具體實作工作包。",
+      ),
+      true,
+    );
+    assert.equal(
+      isMeetingHaltInstruction(
+        "僅引用現有對話直接訊息交付摘要，不執行任何命令、不查檔。驗收：五列齊備。",
+      ),
+      false,
+    );
+    const r = applyLedgerTurn(
+      seeded(),
+      {
+        instructions: [
+          "Cursor：補交純訊息附表，不執行任何命令、不查檔，直接回覆不超過2000字。",
+          "Cursor：執行 wp-e-replay-hold-01：僅停止本輪後續派工作業；只有使用者明確同意恢復後，才另派。",
+        ],
+        reportRequests: [],
+      },
+      NOW,
+    );
+    assert.equal(r.allowedInstructions.length, 1);
+    assert.match(String(r.allowedInstructions[0]), /純訊息附表/);
+    assert.equal(r.held.length, 0);
+    assert.ok(r.events.some((e) => /假暫停/.test(e)));
   });
 
   it("同 ID 工作包重新下發沿用退回次數，第二次退回仍進僵局", () => {
@@ -484,6 +515,8 @@ describe("ledgerProtocolBlock", () => {
     assert.match(text, /可見回覆禁止寫「不通過」/);
     assert.match(text, /具體路徑或模組、要跑的指令/);
     assert.match(text, /本機改碼、測試、持久化例外/);
+    assert.match(text, /訊息交付是正常工作/);
+    assert.match(text, /禁止自行下停會指令/);
   });
 });
 

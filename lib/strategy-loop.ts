@@ -175,9 +175,11 @@ export function shouldUpgradeTurnCompletion(
   if (next === "ok" || next === "degraded") return true;
   // 已收尾的不降回 partial／aborted／failed
   if (prev === "ok" || prev === "degraded") return false;
-  // 未完成的快照可越寫越長，並可收成 aborted／failed；已中斷的不再退回 partial
+  // 使用者停止：允許把 partial 覆寫成 aborted（含清空正文）
+  if (next === "aborted") return prev == null || prev === "partial" || prev === "aborted" || prev === "failed";
+  // 未完成的快照可越寫越長，並可收成 failed；已中斷的不再退回 partial
   if (prev == null || prev === "partial") {
-    return next === "partial" || next === "aborted" || next === "failed";
+    return next === "partial" || next === "failed";
   }
   return false;
 }
