@@ -971,6 +971,11 @@ a {
   margin-bottom: 4px;
 }
 
+.strategy-msg-time {
+  margin-left: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
 .strategy-msg-body {
   margin: 0;
   white-space: pre-wrap;

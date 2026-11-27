@@ -100,6 +100,34 @@ export type StrategyRoomViewProps = {
   wsMemorySaving?: boolean;
 };
 
+/** 台北時間，標出這則是幾點回的。跨日加上月／日，避免同一小時對不上。 */
+function formatReplyClock(createdAt: number): string {
+  if (!Number.isFinite(createdAt) || createdAt <= 0) return "";
+  const parts = new Intl.DateTimeFormat("zh-TW", {
+    timeZone: "Asia/Taipei",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(createdAt));
+  const pick = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value ?? "";
+  const hour = pick("hour");
+  const minute = pick("minute");
+  if (!hour || !minute) return "";
+  return `${pick("month")}/${pick("day")} ${hour}:${minute}`;
+}
+
+function ReplyClock({ at }: { at: number }) {
+  const label = formatReplyClock(at);
+  if (!label) return null;
+  return (
+    <time className="strategy-msg-time" dateTime={new Date(at).toISOString()}>
+      {label}
+    </time>
+  );
+}
+
 function messageRoleLabel(m: StrategySessionMessage) {
   if (m.role === "assistant") {
     return (
@@ -125,7 +153,10 @@ const MessageItem = memo(
   function MessageItem({ m }: MessageItemProps) {
     return (
       <div className={`strategy-msg strategy-msg-${m.role}`}>
-        <div className="strategy-msg-role">{messageRoleLabel(m)}</div>
+        <div className="strategy-msg-role">
+          {messageRoleLabel(m)}
+          <ReplyClock at={m.createdAt} />
+        </div>
         {m.role === "assistant" && m.completionStatus === "partial" ? (
           <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
             還在寫，先顯示已經保存的部分
@@ -151,7 +182,8 @@ const MessageItem = memo(
     a.m.speakerModel === b.m.speakerModel &&
     a.m.speakerRole === b.m.speakerRole &&
     a.m.structured?.source === b.m.structured?.source &&
-    a.m.completionStatus === b.m.completionStatus,
+    a.m.completionStatus === b.m.completionStatus &&
+    a.m.createdAt === b.m.createdAt,
 );
 
 /** 歷史訊息：串流更新（streamBubbles／pendingUser）不會重繪此區 */
@@ -321,6 +353,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
     speakerRole: string | null;
     speakerLabel: string | null;
     completionStatus: string | null;
+    createdAt?: number;
   } | null>(null);
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
   const seenSessionIdRef = useRef<string | null>(null);
@@ -1645,6 +1678,7 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
                       {remotePartial.speakerModel ? (
                         <span className="muted"> · {remotePartial.speakerModel}</span>
                       ) : null}
+                      {remotePartial.createdAt ? <ReplyClock at={remotePartial.createdAt} /> : null}
                     </div>
                     <div className="strategy-msg-body strategy-md-body">
                       <SafeLightMarkdown content={remotePartial.content || ""} streaming={remoteTyping} />
