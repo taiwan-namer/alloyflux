@@ -92,6 +92,8 @@ export interface StrategySessionBrief {
   templateId?: string | null;
   topic?: string;
   summary?: string;
+  /** 依摘要產生、可直接送出的問句。沒有時前端用摘要起草 */
+  suggestedAsks?: string[];
   autoDispatch?: boolean;
   pauseState?: PauseState;
   updatedAt: number;

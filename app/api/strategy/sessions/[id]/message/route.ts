@@ -58,6 +58,7 @@ import {
   type StrategySession,
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
+import { normalizeSuggestedAsks } from "@/lib/strategy-suggested-asks";
 import {
   applyLedgerTurn,
   fillInstructionsFromDelivery,
@@ -127,9 +128,9 @@ reply 控制在 800 字內。項目完成或要換下一項時，用 ledgerOps�
 
 function jsonOnlySystem(template: StrategyTemplate, lean: boolean): string {
   if (lean) {
-    return `${template.systemPrompt}\n\n${leanSopBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision。\n可見回覆只寫「判定」（最多 5 行）和「交付命令」，命令原文同時放入 instructions。寫完後單獨一行輸出 ${STRATEGY_STATE_DELIMITER}，再輸出 JSON。\n${STREAM_REPLY_EMPTY_RULE}`;
+    return `${template.systemPrompt}\n\n${leanSopBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision, suggestedAsks。\nsuggestedAsks 寫 3 到 4 句使用者可直接送出的問句，每句點名 summary 裡的項目或缺口，禁止泛用盤點句，每句 40 字內。\n可見回覆只寫「判定」（最多 5 行）和「交付命令」，命令原文同時放入 instructions。寫完後單獨一行輸出 ${STRATEGY_STATE_DELIMITER}，再輸出 JSON。\n${STREAM_REPLY_EMPTY_RULE}`;
   }
-  return `${template.systemPrompt}\n\n${limitsBlock()}\n\n${ledgerProtocolBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision, reportFocus。\n可見回覆只寫「判定」（最多 5 行）和「交付命令」，命令原文同時放入 instructions。寫完後單獨一行輸出 ${STRATEGY_STATE_DELIMITER}，再輸出 JSON。\n${STREAM_REPLY_EMPTY_RULE}`;
+  return `${template.systemPrompt}\n\n${limitsBlock()}\n\n${ledgerProtocolBlock()}\nJSON 物件可另含欄位：ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision, reportFocus, suggestedAsks。\nsuggestedAsks 寫 3 到 4 句使用者可直接送出的問句，每句點名 summary 裡的項目或缺口，禁止泛用盤點句，每句 40 字內。\n可見回覆只寫「判定」（最多 5 行）和「交付命令」，命令原文同時放入 instructions。寫完後單獨一行輸出 ${STRATEGY_STATE_DELIMITER}，再輸出 JSON。\n${STREAM_REPLY_EMPTY_RULE}`;
 }
 
 function streamLeadSystem(template: StrategyTemplate, lean: boolean): string {
@@ -137,7 +138,8 @@ function streamLeadSystem(template: StrategyTemplate, lean: boolean): string {
 
 ${lean ? leanSopBlock() : `${limitsBlock()}\n\n${ledgerProtocolBlock()}`}
 
-結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, roomQueries；需要時另加 ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision${lean ? "" : ", reportFocus"}。
+結構化 JSON 欄位必須包含：reply, phase, instructions, reportRequests, memoryUpdates, canStartRun, openQuestions, summary, suggestedAsks, roomQueries；需要時另加 ledgerOps, workPackage, verdict, verdictReason, conclusion, escalationDecision${lean ? "" : ", reportFocus"}。
+suggestedAsks 寫 3 到 4 句使用者可直接送出的問句，每句點名 summary 裡的項目或缺口，禁止泛用盤點句，每句 40 字內。
 分隔標記必須單獨一行：${STRATEGY_STATE_DELIMITER}
 要 Cursor 做事時，分隔線前只寫「判定」（最多 5 行）和「交付命令」，命令原文放入 instructions。
 ${STREAM_REPLY_EMPTY_RULE}`;
@@ -370,6 +372,7 @@ function parseAssistantStructured(
 
   const nextDossier = mergeDossier(dossier, parsed.memoryUpdates);
   const summary = typeof parsed.summary === "string" ? parsed.summary.trim() : "";
+  const suggestedAsks = normalizeSuggestedAsks(parsed.suggestedAsks);
   const roomQueries = Array.isArray(parsed.roomQueries) ? parsed.roomQueries.slice(0, L.roomQueriesPerTurn) : [];
 
   return {
@@ -381,6 +384,7 @@ function parseAssistantStructured(
     nextStatus,
     nextDossier,
     summary,
+    suggestedAsks,
     roomQueries,
     contextChars,
   };
@@ -887,6 +891,7 @@ async function finalizeTurn(input: {
     nextStatus,
     nextDossier,
     summary,
+    suggestedAsks,
     roomQueries,
   } = parsedPack;
   const instructions = fillInstructionsFromDelivery(reply, parsedPack.instructions, parsedPack.parsed.workPackage);
@@ -1027,6 +1032,8 @@ async function finalizeTurn(input: {
       reportFocus: readReportFocus({ reportFocus: parsedPack.parsed.reportFocus }),
       ...(ledgerResult ? { ledger: ledgerResult.ledger } : {}),
     };
+    if (suggestedAsks.length) nextMeta.suggestedAsks = suggestedAsks;
+    else delete nextMeta.suggestedAsks;
     try {
       nextMeta = await absorbStrategyRoomMemory({
         userId: input.authUserId,

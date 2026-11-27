@@ -37,6 +37,7 @@ import {
 } from "@/components/strategy-types";
 import SafeLightMarkdown from "@/components/SafeLightMarkdown";
 import { createAdaptiveDripDriver } from "@/lib/adaptive-drip";
+import { asksFromSummary, normalizeSuggestedAsks } from "@/lib/strategy-suggested-asks";
 import {
   applyServerTemplateId,
   beginTemplateSave,
@@ -382,6 +383,13 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
   const serverTemplateRaw = detail.session.templateId ?? null;
   const activeTemplateId = displayTemplateId(templateDraft, serverTemplateRaw, fallbackTemplateId);
   const activeTemplate = templates.find((t) => t.id === activeTemplateId) ?? templates[0];
+  const quickChips = useMemo(() => {
+    const fromHost = normalizeSuggestedAsks(detail.session.suggestedAsks);
+    if (fromHost.length) return fromHost;
+    const fromSummary = asksFromSummary(detail.session.summary || "");
+    if (fromSummary.length) return fromSummary;
+    return activeTemplate?.quickPrompts ?? [];
+  }, [detail.session.suggestedAsks, detail.session.summary, activeTemplate?.quickPrompts]);
 
   streamingRef.current = streaming;
   const generatingRef = useRef(false);
@@ -1749,10 +1757,10 @@ export default function StrategyRoomView(props: StrategyRoomViewProps) {
             </div>
           ) : null}
 
-          {activeTemplate?.quickPrompts?.length ? (
-            <div className="strategy-quick-chips" aria-label="快捷引導">
-              {activeTemplate.quickPrompts.map((p) => (
-                <button key={p} type="button" className="strategy-chip" disabled={streaming} onClick={() => applyChip(p)}>
+          {quickChips.length ? (
+            <div className="strategy-quick-chips" aria-label="依摘要的快捷問句">
+              {quickChips.map((p) => (
+                <button key={p} type="button" className="strategy-chip" title={p} disabled={streaming} onClick={() => applyChip(p)}>
                   {p}
                 </button>
               ))}

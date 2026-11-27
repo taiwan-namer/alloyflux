@@ -74,6 +74,7 @@ const JSON_SCHEMA_CORE = `## 每次只輸出一個 JSON 物件
   "canStartRun": false,
   "openQuestions": ["未解問題"],
   "summary": "本會議室目前的完整結論",
+  "suggestedAsks": ["依 summary 可直接送出的短問句，3到4句，每句必須點名摘要裡的項目或缺口"],
   "roomQueries": [{"roomId": "sess_…", "question": "要查的問題"}]
 }
 規則：只限 paper／testnet／本機驗證，不建議實盤下單。引用數字要來自報告或 dossier，不可臆造。fPlan 未定案時給 null。`;
@@ -99,6 +100,7 @@ ${JSON_SCHEMA_CORE}
 
 ## 主體與其他會議室
 - summary：每回合給「本會議室目前結論」完整最新版。
+- suggestedAsks：3 到 4 句，給使用者一點就送出。每句對應 summary 的具體項目、缺口或不能宣稱的事，禁止與本室無關的泛用盤點句。每句 40 字內。
 - roomQueries：需要另一間會議室細節時才用。
 - 發言者可能是 Cursor 或使用者（網頁）；instructions 不一定立刻派送。`,
     streamLeadPreface: `你是 automax 量化策略「會議室」主導者。先用繁體中文清楚回覆使用者／Cursor（可分段、可列點），不要先輸出 JSON。

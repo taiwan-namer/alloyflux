@@ -209,6 +209,7 @@ function slimStrategyOpen(detail: StrategySessionDetail): StrategySessionDetail 
       templateId: session.templateId ?? null,
       topic: session.topic,
       summary: session.summary,
+      suggestedAsks: session.suggestedAsks,
       autoDispatch: session.autoDispatch,
       pauseState: session.pauseState,
       updatedAt: session.updatedAt,

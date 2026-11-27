@@ -21,6 +21,7 @@ import {
   type StrategySessionStatus,
 } from "@/lib/strategy-loop";
 import { projectVisibleDelivery, readLedger, renderLedgerForHuman, validateLedgerInput } from "@/lib/strategy-ledger";
+import { normalizeSuggestedAsks } from "@/lib/strategy-suggested-asks";
 
 export const dynamic = "force-dynamic";
 
@@ -101,8 +102,9 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     ? null
     : projectVisibleDelivery(readLedger(session.meta), page.messages);
   const { meta: _meta, pendingInstructions: _pending, ...threadSession } = session;
+  const suggestedAsks = normalizeSuggestedAsks(session.meta?.suggestedAsks);
   return Response.json({
-    session: threadOnly ? threadSession : session,
+    session: { ...(threadOnly ? threadSession : session), suggestedAsks },
     dossier: threadOnly
       ? { strategies: {}, findings: [], decisions: [], fPlan: null }
       : readDossier(session.meta),

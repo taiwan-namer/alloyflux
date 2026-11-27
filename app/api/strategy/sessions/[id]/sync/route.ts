@@ -3,6 +3,7 @@ import { authenticateStrategyReader } from "@/lib/platform-api-auth";
 import {
   getSessionSyncMeta,
   getStrategySession,
+  readSessionSuggestedAsks,
   listRunsForSessionBrief,
   listSessionDispatch,
   listSessionMessagesAfter,
@@ -66,7 +67,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     grown > 0 && grown <= 8 ? Math.min(8, Math.max(requested, grown + 1)) : requested;
   // 客戶端帶本機最新一則游標：補齊游標之後的全部新訊息，避免閒置回來新增太多時中間缺一段
   const after = url.searchParams.get("after");
-  const [page, gapFill, runs, reportRows, dispatch] = await Promise.all([
+  const [page, gapFill, runs, reportRows, dispatch, suggestedAsks] = await Promise.all([
     listSessionMessagesPage(auth.user.id, id, {
       limit: pageLimit,
       skipTotal: true,
@@ -75,6 +76,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     listRunsForSessionBrief(auth.user.id, id, 10),
     listSessionReports(auth.user.id, id, 30, { includeContent: false }),
     listSessionDispatch(auth.user.id, id, 50),
+    readSessionSuggestedAsks(auth.user.id, id),
   ]);
   let messages = page.messages;
   if (gapFill?.messages.length) {
@@ -106,7 +108,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
     nextCursor: page.nextCursor,
     messageTotal: page.total,
     workspaceMemoryNotes: meta.workspaceMemoryNotes,
-    session: lightSession,
+    session: { ...lightSession, suggestedAsks },
     messages,
     gap,
     runs,

@@ -7,6 +7,7 @@ import {
   type RecommendedModelSlot,
   type StrategyTemplate,
 } from "./strategy-templates";
+import { normalizeSuggestedAsks } from "./strategy-suggested-asks";
 
 export type StrategyPlanStatus =
   | "pending_code"
@@ -1170,6 +1171,32 @@ export async function readSessionLedgerRaw(
     return { found: true, ledger };
   } catch {
     return { found: false, ledger: null };
+  }
+}
+
+/** 同步不讀整包 meta，只取主持人寫好的摘要問句 */
+export async function readSessionSuggestedAsks(userId: string, sessionId: string): Promise<string[]> {
+  await ensureTables();
+  try {
+    const row = (await db()
+      .prepare(
+        `SELECT (meta_json::jsonb -> 'suggestedAsks') AS asks
+         FROM strategy_sessions
+         WHERE id = ? AND user_id = ? AND deleted_at IS NULL`,
+      )
+      .get(sessionId, userId)) as { asks?: unknown } | undefined;
+    if (!row) return [];
+    let asks: unknown = row.asks ?? null;
+    if (typeof asks === "string") {
+      try {
+        asks = JSON.parse(asks) as unknown;
+      } catch {
+        asks = null;
+      }
+    }
+    return normalizeSuggestedAsks(asks);
+  } catch {
+    return [];
   }
 }
 
