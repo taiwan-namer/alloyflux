@@ -29,6 +29,10 @@ import {
   type StrategyWorkspaceBrief,
   type ViewMode,
 } from "@/components/strategy-types";
+import {
+  isStrategySnapshotAtLeastAsFresh,
+  mergeStrategyMessages,
+} from "@/lib/strategy-open-cache";
 
 type Effort = "low" | "medium" | "high";
 type Brand = "gpt" | "claude" | "gemini" | "grok";
@@ -2457,6 +2461,11 @@ export default function ChatPage() {
 
   function putStrategyCache(id: string, detail: StrategySessionDetail) {
     const map = strategyCacheRef.current;
+    const existing = map.get(id) ?? readStrategyOpenSession(id);
+    if (existing && !isStrategySnapshotAtLeastAsFresh(detail, existing.detail)) {
+      // 拒絕較舊 snapshot 覆寫（晚到的 open fetch／prefetch 常見）
+      return;
+    }
     const entry: StrategyCacheEntry = { detail: slimStrategyOpen(detail), at: Date.now() };
     map.set(id, entry);
     writeStrategyOpenSession(id, entry);
@@ -2551,12 +2560,7 @@ export default function ChatPage() {
       let hasMore = Boolean(detail.hasMore);
       let nextCursor = detail.nextCursor ?? null;
       if (opts.keepOlder && same && prev && prev.messages.length) {
-        const byId = new Map(prev.messages.map((m) => [m.id, m]));
-        for (const m of messages) byId.set(m.id, m);
-        messages = [...byId.values()].sort((a, b) => {
-          const dt = (a.createdAt || 0) - (b.createdAt || 0);
-          return dt !== 0 ? dt : String(a.id).localeCompare(String(b.id));
-        });
+        messages = mergeStrategyMessages(prev.messages, messages);
         const incomingOldest = detail.messages[0];
         const mergedOldest = messages[0];
         if (
@@ -2577,7 +2581,7 @@ export default function ChatPage() {
         !detail.dossier?.decisions?.length &&
         !detail.dossier?.fPlan &&
         !Object.keys(detail.dossier?.strategies ?? {}).length;
-      return {
+      const next: StrategySessionDetail = {
         ...detail,
         messages,
         hasMore,
@@ -2593,9 +2597,15 @@ export default function ChatPage() {
             : same
               ? prev?.ledgerText
               : "",
+        messageTotal:
+          typeof detail.messageTotal === "number"
+            ? Math.max(detail.messageTotal, messages.length, same ? prev?.messageTotal ?? 0 : 0)
+            : Math.max(messages.length, same ? prev?.messageTotal ?? 0 : 0),
       };
+      // 快取合併後狀態，勿寫 raw incoming（否則重開會被舊 snapshot 退回）
+      putStrategyCache(detail.session.id, next);
+      return next;
     });
-    putStrategyCache(detail.session.id, detail);
     const ws = strategyWorkspaces.find((w) => w.id === detail.session.workspaceId);
     if (opts.refreshMemory && (opts.switching || !wsMemoryDirty)) {
       setWsMemoryDraft(ws?.memory.notes ?? "");
@@ -2653,7 +2663,7 @@ export default function ChatPage() {
       applyStrategyDetail(hit.detail, { switching, refreshMemory: true, keepOlder: !switching });
       refreshStrategyLedger(id);
       setStrategyBusy(false);
-      if (Date.now() - hit.at < 20_000) return;
+      // 一律背景重抓校正（勿因 20 秒短路讓手機重開停在過期快取）
       void ensureStrategyFetch(id).then((fresh) => {
         if (reqId !== openStrategyReqRef.current || ac.signal.aborted || !fresh) return;
         applyStrategyDetail(fresh, {
@@ -2886,13 +2896,7 @@ export default function ChatPage() {
       let nextHasMore = typeof data.hasMore === "boolean" ? data.hasMore : prev.hasMore;
       let nextCursor = data.nextCursor !== undefined ? data.nextCursor : prev.nextCursor;
       if (Array.isArray(data.messages)) {
-        const byId = new Map<string, (typeof prev.messages)[number]>();
-        for (const m of prev.messages) byId.set(m.id, m);
-        for (const m of data.messages) byId.set(m.id, m);
-        nextMessages = [...byId.values()].sort((a, b) => {
-          const dt = (a.createdAt || 0) - (b.createdAt || 0);
-          return dt !== 0 ? dt : String(a.id).localeCompare(String(b.id));
-        });
+        nextMessages = mergeStrategyMessages(prev.messages, data.messages);
         const syncOldest = data.messages[0];
         const mergedOldest = nextMessages[0];
         // 已載入比 sync 頁更舊的訊息時，保留原本的 hasMore／cursor
@@ -4669,8 +4673,9 @@ export default function ChatPage() {
             if (strategyDetail?.session.id) void openStrategySession(strategyDetail.session.id, { force: true });
           }}
           onStreamCommitted={async (sid) => {
-            // #9：不再整房重載；只背景刷側欄；失效該房快取以免再開是舊的
+            // #9：不再整房重載；只背景刷側欄；記憶體＋sessionStorage 一併失效，避免手機重開吃到舊窗
             strategyCacheRef.current.delete(sid);
+            deleteStrategyOpenSession(sid);
             void refreshStrategySessions();
           }}
           onRefreshWallet={() => {
