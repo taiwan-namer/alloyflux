@@ -1,0 +1,11 @@
+{
+  "name": "@alloyflux/cursor-connector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "付費用戶常駐連線：長輪詢取已派送指令，遇錯自動重試、不因紅字／空列表退出",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "listen": "tsx src/index.ts listen"
+  }
+}

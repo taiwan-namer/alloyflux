@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
-# Cursor 常駐取指令（長輪詢）：有新 dispatched 立刻拿到，取代每五分鐘盲爬。
-# 用法：
-#   export ALLOYFLUX_URL=https://alloyflux.vercel.app
-#   export ALLOYFLUX_API_KEY=sk_live_...
-#   ./scripts/cursor-dispatch-wait.example.sh
-set -euo pipefail
-BASE="${ALLOYFLUX_URL:?set ALLOYFLUX_URL}"
+# 簡易長輪詢（開發用）。付費用戶請改用：
+#   ALLOYFLUX_API_KEY=sk_live_… npm run cursor-connector
+set -uo pipefail
+BASE="${ALLOYFLUX_URL:-https://alloyflux.vercel.app}"
 KEY="${ALLOYFLUX_API_KEY:?set ALLOYFLUX_API_KEY}"
 WAIT_MS="${DISPATCH_WAIT_MS:-25000}"
+BACKOFF=1
 
 echo "listening for dispatched instructions (waitMs=${WAIT_MS})…"
 while true; do
-  RESP="$(curl -fsS -H "Authorization: Bearer ${KEY}" \
-    "${BASE}/api/strategy/dispatch?status=dispatched&waitMs=${WAIT_MS}")"
-  COUNT="$(printf '%s' "$RESP" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('items') or []))")"
+  if ! RESP="$(curl -fsS -H "Authorization: Bearer ${KEY}" \
+    "${BASE%/}/api/strategy/dispatch?status=dispatched&waitMs=${WAIT_MS}" 2>/tmp/af-dispatch-err)"; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) wait failed: $(cat /tmp/af-dispatch-err 2>/dev/null); retry ${BACKOFF}s"
+    sleep "$BACKOFF"
+    BACKOFF=$(( BACKOFF < 30 ? BACKOFF * 2 : 30 ))
+    continue
+  fi
+  BACKOFF=1
+  COUNT="$(printf '%s' "$RESP" | python3 -c "import sys,json; print(len(json.load(sys.stdin).get('items') or []))" 2>/dev/null || echo 0)"
   if [[ "$COUNT" -gt 0 ]]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) got ${COUNT} item(s)"
     printf '%s\n' "$RESP"
-    # 在此交給 Cursor／本地 agent 執行，完成後呼叫：
-    # POST /api/strategy/dispatch/:id/done
   fi
 done
